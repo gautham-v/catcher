@@ -5,6 +5,7 @@ mod config;
 mod editor;
 mod images;
 mod index;
+mod keys;
 mod md;
 mod notes;
 mod render;

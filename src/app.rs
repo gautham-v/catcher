@@ -2,6 +2,7 @@ use crate::config::{Config, PreviewClick};
 use crate::editor::{Editor, Pos};
 use crate::images::Images;
 use crate::index;
+use crate::keys::Action;
 use crate::md;
 use crate::notes::{self, Note};
 use crate::search;
@@ -86,43 +87,42 @@ const COMMANDS: [Command; 8] = [
 ];
 
 impl Command {
+    /// The action this command runs, when it is one a key can be bound to —
+    /// which is how the palette knows what key to show beside it.
+    pub fn action(&self) -> Option<Action> {
+        Some(match self {
+            Command::NewNote => Action::NewNote,
+            Command::QuickOpen => Action::QuickOpen,
+            Command::DeleteNote => Action::DeleteNote,
+            Command::RenameFile => Action::RenameFile,
+            Command::TogglePreview => Action::TogglePreview,
+            Command::Shortcuts => Action::Shortcuts,
+            Command::OpenSettings => Action::Settings,
+            Command::Quit => Action::Quit,
+        })
+    }
+
     pub fn label(&self) -> (&'static str, &'static str) {
         match self {
             Command::NewNote => ("New note", "create an empty note and start typing"),
-            Command::QuickOpen => ("Open note", "any note in the vault, recent first  ^O"),
+            Command::QuickOpen => ("Open note", "any note in the vault, recent first"),
             Command::DeleteNote => ("Delete note", "remove the note on screen"),
             Command::RenameFile => ("Rename file", "change the filename on disk"),
             Command::TogglePreview => ("Toggle preview", "rendered markdown, read-only"),
-            Command::Shortcuts => ("Keyboard shortcuts", "every binding, on one card  ^G"),
-            Command::OpenSettings => ("Settings", "edit them here, as a note  ^,"),
+            Command::Shortcuts => ("Keyboard shortcuts", "every binding, on one card"),
+            Command::OpenSettings => ("Settings", "edit them here, as a note"),
             Command::Quit => ("Quit", "save and exit"),
         }
     }
 }
 
-/// Every binding, grouped, for the ^G card. The single source of truth: the
-/// status bar's hints and this list are the only places bindings are named,
-/// so a key that isn't here isn't discoverable and shouldn't exist.
+/// The bindings that are *not* settable: editor motions, and the keys an
+/// overlay answers to while it is open. The rebindable ones come from
+/// [`crate::keys::Keymap`], so a rebound key is right on this card too.
 pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
-    (
-        "notes",
-        &[
-            ("^K", "command palette — search notes, run commands"),
-            ("^O", "open a note — every folder, recent first"),
-            ("^N", "new note"),
-            ("^,", "settings, as a note you can edit"),
-            ("^S", "save now (notes autosave anyway)"),
-            ("^P", "toggle rendered preview"),
-            ("^Q", "save and quit"),
-        ],
-    ),
     (
         "editing",
         &[
-            ("^Z", "undo"),
-            ("^Y  ⇧^Z", "redo"),
-            ("^C  ^X", "copy / cut selection"),
-            ("^V", "paste — an image becomes an attachment"),
             ("⌘A", "select all"),
             ("⌥⌫", "delete the word before the cursor"),
             ("⌘⌫", "delete to the start of the line"),
@@ -713,105 +713,23 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        // Cmd stands in for Ctrl on these, for terminals that report it: ⌘Z
-        // and friends are what a Mac hand reaches for first. The buffer's own
-        // Cmd bindings are all arrows and backspace, so nothing collides.
         let cmd = key.modifiers.contains(KeyModifiers::SUPER);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         if cmd && matches!(key.code, KeyCode::Char('a')) {
             self.editor.select_all();
             return;
         }
-        // global bindings
-        match (ctrl || cmd, key.code) {
-            (true, KeyCode::Char('q')) => {
-                self.sync_editor_to_note();
-                self.save_now();
-                self.quit = true;
-                return;
-            }
-            (true, KeyCode::Char('c')) => {
-                if self.view == View::Preview {
-                    self.copy_preview_selection();
-                } else {
-                    self.copy_selection();
-                }
-                return;
-            }
-            (true, KeyCode::Char('x')) => {
-                self.cut_selection();
-                return;
-            }
-            (true, KeyCode::Char('s')) => {
-                self.sync_editor_to_note();
-                // saving the settings note reports what it applied, which is
-                // more use than being told the file was written
-                let settings = self.editing_settings();
-                self.save_now();
-                if !settings {
-                    self.flash("saved".to_string());
-                }
-                return;
-            }
-            // ⇧^Z is redo, the way every other editor spells it
-            (true, KeyCode::Char('z' | 'Z')) => {
-                if shift {
-                    self.redo();
-                } else {
-                    self.undo();
-                }
-                return;
-            }
-            (true, KeyCode::Char('y')) => {
-                self.redo();
-                return;
-            }
-            (true, KeyCode::Char('g')) => {
-                self.overlay = if self.overlay == Overlay::Help {
-                    Overlay::None
-                } else {
-                    Overlay::Help
-                };
-                return;
-            }
-            (true, KeyCode::Char('v')) => {
-                self.overlay = Overlay::None;
-                self.paste();
-                return;
-            }
-            (true, KeyCode::Char('k')) => {
-                if matches!(self.overlay, Overlay::Palette | Overlay::QuickOpen) {
-                    self.overlay = Overlay::None;
-                } else {
-                    self.open_palette();
-                }
-                return;
-            }
-            (true, KeyCode::Char('o')) => {
-                if self.overlay == Overlay::QuickOpen {
-                    self.overlay = Overlay::None;
-                } else {
-                    self.open_quick_open();
-                }
-                return;
-            }
-            (true, KeyCode::Char(',')) => {
-                self.overlay = Overlay::None;
-                self.open_settings();
-                return;
-            }
-            (true, KeyCode::Char('n')) => {
-                self.overlay = Overlay::None;
-                self.new_note();
-                return;
-            }
-            (true, KeyCode::Char('p')) => {
-                self.overlay = Overlay::None;
-                self.toggle_preview();
-                return;
-            }
-            _ => {}
+        // ⇧^Z is redo, the way every other editor spells it — checked before
+        // the keymap, which sees ^Z and ⇧^Z as the same key on purpose
+        if shift && (ctrl || cmd) && matches!(key.code, KeyCode::Char('z' | 'Z')) {
+            self.redo();
+            return;
+        }
+        // whatever the settings say this key does, if anything
+        if let Some(action) = self.config.keys.action(&key) {
+            self.run_action(action);
+            return;
         }
 
         match self.overlay {
@@ -873,6 +791,80 @@ impl App {
                     }
                 }
             },
+        }
+    }
+
+    /// Do one of the actions a key can be bound to. The single place a
+    /// binding leads, so the palette, the ^G card and the settings all agree
+    /// about what a key does.
+    fn run_action(&mut self, action: Action) {
+        match action {
+            Action::Palette => {
+                if matches!(self.overlay, Overlay::Palette | Overlay::QuickOpen) {
+                    self.overlay = Overlay::None;
+                } else {
+                    self.open_palette();
+                }
+            }
+            Action::QuickOpen => {
+                if self.overlay == Overlay::QuickOpen {
+                    self.overlay = Overlay::None;
+                } else {
+                    self.open_quick_open();
+                }
+            }
+            Action::NewNote => {
+                self.overlay = Overlay::None;
+                self.new_note();
+            }
+            Action::Settings => {
+                self.overlay = Overlay::None;
+                self.open_settings();
+            }
+            Action::TogglePreview => {
+                self.overlay = Overlay::None;
+                self.toggle_preview();
+            }
+            Action::Save => {
+                self.sync_editor_to_note();
+                // saving the settings note reports what it applied, which is
+                // more use than being told the file was written
+                let settings = self.editing_settings();
+                self.save_now();
+                if !settings {
+                    self.flash("saved".to_string());
+                }
+            }
+            Action::Shortcuts => {
+                self.overlay = if self.overlay == Overlay::Help {
+                    Overlay::None
+                } else {
+                    Overlay::Help
+                };
+            }
+            Action::Quit => {
+                self.sync_editor_to_note();
+                self.save_now();
+                self.quit = true;
+            }
+            Action::Copy => {
+                if self.view == View::Preview {
+                    self.copy_preview_selection();
+                } else {
+                    self.copy_selection();
+                }
+            }
+            Action::Cut => self.cut_selection(),
+            Action::Paste => {
+                self.overlay = Overlay::None;
+                self.paste();
+            }
+            Action::Undo => self.undo(),
+            Action::Redo => self.redo(),
+            Action::DeleteNote => {
+                self.overlay = Overlay::ConfirmDelete;
+            }
+            Action::RenameFile => self.open_rename(),
         }
     }
 

@@ -488,21 +488,33 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         right_spans.push(Span::styled(format!("{msg}   "), theme::state()));
     }
     if app.config.key_hints {
+        use crate::keys::Action;
+        // built from the bindings in force, so a rebound key is right here
+        // too, and an unbound one is simply not offered
+        let keys = &app.config.keys;
         // ^P is a toggle, so the hint names where it goes, not where you are
         let flip = match app.view {
-            View::Edit => "^P preview",
-            View::Preview => "^P edit",
+            View::Edit => "preview",
+            View::Preview => "edit",
         };
+        let mut hints: Vec<String> = Vec::new();
         // ← → only earns a place in the bar when there is something to pan
-        let pan = if app.view == View::Preview && app.preview_hmax > 0 {
-            "← → table  "
-        } else {
-            ""
-        };
-        right_spans.push(Span::styled(
-            format!("{pan}^K palette  ^O open  ^N new  {flip}  ^G shortcuts "),
-            dim(),
-        ));
+        if app.view == View::Preview && app.preview_hmax > 0 {
+            hints.push("← → table".to_string());
+        }
+        for (action, what) in [
+            (Action::Palette, "palette"),
+            (Action::QuickOpen, "open"),
+            (Action::NewNote, "new"),
+            (Action::TogglePreview, flip),
+            (Action::Shortcuts, "shortcuts"),
+        ] {
+            let key = keys.label(action);
+            if !key.is_empty() {
+                hints.push(format!("{key} {what}"));
+            }
+        }
+        right_spans.push(Span::styled(format!("{}  ", hints.join("  ")), dim()));
     }
     let right = Line::from(right_spans);
     f.render_widget(Paragraph::new(left), area);
@@ -521,37 +533,69 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let items = app.overlay_items();
     let quick = app.overlay == Overlay::QuickOpen;
     let shown = items.len().min(10) as u16;
-    let rect = overlay_rect(f, shown + 3);
+    // the prompt, a rule under it, and the rows
+    let rect = overlay_rect(f, shown + 4);
     f.render_widget(Clear, rect);
     let block = panel(app);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let mut rows = vec![Constraint::Length(1); shown as usize + 1];
-    rows[0] = Constraint::Length(1);
+    let mut rows = vec![Constraint::Length(1); shown as usize + 2];
+    rows[1] = Constraint::Length(1);
     let chunks = Layout::vertical(rows).split(inner);
 
+    // ❯ marks where you type, so the prompt reads as an input and not as the
+    // first row of the list
+    let caret = Span::styled(" ❯ ", theme::state());
     let prompt = if app.query.is_empty() {
         let hint = if quick {
-            "open a note — any folder, most recent first…"
+            "open a note — any folder, most recent first"
         } else {
-            "search notes or run a command…"
+            "search notes or run a command"
         };
-        Line::from(Span::styled(hint, dim()))
+        Line::from(vec![caret, Span::styled(hint, dim())])
     } else {
-        Line::from(app.query.as_str())
+        Line::from(vec![
+            caret,
+            Span::styled(
+                app.query.as_str(),
+                Style::new().add_modifier(Modifier::BOLD),
+            ),
+        ])
     };
     f.render_widget(Paragraph::new(prompt), chunks[0]);
     f.set_cursor_position((
-        chunks[0].x + crate::md::str_width(&app.query) as u16,
+        chunks[0].x + 3 + crate::md::str_width(&app.query) as u16,
         chunks[0].y,
     ));
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(inner.width.saturating_sub(2) as usize),
+            theme::border(),
+        )))
+        .style(theme::border()),
+        chunks[1].inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 0,
+        }),
+    );
 
     app.selected = app.selected.min(items.len().saturating_sub(1));
     app.palette_rows.clear();
     let start = app
         .selected
         .saturating_sub(shown.saturating_sub(1) as usize);
+    // the widest key on screen, so the key column lines up down the list
+    let keyw = items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Command(c) => c.action().map(|a| app.config.keys.label(a)),
+            _ => None,
+        })
+        .map(|k| crate::md::str_width(&k))
+        .max()
+        .unwrap_or(0);
+
     for (row_i, (i, item)) in items
         .iter()
         .enumerate()
@@ -559,56 +603,58 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
         .take(shown as usize)
         .enumerate()
     {
-        let area = chunks[row_i + 1];
+        let area = chunks[row_i + 2];
         let selected = i == app.selected;
-        let (name, detail, tag) = match item {
-            Item::Command(c) => {
-                let (n, d) = c.label();
-                (n.to_string(), d.to_string(), "command")
-            }
-            Item::Note(idx) => {
-                let n = &app.notes[*idx];
-                // a detached filename is worth seeing here too; the search
-                // itself still runs against the title and the body
-                let name = match n.detached_name() {
-                    Some(name) => format!("{} ({name})", n.title()),
-                    None => n.title(),
-                };
-                (name, n.snippet(), "")
-            }
-            // quick-open shows the folder rather than a body snippet: two
-            // notes called "log" are told apart by where they live, and the
-            // list is ranked by what was opened last, not by what it says
-            // a typed path that exists — always the top row, and labelled so
-            // it is clear this is the file on disk and not a search hit
-            Item::Path(path) => (
-                path.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                crate::index::short(path.parent().unwrap_or(path)),
-                "path",
-            ),
-            Item::Entry(idx) => match app.open_index.get(*idx) {
-                Some(e) => (e.title.clone(), e.folder.clone(), ""),
-                None => (String::new(), String::new(), ""),
-            },
+        let (name, detail, tag) = row_text(app, item);
+        // quick-open is all notes, so the tag would say the same thing on
+        // every row; in the palette it is what tells a command from a note
+        let tag = if quick && tag == "note" { "" } else { tag };
+        let key = match item {
+            Item::Command(c) => c
+                .action()
+                .map(|a| app.config.keys.label(a))
+                .unwrap_or_default(),
+            _ => String::new(),
         };
-        let base = if selected {
-            Style::new().add_modifier(Modifier::REVERSED)
+
+        // an accent bar rather than a reversed block: the selection should
+        // point at a row, not repaint it
+        let bar = if selected { "▌" } else { " " };
+        let title = if selected {
+            Style::new()
+                .fg(theme::palette().bright)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::new()
         };
-        let line = Line::from(vec![
-            Span::styled(format!(" {name}  "), base.add_modifier(Modifier::BOLD)),
-            Span::styled(
-                detail.chars().take(40).collect::<String>(),
-                base.patch(dim()),
-            ),
-        ]);
-        f.render_widget(Paragraph::new(line).style(base), area);
+        let namew = (area.width as usize)
+            .saturating_sub(4 + keyw + 2 + tag_width(tag))
+            .clamp(8, 26);
+        let padded = pad_to(&name, namew);
+        // three columns of air before the key, so the description never runs
+        // into it however long it is
+        let detailw =
+            (area.width as usize).saturating_sub(3 + namew + 2 + keyw + 3 + tag_width(tag));
+
+        let mut spans = vec![
+            Span::styled(format!(" {bar} "), theme::state()),
+            Span::styled(padded, title),
+            Span::styled("  ", Style::new()),
+            Span::styled(truncate(&detail, detailw), dim()),
+        ];
         if !tag.is_empty() {
+            spans.push(Span::styled(format!(" · {tag}"), dim()));
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        // the key sits in its own right-hand column, where the eye can find
+        // it without reading the description first
+        if !key.is_empty() {
             f.render_widget(
-                Paragraph::new(Span::styled(format!("{tag} "), base.patch(dim()))).right_aligned(),
+                Paragraph::new(Span::styled(
+                    format!("{key} "),
+                    theme::bright().add_modifier(Modifier::BOLD),
+                ))
+                .right_aligned(),
                 area,
             );
         }
@@ -616,12 +662,78 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     }
 }
 
+/// Title, description and type tag for one palette row.
+fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
+    match item {
+        Item::Command(c) => {
+            let (n, d) = c.label();
+            (n.to_string(), d.to_string(), "")
+        }
+        Item::Note(idx) => {
+            let n = &app.notes[*idx];
+            // a detached filename is worth seeing here too; the search itself
+            // still runs against the title and the body
+            let name = match n.detached_name() {
+                Some(name) => format!("{} ({name})", n.title()),
+                None => n.title(),
+            };
+            (name, n.snippet(), "note")
+        }
+        // a typed path that exists — labelled so it is clear this is the file
+        // on disk and not a search hit
+        Item::Path(path) => (
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            crate::index::short(path.parent().unwrap_or(path)),
+            "path",
+        ),
+        Item::Entry(idx) => match app.open_index.get(*idx) {
+            Some(e) => (e.title.clone(), e.folder.clone(), "note"),
+            None => (String::new(), String::new(), ""),
+        },
+    }
+}
+
+fn tag_width(tag: &str) -> usize {
+    if tag.is_empty() {
+        0
+    } else {
+        crate::md::str_width(tag) + 3
+    }
+}
+
+/// `text` cut to `width` columns and padded out to it, so a column of them
+/// lines up whatever is in each.
+fn pad_to(text: &str, width: usize) -> String {
+    let cut = truncate(text, width);
+    let pad = width.saturating_sub(crate::md::str_width(&cut));
+    format!("{cut}{}", " ".repeat(pad))
+}
+
+fn truncate(text: &str, width: usize) -> String {
+    crate::md::truncate(text, width)
+}
+
 /// The ^G card: every binding, in the groups `app::SHORTCUTS` declares. Sized
 /// to its content and centred, and dismissed by any key at all — it is a
 /// reference to glance at, not a mode to get stuck in.
 fn draw_help(f: &mut Frame, app: &App) {
+    // the settable bindings first, as the settings currently have them
+    let bound = app.config.keys.card_rows();
+    let groups: Vec<(&str, Vec<(String, &str)>)> = std::iter::once(("keys", bound))
+        .chain(crate::app::SHORTCUTS.iter().map(|(g, rows)| {
+            (
+                *g,
+                rows.iter()
+                    .map(|(k, w)| (k.to_string(), *w))
+                    .collect::<Vec<_>>(),
+            )
+        }))
+        .collect();
+
     // the widest key column, so the descriptions line up down the whole card
-    let keyw = crate::app::SHORTCUTS
+    let keyw = groups
         .iter()
         .flat_map(|(_, rows)| rows.iter())
         .map(|(k, _)| crate::md::str_width(k))
@@ -629,7 +741,7 @@ fn draw_help(f: &mut Frame, app: &App) {
         .unwrap_or(0);
 
     let mut lines: Vec<Line> = Vec::new();
-    for (i, (group, rows)) in crate::app::SHORTCUTS.iter().enumerate() {
+    for (i, (group, rows)) in groups.iter().enumerate() {
         if i > 0 {
             lines.push(Line::default());
         }
@@ -638,13 +750,13 @@ fn draw_help(f: &mut Frame, app: &App) {
             theme::bright().add_modifier(Modifier::BOLD),
         )));
         for (key, what) in rows.iter() {
-            let pad = " ".repeat(keyw - crate::md::str_width(key));
+            let pad = " ".repeat(keyw.saturating_sub(crate::md::str_width(key)));
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {pad}{key}  "),
                     theme::bright().add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(*what, dim()),
+                Span::styled(what.to_string(), dim()),
             ]));
         }
     }

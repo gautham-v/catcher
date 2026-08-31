@@ -14,6 +14,7 @@
 //! `TINYNOTE_DIR=/tmp/x cargo run` working. An old `config.toml` is read once,
 //! to seed `settings.md` the first time, and never again.
 
+use crate::keys::Keymap;
 use crate::md::theme::{self, Mode, Palette};
 use anyhow::{Context, Result};
 use std::fs;
@@ -82,6 +83,8 @@ pub struct Config {
     /// Folders quick-open searches besides the notes dir — another vault, a
     /// work folder. Empty by default.
     pub quick_open_dirs: Vec<PathBuf>,
+    /// What every key does, defaults included.
+    pub keys: Keymap,
 }
 
 impl Default for Config {
@@ -105,6 +108,7 @@ impl Default for Config {
             preview_click: PreviewClick::Select,
             quick_open_recursive: true,
             quick_open_dirs: Vec::new(),
+            keys: Keymap::default(),
         }
     }
 }
@@ -237,6 +241,7 @@ impl Config {
             .filter(|v| !v.is_empty())
             .map(|v| expand(&v, &home))
             .collect();
+        c.keys = Keymap::from_settings(|key| value(text, key));
         c.preview_click = match value(text, "preview_click").as_deref() {
             Some("edit") => PreviewClick::Edit,
             Some("select") => PreviewClick::Select,
@@ -261,144 +266,207 @@ impl Config {
         }
     }
 
-    /// The settings note as it should be written: every setting present, set
-    /// to this config's value, with the prose that explains it. Generated
-    /// rather than stored so a new setting appears in an existing install's
-    /// file the first time it is regenerated.
+    /// The settings note as it should be written: every setting on one line,
+    /// with a short hint after it. Generated rather than stored, so a setting
+    /// added later shows up the next time the file is regenerated.
+    ///
+    /// One line each and no paragraphs: the file is read to find a setting and
+    /// change it, not read through, and prose between the lines is prose you
+    /// have to skip past every time.
     pub fn to_document(&self) -> String {
         let short = crate::index::short;
         let yn = |b: bool| if b { "yes" } else { "no" };
-        let mut s = String::new();
-        s.push_str(
-            "# Settings\n\
-             \n\
-             This is tinynote's settings file, and it is just a note. Edit it here, \
-             press ^S, and the change applies at once — no restart. Every setting is a \
-             `- key: value` line. Delete a line to go back to its default.\n\
-             \n\
-             ## Folders\n\
-             \n",
+        let mut d = Doc::default();
+        d.head(
+            "Settings",
+            "Edit here, ^S applies. Delete a line for its default.",
         );
-        s.push_str(&format!("- notes_dir: {}\n", short(&self.notes_dir)));
-        s.push_str(&format!(
-            "- attachments_dir: {}\n",
-            short(&self.attachments_dir)
-        ));
-        s.push_str(
-            "\nWhere the `.md` files live, and where a pasted image is written. \
-             `TINYNOTE_DIR` in the environment overrides `notes_dir`. Changing the notes \
-             folder takes effect next time tinynote starts.\n\
-             \n\
-             ## Appearance\n\
-             \n",
+
+        d.section("Folders");
+        d.row(
+            "notes_dir",
+            short(&self.notes_dir),
+            "where the .md files live",
         );
-        s.push_str(&format!(
-            "- theme: {}\n",
+        d.row(
+            "attachments_dir",
+            short(&self.attachments_dir),
+            "where pasted images go",
+        );
+
+        d.section("Appearance");
+        d.row(
+            "theme",
             match self.theme {
                 Mode::Light => "light",
                 Mode::Dark => "dark",
-            }
-        ));
-        s.push_str(&format!(
-            "- page_width: {}\n",
+            },
+            "dark · light",
+        );
+        d.row(
+            "page_width",
             if self.page_width == 0 {
                 "full".to_string()
             } else {
                 self.page_width.to_string()
-            }
-        ));
-        s.push_str(&format!(
-            "- borders: {}\n",
+            },
+            "columns of note, or full",
+        );
+        d.row(
+            "borders",
             match self.borders {
                 BorderStyle::Rounded => "rounded",
                 BorderStyle::Square => "square",
                 BorderStyle::None => "none",
-            }
-        ));
-        s.push_str(&format!("- bold_headings: {}\n", yn(self.bold_headings)));
-        s.push_str(&format!("- status_bar: {}\n", yn(self.status_bar)));
-        s.push_str(&format!("- key_hints: {}\n", yn(self.key_hints)));
-        s.push_str(
-            "\n`theme` is `dark` or `light` — tinynote never paints a background, so this \
-             only says which way your terminal's own background runs. `page_width` is the \
-             widest the note column is ever drawn, in columns; `full` uses the whole \
-             window. `borders` is `rounded`, `square` or `none`. `key_hints` is the row of \
-             shortcuts along the bottom right.\n\
-             \n\
-             ## Colours\n\
-             \n",
+            },
+            "rounded · square · none",
         );
-        for key in theme::COLOR_KEYS {
+        d.row("bold_headings", yn(self.bold_headings), "yes · no");
+        d.row("status_bar", yn(self.status_bar), "the bottom line at all");
+        d.row("key_hints", yn(self.key_hints), "the shortcuts in it");
+
+        d.section("Colours");
+        d.note("#rrggbb · #rgb · red, brightblue · default");
+        for (key, hint) in COLOUR_HINTS {
             let c = self.palette.get(key).unwrap_or(theme::DARK.accent);
-            s.push_str(&format!("- {key}: {}\n", theme::color_to_string(c)));
+            d.row(key, theme::color_to_string(c), hint);
         }
-        s.push_str(
-            "\nEach takes `#rrggbb`, `#rgb`, an ANSI colour name (`red`, `brightblue`, …), \
-             or `default` for your terminal's own. `accent` is the one hue — h1, a ticked \
-             box, the status bar; `bright` leads, `grey` and `dim` recede; `ground` is what \
-             a highlight sits on. Setting `theme` reloads all nine, so change the theme \
-             first and your colours second.\n\
-             \n\
-             ## Editing\n\
-             \n",
+
+        d.section("Editing");
+        d.row("autosave_ms", self.autosave_ms, "idle time before a save");
+        d.row("tab_width", self.tab_width, "spaces one tab inserts");
+        d.row(
+            "rename_files",
+            yn(self.rename_files),
+            "filename follows title",
         );
-        s.push_str(&format!("- autosave_ms: {}\n", self.autosave_ms));
-        s.push_str(&format!("- tab_width: {}\n", self.tab_width));
-        s.push_str(&format!("- rename_files: {}\n", yn(self.rename_files)));
-        s.push_str(
-            "\nHow long after you stop typing a note saves, how many spaces `tab` inserts, \
-             and whether a filename follows its note's title. Turn `rename_files` off and \
-             tinynote never renames a file for you — the same rule it already follows for \
-             folders outside your notes dir.\n\
-             \n\
-             ## Reading\n\
-             \n",
-        );
-        s.push_str(&format!(
-            "- table_style: {}\n",
+
+        d.section("Reading");
+        d.row(
+            "table_style",
             match self.table_style {
                 TableStyle::Auto => "auto",
                 TableStyle::Scroll => "scroll",
                 TableStyle::Fit => "fit",
                 TableStyle::Wrap => "wrap",
                 TableStyle::Cards => "cards",
-            }
-        ));
-        s.push_str(&format!(
-            "- preview_click: {}\n",
+            },
+            "auto · scroll · fit · wrap · cards",
+        );
+        d.row(
+            "preview_click",
             match self.preview_click {
                 PreviewClick::Select => "select",
                 PreviewClick::Edit => "edit",
-            }
-        ));
-        s.push_str(&format!(
-            "- quick_open: {}\n",
+            },
+            "select · edit",
+        );
+        d.row(
+            "quick_open",
             if self.quick_open_recursive {
                 "recursive"
             } else {
                 "folder"
-            }
-        ));
+            },
+            "recursive · folder",
+        );
         if self.quick_open_dirs.is_empty() {
-            s.push_str("- quick_open_dirs:\n");
+            d.row(
+                "quick_open_dirs",
+                "",
+                "extra folders to search, comma separated",
+            );
         } else {
-            for dir in &self.quick_open_dirs {
-                s.push_str(&format!("- quick_open_dirs: {}\n", short(dir)));
+            for (i, dir) in self.quick_open_dirs.iter().enumerate() {
+                let hint = if i == 0 {
+                    "extra folders to search"
+                } else {
+                    ""
+                };
+                d.row("quick_open_dirs", short(dir), hint);
             }
         }
-        s.push_str(
-            "\n`table_style` decides what happens to a table wider than the page. `scroll` \
-             keeps every column readable and lets the table itself pan sideways — ← and → \
-             in the preview, or a sideways scroll; `fit` squeezes the columns and cuts \
-             cells with an ellipsis; `wrap` keeps the whole table on the page and lets a \
-             cell run onto as many lines as it needs; `cards` gives every row its own \
-             labelled block; and `auto` leaves a table that fits alone and scrolls one \
-             that doesn't. `preview_click` is what a plain click in the preview does — \
-             `select` starts a selection you can drag and copy, `edit` jumps into the \
-             editor. `quick_open` (^O) either walks subfolders or offers only this \
-             folder.\n",
-        );
-        s
+
+        d.section("Keys");
+        d.note("^K · cmd+k · alt+k · f5 · none");
+        for (key, spec, what) in self.keys.settings_rows() {
+            d.row(key, spec, what);
+        }
+        d.finish()
+    }
+}
+
+/// The one-line hint beside each colour, in the order the file lists them.
+const COLOUR_HINTS: [(&str, &str); 9] = [
+    ("accent", "h1, ticked boxes, the status bar"),
+    ("bright", "the step that leads"),
+    ("grey", "h2 and other structure"),
+    ("dim", "markers, rules, quotes"),
+    ("link", "links, which also underline"),
+    ("code_bg", "behind code"),
+    ("border", "panel borders"),
+    ("danger", "the delete confirmation"),
+    ("ground", "under a highlight"),
+];
+
+/// Builds the settings note: one `- key: value` line per setting with its hint
+/// aligned into a column, section by section. Alignment is per section, so a
+/// long path in one does not push every hint in the file to the right.
+#[derive(Default)]
+struct Doc {
+    out: String,
+    /// (line, hint) for the section being built, before it is aligned.
+    pending: Vec<(String, String)>,
+}
+
+impl Doc {
+    fn head(&mut self, title: &str, line: &str) {
+        self.out.push_str(&format!("# {title}\n\n{line}\n"));
+    }
+
+    fn section(&mut self, name: &str) {
+        self.flush();
+        self.out.push_str(&format!("\n## {name}\n\n"));
+    }
+
+    /// A line of guidance for the whole section — the only prose left, and
+    /// only where the values are not self-explanatory.
+    fn note(&mut self, text: &str) {
+        self.flush();
+        self.out.push_str(&format!("{text}\n\n"));
+    }
+
+    fn row(&mut self, key: &str, value: impl std::fmt::Display, hint: &str) {
+        let value = value.to_string();
+        let line = if value.is_empty() {
+            format!("- {key}:")
+        } else {
+            format!("- {key}: {value}")
+        };
+        self.pending.push((line, hint.to_string()));
+    }
+
+    fn flush(&mut self) {
+        let width = self
+            .pending
+            .iter()
+            .filter(|(_, h)| !h.is_empty())
+            .map(|(l, _)| l.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (line, hint) in std::mem::take(&mut self.pending) {
+            if hint.is_empty() {
+                self.out.push_str(&format!("{line}\n"));
+            } else {
+                let pad = " ".repeat(width.saturating_sub(line.chars().count()) + 2);
+                self.out.push_str(&format!("{line}{pad}# {hint}\n"));
+            }
+        }
+    }
+
+    fn finish(mut self) -> String {
+        self.flush();
+        self.out
     }
 }
 

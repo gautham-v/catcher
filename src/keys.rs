@@ -1,0 +1,414 @@
+//! User-settable key bindings.
+//!
+//! Every global action tinynote has is named here once, with the key it
+//! answers to. The settings file overrides any of them by name, the palette
+//! shows each command's current key beside it, and the ^G card is generated
+//! from the same table — so a rebound key is right everywhere, and an action
+//! that isn't in this list has no key and isn't discoverable.
+//!
+//! Editor motions (⌥←, ⌘⌫, and the rest) are deliberately not here: they are
+//! the platform's text-editing conventions, not tinynote's opinions.
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// Something a key can do. The order is the order the ^G card lists them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Action {
+    Palette,
+    QuickOpen,
+    NewNote,
+    Settings,
+    TogglePreview,
+    Save,
+    Shortcuts,
+    Quit,
+    Copy,
+    Cut,
+    Paste,
+    Undo,
+    Redo,
+    DeleteNote,
+    RenameFile,
+}
+
+/// Every action: its settings key, its default binding, and what it does.
+/// `None` for a default means the action ships unbound and is reached through
+/// the palette until someone gives it a key.
+const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
+    (
+        Action::Palette,
+        "key_palette",
+        Some("^K"),
+        "command palette — search notes, run commands",
+    ),
+    (
+        Action::QuickOpen,
+        "key_open",
+        Some("^O"),
+        "open a note — every folder, recent first",
+    ),
+    (Action::NewNote, "key_new", Some("^N"), "new note"),
+    (
+        Action::Settings,
+        "key_settings",
+        Some("^,"),
+        "settings, as a note you can edit",
+    ),
+    (
+        Action::TogglePreview,
+        "key_preview",
+        Some("^P"),
+        "toggle the reading view",
+    ),
+    (
+        Action::Save,
+        "key_save",
+        Some("^S"),
+        "save now (notes autosave anyway)",
+    ),
+    (Action::Shortcuts, "key_shortcuts", Some("^G"), "this card"),
+    (Action::Quit, "key_quit", Some("^Q"), "save and quit"),
+    (Action::Copy, "key_copy", Some("^C"), "copy selection"),
+    (Action::Cut, "key_cut", Some("^X"), "cut selection"),
+    (
+        Action::Paste,
+        "key_paste",
+        Some("^V"),
+        "paste — an image becomes an attachment",
+    ),
+    (Action::Undo, "key_undo", Some("^Z"), "undo"),
+    (Action::Redo, "key_redo", Some("^Y"), "redo  (⇧^Z too)"),
+    (
+        Action::DeleteNote,
+        "key_delete",
+        None,
+        "delete the note on screen",
+    ),
+    (
+        Action::RenameFile,
+        "key_rename",
+        None,
+        "rename the file on disk",
+    ),
+];
+
+/// One key, as the settings file spells it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Binding {
+    code: KeyCode,
+    /// `^X` is happy with either ctrl or cmd — a Mac hand reaches for ⌘ and a
+    /// Linux one for ctrl, and neither is wrong. `cmd+x` and `ctrl+x` written
+    /// out are exact.
+    ctrl_or_cmd: bool,
+    ctrl: bool,
+    cmd: bool,
+    alt: bool,
+    shift: bool,
+}
+
+impl Binding {
+    /// Parse `^K`, `ctrl+k`, `cmd+,`, `alt+p`, `f5`, `⌘k`. `None` for anything
+    /// unreadable, and for the word `none`, which unbinds.
+    pub fn parse(text: &str) -> Option<Binding> {
+        let t = text.trim();
+        if t.is_empty() || t.eq_ignore_ascii_case("none") || t.eq_ignore_ascii_case("off") {
+            return None;
+        }
+        let mut b = Binding {
+            code: KeyCode::Null,
+            ctrl_or_cmd: false,
+            ctrl: false,
+            cmd: false,
+            alt: false,
+            shift: false,
+        };
+        // the caret spelling: the one everybody already uses for ctrl keys
+        if let Some(rest) = t.strip_prefix('^') {
+            b.ctrl_or_cmd = true;
+            b.code = key_code(rest)?;
+            return Some(b);
+        }
+        // strip modifier prefixes off the front, in any order, until what is
+        // left is the key itself
+        const CTRL: &[&str] = &["ctrl+", "control+"];
+        const CMD: &[&str] = &["cmd+", "super+", "meta+", "⌘"];
+        const ALT: &[&str] = &["alt+", "opt+", "option+", "⌥"];
+        const SHIFT: &[&str] = &["shift+", "⇧"];
+        let mut rest = t;
+        loop {
+            let lower = rest.to_ascii_lowercase();
+            let hit =
+                [(CTRL, 0), (CMD, 1), (ALT, 2), (SHIFT, 3)]
+                    .iter()
+                    .find_map(|(prefixes, which)| {
+                        let p = prefixes.iter().find(|p| lower.starts_with(**p))?;
+                        Some((p.len(), *which))
+                    });
+            let Some((len, which)) = hit else { break };
+            match which {
+                0 => b.ctrl = true,
+                1 => b.cmd = true,
+                2 => b.alt = true,
+                _ => b.shift = true,
+            }
+            rest = &rest[len..];
+        }
+        b.code = key_code(rest)?;
+        // a bare letter is not a binding: it is what you type into a note.
+        // A function key is, since it types nothing.
+        let bare_ok = matches!(b.code, KeyCode::F(_));
+        (bare_ok || b.ctrl || b.cmd || b.alt).then_some(b)
+    }
+
+    /// Does this binding answer to `key`?
+    pub fn matches(&self, key: &KeyEvent) -> bool {
+        let m = key.modifiers;
+        let ctrl = m.contains(KeyModifiers::CONTROL);
+        let cmd = m.contains(KeyModifiers::SUPER);
+        let alt = m.contains(KeyModifiers::ALT);
+        if !same_key(self.code, key.code) {
+            return false;
+        }
+        if self.ctrl_or_cmd {
+            // shift is not checked: ⇧^Z reaching redo is a feature, and a
+            // capital letter arrives with SHIFT set on some terminals anyway
+            return (ctrl || cmd) && !alt;
+        }
+        ctrl == self.ctrl && cmd == self.cmd && alt == self.alt
+    }
+
+    /// How this binding is written — in the palette, the card, the settings.
+    pub fn label(&self) -> String {
+        let mut s = String::new();
+        if self.ctrl_or_cmd {
+            s.push('^');
+        }
+        if self.ctrl {
+            s.push_str("ctrl+");
+        }
+        if self.cmd {
+            s.push('⌘');
+        }
+        if self.alt {
+            s.push('⌥');
+        }
+        if self.shift {
+            s.push('⇧');
+        }
+        match self.code {
+            KeyCode::Char(c) => s.push(c.to_ascii_uppercase()),
+            KeyCode::F(n) => s.push_str(&format!("F{n}")),
+            KeyCode::Esc => s.push_str("esc"),
+            KeyCode::Enter => s.push('⏎'),
+            KeyCode::Tab => s.push_str("tab"),
+            _ => s.push('?'),
+        }
+        s
+    }
+}
+
+/// Case-insensitive for letters: `^K` and `^k` are the same key.
+fn same_key(a: KeyCode, b: KeyCode) -> bool {
+    match (a, b) {
+        (KeyCode::Char(x), KeyCode::Char(y)) => x.eq_ignore_ascii_case(&y),
+        _ => a == b,
+    }
+}
+
+fn key_code(text: &str) -> Option<KeyCode> {
+    let t = text.trim();
+    let lower = t.to_ascii_lowercase();
+    if let Some(n) = lower.strip_prefix('f') {
+        if let Ok(n) = n.parse::<u8>() {
+            if (1..=12).contains(&n) {
+                return Some(KeyCode::F(n));
+            }
+        }
+    }
+    Some(match lower.as_str() {
+        "esc" | "escape" => KeyCode::Esc,
+        "enter" | "return" => KeyCode::Enter,
+        "tab" => KeyCode::Tab,
+        "space" => KeyCode::Char(' '),
+        _ => {
+            let mut chars = t.chars();
+            let c = chars.next()?;
+            chars.next().is_none().then_some(KeyCode::Char(c))?
+        }
+    })
+}
+
+/// Every action's current binding.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Keymap {
+    bound: Vec<(Action, Option<Binding>)>,
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        Keymap {
+            bound: ACTIONS
+                .iter()
+                .map(|(a, _, default, _)| (*a, default.and_then(Binding::parse)))
+                .collect(),
+        }
+    }
+}
+
+impl Keymap {
+    /// Read the `key_*` settings over the defaults. `lookup` is handed each
+    /// action's settings key and returns what the file said, if anything.
+    pub fn from_settings(lookup: impl Fn(&str) -> Option<String>) -> Keymap {
+        let mut map = Keymap::default();
+        for (action, key, _, _) in ACTIONS {
+            if let Some(spec) = lookup(key) {
+                // an unreadable spec unbinds rather than silently keeping the
+                // default, so a typo is visible instead of mysterious
+                map.set(*action, Binding::parse(&spec));
+            }
+        }
+        map
+    }
+
+    fn set(&mut self, action: Action, binding: Option<Binding>) {
+        if let Some(slot) = self.bound.iter_mut().find(|(a, _)| *a == action) {
+            slot.1 = binding;
+        }
+    }
+
+    /// Which action `key` triggers, if any. First match wins, so a key bound
+    /// twice by hand runs the action listed first rather than both.
+    pub fn action(&self, key: &KeyEvent) -> Option<Action> {
+        self.bound
+            .iter()
+            .find(|(_, b)| b.is_some_and(|b| b.matches(key)))
+            .map(|(a, _)| *a)
+    }
+
+    pub fn binding(&self, action: Action) -> Option<Binding> {
+        self.bound
+            .iter()
+            .find(|(a, _)| *a == action)
+            .and_then(|(_, b)| *b)
+    }
+
+    /// How this action's key is written, or an empty string when unbound.
+    pub fn label(&self, action: Action) -> String {
+        self.binding(action).map(|b| b.label()).unwrap_or_default()
+    }
+
+    /// (key, what it does) for every bound action, for the ^G card.
+    pub fn card_rows(&self) -> Vec<(String, &'static str)> {
+        ACTIONS
+            .iter()
+            .filter_map(|(a, _, _, what)| {
+                let b = self.binding(*a)?;
+                Some((b.label(), *what))
+            })
+            .collect()
+    }
+
+    /// (settings key, current spelling, one-line hint) for the settings note.
+    pub fn settings_rows(&self) -> Vec<(&'static str, String, &'static str)> {
+        ACTIONS
+            .iter()
+            .map(|(a, key, _, what)| {
+                let spec = self
+                    .binding(*a)
+                    .map(|b| b.label())
+                    .unwrap_or_else(|| "none".to_string());
+                (*key, spec, *what)
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn the_caret_spelling_answers_to_ctrl_or_cmd() {
+        let b = Binding::parse("^K").unwrap();
+        assert!(b.matches(&ev(KeyCode::Char('k'), KeyModifiers::CONTROL)));
+        assert!(b.matches(&ev(KeyCode::Char('k'), KeyModifiers::SUPER)));
+        // case does not matter: ⇧^K is still ^K
+        assert!(b.matches(&ev(KeyCode::Char('K'), KeyModifiers::CONTROL)));
+        assert!(!b.matches(&ev(KeyCode::Char('k'), KeyModifiers::NONE)));
+        assert!(!b.matches(&ev(KeyCode::Char('j'), KeyModifiers::CONTROL)));
+        assert_eq!(b.label(), "^K");
+    }
+
+    #[test]
+    fn a_spelled_out_modifier_is_exact() {
+        let cmd = Binding::parse("cmd+p").unwrap();
+        assert!(cmd.matches(&ev(KeyCode::Char('p'), KeyModifiers::SUPER)));
+        assert!(!cmd.matches(&ev(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+        let alt = Binding::parse("alt+p").unwrap();
+        assert!(alt.matches(&ev(KeyCode::Char('p'), KeyModifiers::ALT)));
+        assert!(!alt.matches(&ev(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn punctuation_and_function_keys_bind() {
+        let comma = Binding::parse("^,").unwrap();
+        assert!(comma.matches(&ev(KeyCode::Char(','), KeyModifiers::CONTROL)));
+        let f = Binding::parse("f5").unwrap();
+        assert!(f.matches(&ev(KeyCode::F(5), KeyModifiers::NONE)));
+        assert_eq!(f.label(), "F5");
+    }
+
+    #[test]
+    fn a_bare_letter_is_not_a_binding_and_none_unbinds() {
+        // it would swallow the letter everywhere you type it
+        assert!(Binding::parse("k").is_none());
+        assert!(Binding::parse("none").is_none());
+        assert!(Binding::parse("").is_none());
+        assert!(Binding::parse("nonsense+k").is_none());
+    }
+
+    #[test]
+    fn settings_override_the_defaults_and_can_unbind() {
+        let map = Keymap::from_settings(|k| match k {
+            "key_palette" => Some("cmd+p".to_string()),
+            "key_quit" => Some("none".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('p'), KeyModifiers::SUPER)),
+            Some(Action::Palette)
+        );
+        // the old key is gone, not kept alongside the new one
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+            None
+        );
+        // and an unbound action answers to nothing
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(map.label(Action::Quit), "");
+    }
+
+    #[test]
+    fn the_defaults_are_the_keys_the_readme_documents() {
+        let map = Keymap::default();
+        assert_eq!(map.label(Action::Palette), "^K");
+        assert_eq!(map.label(Action::QuickOpen), "^O");
+        assert_eq!(map.label(Action::NewNote), "^N");
+        assert_eq!(map.label(Action::TogglePreview), "^P");
+        assert_eq!(map.label(Action::Settings), "^,");
+        // delete and rename ship unbound: they are palette commands
+        assert_eq!(map.label(Action::DeleteNote), "");
+    }
+
+    #[test]
+    fn every_action_has_a_settings_row() {
+        assert_eq!(Keymap::default().settings_rows().len(), ACTIONS.len());
+    }
+}

@@ -68,6 +68,8 @@ Pointing tinynote at a file or folder roots that one session there without touch
 | `Esc` | Close palette, cancel, leave preview, clear selection |
 | `^Q` | Quit |
 
+Every key in that table is settable. The settings note has a `## Keys` section with one line per action — `key_palette: ^K`, `key_open: ^O` — and takes `^K`, `cmd+k`, `alt+k`, `f5`, or `none` to unbind. `^K` answers to either ctrl or cmd, so the same file works on a Mac and on Linux; spell out `cmd+` or `ctrl+` when you want one exactly. **Delete note** and **Rename file** ship unbound and are yours to claim. The palette shows each command's current key beside it, and so does the **^G** card.
+
 Editing is macOS-style — `⌘←`/`⌘→` for line start/end, `⌘↑`/`⌘↓` for top/bottom, `⌥←`/`⌥→` by word, `⌘⌫` and `⌥⌫` to delete, `⌘A` to select all. Add `⇧` to any movement to extend the selection. `^`-click or `⌥`-click follows a link.
 
 If a shortcut misbehaves, run `tinynote --keys` to see what your terminal actually sends. Ghostty binds most Mac editing keys to legacy control codes, which tinynote handles — except `⌘↑`/`⌘↓`, which Ghostty keeps for itself. Use `^Home`/`^End`, or unbind them:
@@ -83,7 +85,7 @@ keybind = cmd+down=unbind
 
 Settings are a note. **^,** opens `~/.config/tinynote/settings.md` in tinynote itself — same editor, same preview, no `$EDITOR` and no TOML — and **^S** applies it at once. Colours, page width and everything else but `notes_dir` change on the next frame.
 
-Every setting is a `- key: value` line; delete one and its default stands. The file is written on first run with all of them in it, and the prose beside each says what it does.
+Every setting is a `- key: value` line with a one-line hint after it; delete a line and its default stands. The file is written on first run with all of them in it.
 
 | | |
 | --- | --- |
@@ -99,6 +101,7 @@ Every setting is a `- key: value` line; delete one and its default stands. The f
 | `preview_click` | `select` or `edit` — what a click in the reading view does |
 | `quick_open` | `recursive` or `folder` — how far **^O** looks |
 | `quick_open_dirs` | extra folders **^O** searches; repeat the line, or separate with commas |
+| `key_palette`, `key_open`, `key_new`, `key_settings`, `key_preview`, `key_save`, `key_shortcuts`, `key_quit`, `key_copy`, `key_cut`, `key_paste`, `key_undo`, `key_redo`, `key_delete`, `key_rename` | one key each — `^K`, `cmd+k`, `alt+k`, `f5`, or `none` |
 
 An existing `config.toml` is read once, to seed `settings.md`, and then left alone.
 
@@ -110,7 +113,7 @@ cargo test
 cargo clippy
 ```
 
-Rust, ratatui + crossterm. `src/editor.rs` is the text buffer, `src/md.rs` the live-preview styling and click mapping, `src/render.rs` the full-page preview, `src/images.rs` inline images, `src/cli.rs` argument parsing, `src/config.rs` the settings note, `src/index.rs` the quick-open index and recents, `src/clipboard.rs` copy and paste. Every colour in the app lives in one place: the `theme` module at the top of `src/md.rs`.
+Rust, ratatui + crossterm. `src/editor.rs` is the text buffer, `src/md.rs` the live-preview styling and click mapping, `src/render.rs` the full-page preview, `src/images.rs` inline images, `src/cli.rs` argument parsing, `src/config.rs` the settings note, `src/keys.rs` the bindings, `src/index.rs` the quick-open index and recents, `src/clipboard.rs` copy and paste. Every colour in the app lives in one place: the `theme` module at the top of `src/md.rs`.
 
 ## License
 
