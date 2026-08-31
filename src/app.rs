@@ -104,12 +104,12 @@ impl Command {
 
     pub fn label(&self) -> (&'static str, &'static str) {
         match self {
-            Command::NewNote => ("New note", "create an empty note and start typing"),
-            Command::QuickOpen => ("Open note", "any note in the vault, recent first"),
-            Command::DeleteNote => ("Delete note", "remove the note on screen"),
-            Command::RenameFile => ("Rename file", "change the filename on disk"),
-            Command::TogglePreview => ("Toggle preview", "rendered markdown, read-only"),
-            Command::Shortcuts => ("Keyboard shortcuts", "every binding, on one card"),
+            Command::NewNote => ("New note", "an empty note, ready to type"),
+            Command::QuickOpen => ("Open note", "any folder, recent first"),
+            Command::DeleteNote => ("Delete note", "delete the file on disk"),
+            Command::RenameFile => ("Rename file", "change the name on disk"),
+            Command::TogglePreview => ("Reading view", "the page, rendered"),
+            Command::Shortcuts => ("Shortcuts", "every binding, on one card"),
             Command::OpenSettings => ("Settings", "edit them here, as a note"),
             Command::Quit => ("Quit", "save and exit"),
         }

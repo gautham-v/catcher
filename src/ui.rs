@@ -522,8 +522,16 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn overlay_rect(f: &Frame, height: u16) -> Rect {
+    overlay_rect_wide(f, height, 72)
+}
+
+/// A centred overlay `height` rows tall, at most `max` columns wide. The
+/// palette takes a bigger `max` than the little prompts: on a wide terminal
+/// there is room for a description that does not end in an ellipsis, and no
+/// reason to leave it empty.
+fn overlay_rect_wide(f: &Frame, height: u16, max: u16) -> Rect {
     let area = f.area();
-    let width = area.width.saturating_sub(4).min(72);
+    let width = area.width.saturating_sub(4).min(max);
     let x = (area.width - width) / 2;
     let y = (area.height / 5).max(1);
     Rect::new(x, y, width, height.min(area.height.saturating_sub(y + 1)))
@@ -532,9 +540,12 @@ fn overlay_rect(f: &Frame, height: u16) -> Rect {
 fn draw_palette(f: &mut Frame, app: &mut App) {
     let items = app.overlay_items();
     let quick = app.overlay == Overlay::QuickOpen;
-    let shown = items.len().min(10) as u16;
+    // more rows on a taller window, since there is nothing else to use the
+    // space for while the palette is open
+    let room = f.area().height.saturating_sub(8).max(6) as usize;
+    let shown = items.len().min(room.min(16)) as u16;
     // the prompt, a rule under it, and the rows
-    let rect = overlay_rect(f, shown + 4);
+    let rect = overlay_rect_wide(f, shown + 4, 100);
     f.render_widget(Clear, rect);
     let block = panel(app);
     let inner = block.inner(rect);
@@ -545,8 +556,10 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical(rows).split(inner);
 
     // ❯ marks where you type, so the prompt reads as an input and not as the
-    // first row of the list
-    let caret = Span::styled(" ❯ ", theme::state());
+    // first row of the list. The palette is monochrome throughout: it is
+    // chrome over the note, and a hue here would compete with the one the
+    // note itself uses for headings.
+    let caret = Span::styled(" ❯ ", theme::bright());
     let prompt = if app.query.is_empty() {
         let hint = if quick {
             "open a note — any folder, most recent first"
@@ -617,44 +630,50 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             _ => String::new(),
         };
 
-        // an accent bar rather than a reversed block: the selection should
-        // point at a row, not repaint it
-        let bar = if selected { "▌" } else { " " };
+        // the whole row lifts onto a raised background rather than taking a
+        // hue: monochrome, and it marks where you are without repainting the
+        // row inside out
+        let row_bg = if selected { theme::row() } else { Style::new() };
         let title = if selected {
-            Style::new()
+            row_bg
                 .fg(theme::palette().bright)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::new()
+            row_bg
         };
+        // a narrower name column leaves the description room to finish its
+        // sentence, which is what a first-time reader is actually reading
         let namew = (area.width as usize)
-            .saturating_sub(4 + keyw + 2 + tag_width(tag))
-            .clamp(8, 26);
+            .saturating_sub(6 + keyw + 3 + tag_width(tag))
+            .clamp(8, 22);
         let padded = pad_to(&name, namew);
         // three columns of air before the key, so the description never runs
         // into it however long it is
         let detailw =
-            (area.width as usize).saturating_sub(3 + namew + 2 + keyw + 3 + tag_width(tag));
+            (area.width as usize).saturating_sub(4 + namew + 2 + keyw + 3 + tag_width(tag));
 
         let mut spans = vec![
-            Span::styled(format!(" {bar} "), theme::state()),
+            Span::styled("  ", row_bg),
             Span::styled(padded, title),
-            Span::styled("  ", Style::new()),
-            Span::styled(truncate(&detail, detailw), dim()),
+            Span::styled("  ", row_bg),
+            Span::styled(truncate(&detail, detailw), row_bg.patch(dim())),
         ];
         if !tag.is_empty() {
-            spans.push(Span::styled(format!(" · {tag}"), dim()));
+            spans.push(Span::styled(format!(" · {tag}"), row_bg.patch(dim())));
         }
-        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        f.render_widget(Paragraph::new(Line::from(spans)).style(row_bg), area);
         // the key sits in its own right-hand column, where the eye can find
         // it without reading the description first
         if !key.is_empty() {
+            let style = if selected {
+                row_bg.fg(theme::palette().bright)
+            } else {
+                dim()
+            };
             f.render_widget(
-                Paragraph::new(Span::styled(
-                    format!("{key} "),
-                    theme::bright().add_modifier(Modifier::BOLD),
-                ))
-                .right_aligned(),
+                Paragraph::new(Span::styled(format!("{key}  "), style))
+                    .style(row_bg)
+                    .right_aligned(),
                 area,
             );
         }

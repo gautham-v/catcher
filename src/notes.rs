@@ -34,7 +34,9 @@ impl Note {
     }
 
     pub fn snippet(&self) -> String {
-        let mut lines = self.content.lines().filter(|l| !l.trim().is_empty());
+        let mut lines = body_after_front_matter(&self.content)
+            .lines()
+            .filter(|l| !l.trim().is_empty());
         lines.next(); // skip the title line
         lines
             .next()
@@ -43,13 +45,50 @@ impl Note {
     }
 }
 
+/// The note's title: its first line of prose. YAML front matter is stepped
+/// over — a note that opens with `---\ntype: log\n---` is not called “---”,
+/// and the heading under it is what a person would read as the title.
 pub fn title_of(content: &str) -> String {
-    content
+    body_after_front_matter(content)
         .lines()
-        .find(|l| !l.trim().is_empty())
+        .find(|l| !l.trim().is_empty() && !is_rule(l))
         .map(|l| l.trim().trim_start_matches('#').trim().to_string())
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| "Untitled".to_string())
+}
+
+/// A line of nothing but `-`, `*`, `_` or `=`: a horizontal rule, which is
+/// never a title however high up the note it sits.
+fn is_rule(line: &str) -> bool {
+    let t = line.trim();
+    t.len() >= 3 && t.chars().all(|c| matches!(c, '-' | '*' | '_' | '='))
+}
+
+/// Everything after a leading `---` … `---` block, or the whole thing when
+/// there isn't one. Only a `---` on the very first line opens front matter; a
+/// horizontal rule further down is just a rule.
+pub fn body_after_front_matter(content: &str) -> &str {
+    let rest = match content.strip_prefix("---\n") {
+        Some(rest) => rest,
+        None => match content.strip_prefix("---\r\n") {
+            Some(rest) => rest,
+            None => return content,
+        },
+    };
+    // the closing fence, as its own line
+    for (i, line) in rest.match_indices('\n') {
+        let _ = line;
+        let after = &rest[i + 1..];
+        if after.starts_with("---") {
+            let end = after
+                .find('\n')
+                .map(|n| i + 1 + n + 1)
+                .unwrap_or(rest.len());
+            return &rest[end..];
+        }
+    }
+    // unterminated: it was not front matter after all
+    content
 }
 
 pub fn slug(title: &str) -> String {
@@ -243,6 +282,27 @@ pub fn create_with(dir: &Path, content: String) -> Result<Note> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn front_matter_is_stepped_over_not_read_as_the_title() {
+        let md = "---\ntype: log\nupdated: 2026-08-25\n---\n\n# Job Application Log\nbody\n";
+        assert_eq!(title_of(md), "Job Application Log");
+        let n = Note {
+            path: PathBuf::from("/n/log.md"),
+            content: md.to_string(),
+            modified: SystemTime::now(),
+            disk_title: "Job Application Log".into(),
+        };
+        // and the snippet is the note's own prose, not a front-matter field
+        assert_eq!(n.snippet(), "body");
+
+        // a rule further down is a rule, not front matter
+        assert_eq!(title_of("# Title\n\n---\n\nmore"), "Title");
+        // an unterminated fence is not front matter — but a bare rule is
+        // still not a title, so the first real line wins
+        assert_eq!(title_of("---\nnot closed\n"), "not closed");
+        assert_eq!(title_of("***\n\n# Real\n"), "Real");
+    }
 
     #[test]
     fn titles() {

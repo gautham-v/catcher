@@ -45,16 +45,20 @@ fn title_at(path: &Path) -> String {
     let read = fs::File::open(path)
         .and_then(|mut f| f.read(&mut buf))
         .unwrap_or(0);
-    let head = String::from_utf8_lossy(&buf[..read]);
-    // front matter is not a title: skip a leading `---` block if the head has one
-    let body = match head.strip_prefix("---\n") {
-        Some(rest) => match rest.split_once("\n---") {
-            Some((_, after)) => after,
-            None => rest,
-        },
-        None => &head,
-    };
-    title_of(body)
+    // `title_of` steps over front matter itself, so this is the same title
+    // the palette shows for a note that is already loaded
+    title_of(&String::from_utf8_lossy(&buf[..read]))
+}
+
+/// What to show beside a note's title: its folder relative to the notes dir,
+/// empty when it sits directly in it, and a `~/`-shortened path when it lives
+/// somewhere else entirely.
+fn folder_of(path: &Path, notes_dir: &Path) -> String {
+    let parent = path.parent().unwrap_or(path);
+    match parent.strip_prefix(notes_dir) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => short(parent),
+    }
 }
 
 /// Shorten a path for display, `~/` for the home directory.
@@ -75,6 +79,11 @@ pub fn short(path: &Path) -> String {
 /// likely to reach for, and having it rank well in a list it was never in is
 /// no use at all.
 pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
+    // the first root is the notes dir: a note under it is placed relative to
+    // it, and anything else gets a `~/`-shortened path, so no row ever shows a
+    // bare "." and no row repeats the notes dir on every line
+    let home_root = roots.first().cloned().unwrap_or_default();
+    let home_root = fs::canonicalize(&home_root).unwrap_or(home_root);
     let mut seen: HashMap<PathBuf, ()> = HashMap::new();
     let mut entries: Vec<Entry> = Vec::new();
     for root in roots {
@@ -114,11 +123,7 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
                     .unwrap_or(&path)
                     .to_string_lossy()
                     .into_owned();
-                let folder = std::path::Path::new(&rel)
-                    .parent()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .filter(|p| !p.is_empty())
-                    .unwrap_or_else(|| ".".to_string());
+                let folder = folder_of(&path, &home_root);
                 entries.push(Entry {
                     title: title_at(&path),
                     path,
@@ -148,7 +153,7 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
             // outside every root, so the whole path is what a query has to
             // match against, and the folder is what is worth showing
             rel: short(&path),
-            folder: short(path.parent().unwrap_or(&path)),
+            folder: folder_of(&path, &home_root),
             path,
             modified,
         });
@@ -190,9 +195,13 @@ pub fn load_recent() -> Vec<PathBuf> {
     let Ok(text) = fs::read_to_string(path) else {
         return Vec::new();
     };
+    let settings = crate::config::settings_path().ok();
     text.lines()
         .map(|l| PathBuf::from(l.trim()))
         .filter(|p| !p.as_os_str().is_empty() && p.exists())
+        // it has its own key and its own palette row; a recents file written
+        // before that was true may still list it
+        .filter(|p| settings.as_ref() != Some(p))
         .take(MAX_RECENT)
         .collect()
 }
@@ -245,6 +254,10 @@ mod tests {
         assert!(!titles.contains(&"Hidden"));
         let log = found.iter().find(|e| e.title == "Job Log").unwrap();
         assert_eq!(log.rel, "applications/log.md");
+        assert_eq!(log.folder, "applications");
+        // a note sitting directly in the notes dir has no folder worth showing
+        let top = found.iter().find(|e| e.title == "Top").unwrap();
+        assert_eq!(top.folder, "");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -290,6 +303,7 @@ mod tests {
             "{}",
             found[0].folder
         );
+        assert!(found[0].folder.starts_with('~') || found[0].folder.starts_with('/'));
         // the whole path is searchable, so "applications/log" finds it
         assert!(crate::search::fuzzy("applications/log", &found[0].rel).is_some());
         let _ = fs::remove_dir_all(&dir);

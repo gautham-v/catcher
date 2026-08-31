@@ -247,6 +247,14 @@ pub mod theme {
         Style::new().fg(palette().bright)
     }
 
+    /// The ground a selected palette row sits on. Monochrome on purpose: the
+    /// palette is chrome over the note, and a hue here would compete with the
+    /// one the note itself spends on headings. `border` is the step that is
+    /// visible against the page at both polarities without shouting.
+    pub fn row() -> Style {
+        Style::new().bg(palette().border)
+    }
+
     /// `#rrggbb`, `#rgb`, or one of the sixteen ANSI names, as written in the
     /// settings file. `None` for anything else, which the settings reader
     /// reports rather than silently ignoring.
