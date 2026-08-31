@@ -743,15 +743,15 @@ impl App {
                 KeyCode::Esc => self.overlay = Overlay::None,
                 _ => {}
             },
-            Overlay::RenameFile => match key.code {
-                KeyCode::Enter => self.commit_rename(),
-                KeyCode::Esc => self.overlay = Overlay::None,
-                KeyCode::Backspace => {
-                    self.rename_input.pop();
+            Overlay::RenameFile => {
+                if !edit_line(&mut self.rename_input, &key) {
+                    match key.code {
+                        KeyCode::Enter => self.commit_rename(),
+                        KeyCode::Esc => self.overlay = Overlay::None,
+                        _ => {}
+                    }
                 }
-                KeyCode::Char(c) if !ctrl => self.rename_input.push(c),
-                _ => {}
-            },
+            }
             Overlay::None => match self.view {
                 View::Preview => match key.code {
                     // ← and → pan a table too wide for the page; with nothing
@@ -870,6 +870,13 @@ impl App {
 
     fn on_palette_key(&mut self, key: KeyEvent) {
         let count = self.overlay_items().len();
+        // the query is a one-line input, and the Mac editing keys have to work
+        // in it: nothing is more annoying than a search box you can only
+        // backspace out of one character at a time
+        if edit_line(&mut self.query, &key) {
+            self.selected = 0;
+            return;
+        }
         match key.code {
             KeyCode::Esc => self.overlay = Overlay::None,
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
@@ -882,14 +889,6 @@ impl App {
                 if let Some(item) = self.overlay_items().get(self.selected).cloned() {
                     self.run_item(item);
                 }
-            }
-            KeyCode::Backspace => {
-                self.query.pop();
-                self.selected = 0;
-            }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.query.push(c);
-                self.selected = 0;
             }
             _ => {}
         }
@@ -1471,6 +1470,45 @@ pub fn toggle_task(line: &str) -> Option<String> {
     Some(out)
 }
 
+/// Apply one key to a single-line text input — the palette's query and the
+/// rename prompt. Returns true when it handled the key.
+///
+/// The cursor is always at the end, so this is typing and deleting rather than
+/// full editing, but every way a Mac hand knows to delete works. Ghostty (and
+/// most terminals) rewrite ⌘⌫ to Ctrl-U and ⌥⌫ to Ctrl-W before the app sees
+/// them, so both spellings are taken.
+fn edit_line(input: &mut String, key: &KeyEvent) -> bool {
+    let m = key.modifiers;
+    let cmd = m.contains(KeyModifiers::SUPER);
+    let ctrl = m.contains(KeyModifiers::CONTROL);
+    let alt = m.contains(KeyModifiers::ALT);
+    match key.code {
+        // ⌘⌫ and its legacy spelling: clear the whole line
+        KeyCode::Backspace if cmd => input.clear(),
+        KeyCode::Char('u') if ctrl => input.clear(),
+        // ⌥⌫ and its legacy spelling: the word before the cursor
+        KeyCode::Backspace if alt => delete_prev_word(input),
+        KeyCode::Char('w') if ctrl => delete_prev_word(input),
+        KeyCode::Backspace => {
+            input.pop();
+        }
+        // ^-chords belong to the app; a plain character is what was typed
+        KeyCode::Char(c) if !ctrl && !cmd && !alt => input.push(c),
+        _ => return false,
+    }
+    true
+}
+
+/// Drop the trailing word of `input`, and the run of spaces before it.
+fn delete_prev_word(input: &mut String) {
+    while input.ends_with(' ') {
+        input.pop();
+    }
+    while !input.is_empty() && !input.ends_with(' ') {
+        input.pop();
+    }
+}
+
 /// The text of `cells` between two display columns, as drawn. Columns rather
 /// than indices because that is what a pointer lands on, and a wide character
 /// covers two of them. `offset` is the column the first cell stands for — the
@@ -1554,6 +1592,59 @@ mod tests {
         );
         assert_eq!(toggle_task("see the - [ ] convention"), None);
         assert_eq!(toggle_task("+ [x] plus"), Some("+ [ ] plus".to_string()));
+    }
+
+    #[test]
+    fn the_mac_delete_keys_work_in_a_one_line_input() {
+        use crossterm::event::KeyEvent;
+        let key = |c, m| KeyEvent::new(c, m);
+        let mut q = String::from("job application log");
+
+        // ⌥⌫, and the Ctrl-W that Ghostty rewrites it to
+        assert!(edit_line(
+            &mut q,
+            &key(KeyCode::Backspace, KeyModifiers::ALT)
+        ));
+        assert_eq!(q, "job application ");
+        assert!(edit_line(
+            &mut q,
+            &key(KeyCode::Char('w'), KeyModifiers::CONTROL)
+        ));
+        assert_eq!(q, "job ");
+
+        // ⌘⌫, and the Ctrl-U it arrives as
+        assert!(edit_line(
+            &mut q,
+            &key(KeyCode::Backspace, KeyModifiers::SUPER)
+        ));
+        assert_eq!(q, "");
+        q.push_str("more");
+        assert!(edit_line(
+            &mut q,
+            &key(KeyCode::Char('u'), KeyModifiers::CONTROL)
+        ));
+        assert_eq!(q, "");
+
+        // plain typing and plain backspace still do the obvious thing
+        assert!(edit_line(
+            &mut q,
+            &key(KeyCode::Char('a'), KeyModifiers::NONE)
+        ));
+        assert!(edit_line(
+            &mut q,
+            &key(KeyCode::Char('b'), KeyModifiers::SHIFT)
+        ));
+        assert_eq!(q, "ab");
+        assert!(edit_line(
+            &mut q,
+            &key(KeyCode::Backspace, KeyModifiers::NONE)
+        ));
+        assert_eq!(q, "a");
+
+        // and a key the input has no use for is left for the caller
+        assert!(!edit_line(&mut q, &key(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(!edit_line(&mut q, &key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(q, "a");
     }
 
     #[test]

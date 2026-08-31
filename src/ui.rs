@@ -463,6 +463,9 @@ fn wrap_cells(cells: &[PCell], width: usize) -> Vec<Vec<PCell>> {
     crate::render::wrap_pcells(cells, width)
 }
 
+/// The bottom line: what note you are on, what mode you are in, and what the
+/// keys do — laid out so a narrow window loses the least useful part first
+/// rather than letting the two halves collide.
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let note = app.active_note();
     // the filename, and only the filename: the title is already the first line
@@ -476,49 +479,101 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // the mode is named in both views, not just the unusual one: a bar that
     // only speaks up half the time makes you check which half you are in
     let mode = match app.view {
-        View::Edit => "  edit",
-        View::Preview => "  preview",
+        View::Edit => "edit",
+        View::Preview => "preview",
     };
+
+    let status = app.status.as_ref().map(|(m, _)| m.clone());
+    let hints = hint_pairs(app);
+    let total = area.width as usize;
+    // what the left-hand side needs: " name  mode "
+    let left_w = crate::md::str_width(&name) + crate::md::str_width(mode) + 3;
+    let status_w = status
+        .as_ref()
+        .map(|m| crate::md::str_width(m) + 3)
+        .unwrap_or(0);
+    // three columns of air between the two halves, so a bar that is only just
+    // wide enough still reads as two things and not one run-on string
+    let room = total.saturating_sub(left_w + status_w + 3);
+
+    // full hints if they fit; bare keys if they do not; then keys dropped from
+    // the right, which is the order they are worth least in
+    let right = fit_hints(&hints, room);
+
     let left = Line::from(vec![
-        Span::styled(format!(" {name}"), dim()),
-        Span::styled(mode, theme::state()),
+        Span::styled(
+            format!(" {}", truncate(&name, total.saturating_sub(8))),
+            dim(),
+        ),
+        Span::styled(format!("  {mode}"), theme::state()),
     ]);
     let mut right_spans = Vec::new();
-    if let Some((msg, _)) = &app.status {
+    if let Some(msg) = status {
         right_spans.push(Span::styled(format!("{msg}   "), theme::state()));
     }
-    if app.config.key_hints {
-        use crate::keys::Action;
-        // built from the bindings in force, so a rebound key is right here
-        // too, and an unbound one is simply not offered
-        let keys = &app.config.keys;
-        // ^P is a toggle, so the hint names where it goes, not where you are
-        let flip = match app.view {
-            View::Edit => "preview",
-            View::Preview => "edit",
-        };
-        let mut hints: Vec<String> = Vec::new();
-        // ← → only earns a place in the bar when there is something to pan
-        if app.view == View::Preview && app.preview_hmax > 0 {
-            hints.push("← → table".to_string());
-        }
-        for (action, what) in [
-            (Action::Palette, "palette"),
-            (Action::QuickOpen, "open"),
-            (Action::NewNote, "new"),
-            (Action::TogglePreview, flip),
-            (Action::Shortcuts, "shortcuts"),
-        ] {
-            let key = keys.label(action);
-            if !key.is_empty() {
-                hints.push(format!("{key} {what}"));
-            }
-        }
-        right_spans.push(Span::styled(format!("{}  ", hints.join("  ")), dim()));
+    if !right.is_empty() {
+        right_spans.push(Span::styled(format!("{right} "), dim()));
     }
-    let right = Line::from(right_spans);
     f.render_widget(Paragraph::new(left), area);
-    f.render_widget(Paragraph::new(right).right_aligned(), area);
+    f.render_widget(
+        Paragraph::new(Line::from(right_spans)).right_aligned(),
+        area,
+    );
+}
+
+/// (key, what it does) for the status bar, in the order they are worth
+/// keeping — built from the bindings in force, so a rebound key is right here
+/// too and an unbound one is never offered.
+fn hint_pairs(app: &App) -> Vec<(String, &'static str)> {
+    use crate::keys::Action;
+    let keys = &app.config.keys;
+    // ^P is a toggle, so the hint names where it goes, not where you are
+    let flip = match app.view {
+        View::Edit => "preview",
+        View::Preview => "edit",
+    };
+    let mut pairs: Vec<(String, &'static str)> = Vec::new();
+    // ← → only earns a place in the bar when there is something to pan
+    if app.view == View::Preview && app.preview_hmax > 0 {
+        pairs.push(("← →".to_string(), "table"));
+    }
+    for (action, what) in [
+        (Action::Palette, "palette"),
+        (Action::QuickOpen, "open"),
+        (Action::NewNote, "new"),
+        (Action::TogglePreview, flip),
+        (Action::Shortcuts, "shortcuts"),
+    ] {
+        let key = keys.label(action);
+        if !key.is_empty() {
+            pairs.push((key, what));
+        }
+    }
+    pairs
+}
+
+/// The most of `hints` that fits in `room` columns: worded if they all fit,
+/// bare keys if they do not, and keys dropped from the right after that.
+fn fit_hints(hints: &[(String, &'static str)], room: usize) -> String {
+    let worded = hints
+        .iter()
+        .map(|(k, w)| format!("{k} {w}"))
+        .collect::<Vec<_>>()
+        .join("  ");
+    if crate::md::str_width(&worded) <= room {
+        return worded;
+    }
+    // the words are the first thing to go: a key on its own is still a
+    // reminder that the key exists, which is all the bar is for
+    let mut keys: Vec<&str> = hints.iter().map(|(k, _)| k.as_str()).collect();
+    while !keys.is_empty() {
+        let line = keys.join("  ");
+        if crate::md::str_width(&line) <= room {
+            return line;
+        }
+        keys.pop();
+    }
+    String::new()
 }
 
 fn overlay_rect(f: &Frame, height: u16) -> Rect {

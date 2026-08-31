@@ -142,17 +142,20 @@ impl Config {
                 .and_then(|p| fs::read_to_string(p).ok())
                 .unwrap_or_default();
             let migrated = Config::from_str(&seed);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("creating {}", parent.display()))?;
-            }
-            fs::write(&path, migrated.to_document())
-                .with_context(|| format!("writing {}", path.display()))?;
+            write_settings(&path, &migrated)?;
             return Ok(migrated);
         }
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        Ok(Config::from_str(&text))
+        let config = Config::from_str(&text);
+        // A settings file written by an older tinynote is missing whatever has
+        // been added since, and a setting you cannot see is a setting you do
+        // not have. Rewriting is safe because the document is generated from
+        // the config the file was just parsed into: every value survives.
+        if !covers_every_setting(&text, &config) {
+            let _ = write_settings(&path, &config);
+        }
+        Ok(config)
     }
 
     /// Push everything this config decides into the places that read it
@@ -279,7 +282,8 @@ impl Config {
         let mut d = Doc::default();
         d.head(
             "Settings",
-            "Edit here, ^S applies. Delete a line for its default.",
+            "Change a value and press ^S — it applies at once. New settings \
+             are added to this file as they arrive.",
         );
 
         d.section("Folders");
@@ -394,6 +398,40 @@ impl Config {
         }
         d.finish()
     }
+}
+
+fn write_settings(path: &Path, config: &Config) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    fs::write(path, config.to_document()).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Does `text` already mention every setting tinynote has? Compared against
+/// the document this config would generate, so the check maintains itself:
+/// a setting added to `to_document` is one an old file is missing.
+fn covers_every_setting(text: &str, config: &Config) -> bool {
+    let have = setting_keys(text);
+    setting_keys(&config.to_document())
+        .into_iter()
+        .all(|k| have.contains(&k))
+}
+
+/// The `- key:` names a settings document sets, whatever their values.
+fn setting_keys(text: &str) -> std::collections::BTreeSet<String> {
+    text.lines()
+        .filter_map(|line| {
+            let line = strip_comment(line);
+            let line = line.trim();
+            let line = line
+                .strip_prefix("- ")
+                .or_else(|| line.strip_prefix("* "))?;
+            let (k, _) = line.split_once(':')?;
+            let k = k.trim();
+            (!k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_'))
+                .then(|| k.to_string())
+        })
+        .collect()
 }
 
 /// The one-line hint beside each colour, in the order the file lists them.
@@ -617,6 +655,44 @@ mod tests {
         if std::env::var_os("TINYNOTE_DIR").is_none() {
             assert_eq!(back, c);
         }
+    }
+
+    #[test]
+    fn an_older_settings_file_is_spotted_and_its_values_survive_the_rewrite() {
+        // the shape of a file written before a setting existed
+        let old = "# Settings\n\n## Folders\n\n- notes_dir: /vault\n\n## Appearance\n\n                   - theme: light\n\nA paragraph of prose that used to live here.\n";
+        let c = Config::from_str(old);
+        assert!(!covers_every_setting(old, &c));
+
+        // rewriting keeps what was set and adds what was missing
+        let fresh = c.to_document();
+        assert!(covers_every_setting(&fresh, &c));
+        let back = Config::from_str(&fresh);
+        assert_eq!(back.theme, Mode::Light);
+        if std::env::var_os("TINYNOTE_DIR").is_none() {
+            assert_eq!(back.notes_dir, PathBuf::from("/vault"));
+        }
+        // and the prose is gone
+        assert!(!fresh.contains("A paragraph of prose"));
+    }
+
+    #[test]
+    fn a_current_settings_file_is_left_alone() {
+        let c = Config::default();
+        assert!(covers_every_setting(&c.to_document(), &c));
+        // a hand-written comment beside a setting does not read as missing
+        let edited = c
+            .to_document()
+            .replace("- theme: dark", "- theme: dark  # mine");
+        assert!(covers_every_setting(&edited, &c));
+    }
+
+    #[test]
+    fn prose_lines_are_not_mistaken_for_settings() {
+        // the section notes are bare lines, and bullets in a note are not keys
+        let keys = setting_keys("#rrggbb · #rgb · red\n- accent: #ff9e64\n- a thing: no\n");
+        assert!(keys.contains("accent"));
+        assert_eq!(keys.len(), 1);
     }
 
     #[test]
