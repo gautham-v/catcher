@@ -92,8 +92,15 @@ fn options() -> Options {
     Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES
 }
 
+/// Unbounded-width render, for tests that don't care about the page width.
+#[cfg(test)]
 pub fn render(markdown: &str) -> Rendered {
-    let mut r = Ren::new(markdown);
+    render_wide(markdown, usize::MAX)
+}
+
+/// Render for a page `width` columns wide; tables are laid out to fit it.
+pub fn render_wide(markdown: &str, width: usize) -> Rendered {
+    let mut r = Ren::new(markdown, width);
     r.run(markdown);
     r.finish()
 }
@@ -125,6 +132,8 @@ struct Ren {
     list_depth: usize,
     in_code_block: bool,
     table: Option<Table>,
+    /// Page width in columns, used to size tables.
+    width: usize,
     /// Byte offset of the start of each source line.
     line_starts: Vec<usize>,
     /// Source line for the line currently being built.
@@ -135,7 +144,7 @@ struct Ren {
 }
 
 impl Ren {
-    fn new(markdown: &str) -> Ren {
+    fn new(markdown: &str, width: usize) -> Ren {
         let mut line_starts = vec![0usize];
         for (i, b) in markdown.bytes().enumerate() {
             if b == b'\n' {
@@ -154,6 +163,7 @@ impl Ren {
             list_depth: 0,
             in_code_block: false,
             table: None,
+            width,
             line_starts,
             src_line: None,
             pending_checkbox: None,
@@ -246,7 +256,7 @@ impl Ren {
             return;
         }
         let p = self.prefix.clone();
-        self.push(&p, theme::MARKER, None);
+        self.push(&p, theme::marker(), None);
     }
 
     fn indent(&self) -> String {
@@ -282,7 +292,7 @@ impl Ren {
                 if let Some(end) = find_pair(&chars, i + 2) {
                     self.push_at(&std::mem::take(&mut run), base, link, at(run_start));
                     let body: String = chars[i + 2..end].iter().collect();
-                    self.push_at(&body, base.patch(theme::HIGHLIGHT), link, at(i + 2));
+                    self.push_at(&body, base.patch(theme::highlight()), link, at(i + 2));
                     i = end + 2;
                     run_start = i;
                     continue;
@@ -301,7 +311,7 @@ impl Ren {
                 self.push_at(&std::mem::take(&mut run), base, None, at(run_start));
                 let idx = self.out.urls.len();
                 self.out.urls.push(url.clone());
-                self.push_at(&url, base.patch(theme::LINK), Some(idx), at(i));
+                self.push_at(&url, base.patch(theme::link()), Some(idx), at(i));
                 i = end;
                 run_start = i;
                 continue;
@@ -349,7 +359,7 @@ impl Ren {
             Event::Start(Tag::BlockQuote(_)) => {
                 self.blank();
                 self.prefix.push_str("▌ ");
-                self.styles.push(theme::QUOTE);
+                self.styles.push(theme::quote());
             }
             Event::End(TagEnd::BlockQuote(_)) => {
                 self.styles.pop();
@@ -371,7 +381,7 @@ impl Ren {
                 self.flush();
                 self.src_line = Some(src_line);
                 let text = format!("{}{} ", self.indent(), theme::BULLET);
-                self.push(&text, theme::MARKER, None);
+                self.push(&text, theme::marker(), None);
             }
             Event::End(TagEnd::Item) => {
                 if self.done_item {
@@ -384,16 +394,16 @@ impl Ren {
                 // replace the bullet we pushed at the start of the item
                 self.cells.clear();
                 let (mark, style) = if done {
-                    (theme::CHECKED, theme::DONE)
+                    (theme::CHECKED, theme::done())
                 } else {
-                    (theme::UNCHECKED, theme::MARKER)
+                    (theme::UNCHECKED, theme::marker())
                 };
                 let text = format!("{}{mark} ", self.indent());
                 self.push(&text, style, None);
                 self.pending_checkbox = Some(src_line);
                 if done {
                     // done items read as struck-through and dim until the item ends
-                    self.styles.push(self.style().patch(theme::DONE_TEXT));
+                    self.styles.push(self.style().patch(theme::done_text()));
                     self.done_item = true;
                 }
             }
@@ -424,7 +434,7 @@ impl Ren {
                 let idx = self.out.urls.len();
                 self.out.urls.push(dest_url.into_string());
                 self.link = Some(idx);
-                self.styles.push(self.style().patch(theme::LINK));
+                self.styles.push(self.style().patch(theme::link()));
             }
             Event::End(TagEnd::Link) => {
                 self.styles.pop();
@@ -446,7 +456,7 @@ impl Ren {
                     } else {
                         format!("🖼 {alt} ({url})")
                     };
-                    self.push(&label, theme::MARKER, None);
+                    self.push(&label, theme::marker(), None);
                     let cells = std::mem::take(&mut self.cells);
                     self.out.lines.push(PLine {
                         cells,
@@ -497,7 +507,7 @@ impl Ren {
                 }
             }
             Event::Code(code) => {
-                let style = self.style().patch(theme::CODE);
+                let style = self.style().patch(theme::code());
                 let link = self.link;
                 // the range spans the backticks too; the content starts after them
                 let ticks = self.src[range.clone()]
@@ -517,8 +527,8 @@ impl Ren {
                     for raw in text.split_inclusive('\n') {
                         let l = raw.trim_end_matches('\n').trim_end_matches('\r');
                         // the two-space indent is ours; the code itself is the file's
-                        self.push("  ", theme::CODE, None);
-                        self.push_at(l, theme::CODE, None, Some(off));
+                        self.push("  ", theme::code(), None);
+                        self.push_at(l, theme::code(), None, Some(off));
                         off += raw.len();
                         let cells = std::mem::take(&mut self.cells);
                         self.out.lines.push(PLine {
@@ -540,14 +550,14 @@ impl Ren {
                     self.src_line = Some(src_line);
                     if !self.prefix.is_empty() {
                         let p = self.prefix.clone();
-                        self.push(&p, theme::MARKER, None);
+                        self.push(&p, theme::marker(), None);
                     }
                 }
             }
             Event::HardBreak => self.flush(),
             Event::Rule => {
                 self.blank();
-                self.push(&"─".repeat(40), theme::MARKER, None);
+                self.push(&"─".repeat(40), theme::marker(), None);
                 self.flush();
             }
             _ => {}
@@ -566,18 +576,18 @@ impl Ren {
             .iter()
             .map(|r| r.iter().map(|c| cells_width(c)).collect())
             .collect();
-        let widths = crate::md::column_widths(&measured, cols);
+        let widths = crate::md::fit_widths(&crate::md::column_widths(&measured, cols), self.width);
         let src_line = self.src_line;
         for (ri, row) in t.rows.iter().enumerate() {
             let mut cells: Vec<PCell> = Vec::new();
             for (ci, w) in widths.iter().enumerate().take(cols) {
                 if ci > 0 {
-                    cells.extend(str_cells(crate::md::COL_SEP, theme::MARKER));
+                    cells.extend(str_cells(crate::md::COL_SEP, theme::marker()));
                 }
                 let empty: Vec<PCell> = Vec::new();
-                let cell = row.get(ci).unwrap_or(&empty);
+                let cell = truncate_cells(row.get(ci).unwrap_or(&empty), *w);
                 let align = align_of(t.aligns.get(ci).copied().unwrap_or(Alignment::None));
-                let (left, right) = crate::md::pad_for(cells_width(cell), *w, align);
+                let (left, right) = crate::md::pad_for(cells_width(&cell), *w, align);
                 cells.extend(str_cells(&" ".repeat(left), theme::PLAIN));
                 cells.extend(cell.iter().cloned());
                 cells.extend(str_cells(&" ".repeat(right), theme::PLAIN));
@@ -591,7 +601,7 @@ impl Ren {
             if ri == 0 {
                 let rule = crate::md::table_rule(&widths);
                 self.out.lines.push(PLine {
-                    cells: str_cells(&rule, theme::MARKER),
+                    cells: str_cells(&rule, theme::marker()),
                     checkbox: None,
                     image: None,
                     src_line,
@@ -624,6 +634,31 @@ fn str_cells(s: &str, style: Style) -> Vec<PCell> {
             src: None,
         })
         .collect()
+}
+
+/// A cell run cut to `width` columns, ellipsis included when it was cut.
+fn truncate_cells(cells: &[PCell], width: usize) -> Vec<PCell> {
+    if cells_width(cells) <= width {
+        return cells.to_vec();
+    }
+    let mut out: Vec<PCell> = Vec::new();
+    let mut used = 0;
+    for c in cells {
+        let cw = crate::md::char_width(c.ch);
+        if used + cw > width.saturating_sub(1) {
+            break;
+        }
+        out.push(c.clone());
+        used += cw;
+    }
+    let style = out.last().map(|c| c.style).unwrap_or(theme::PLAIN);
+    out.push(PCell {
+        ch: '…',
+        style,
+        link: None,
+        src: None,
+    });
+    out
 }
 
 /// Display width of a run of cells, in terminal columns.
@@ -684,6 +719,16 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_table_is_squeezed_into_the_page_width() {
+        let r = render_wide("| a | bbbbbbbbbbbbbbbbbbbb |\n| --- | --- |\n| 1 | 2 |\n", 16);
+        for l in &r.lines {
+            assert!(cells_width(&l.cells) <= 16);
+        }
+        let head: String = r.lines[0].cells.iter().map(|c| c.ch).collect();
+        assert_eq!(head, "a │ bbbbbbbbbbb…");
+    }
+
+    #[test]
     fn tables_get_aligned_columns_and_a_head_rule() {
         let md = "| a | bbbb |\n| --- | ---: |\n| 1 | 2 |\n";
         let r = render(md);
@@ -737,7 +782,7 @@ mod tests {
         let line = r.lines.iter().find(|l| l.text().contains("wow")).unwrap();
         assert_eq!(line.text(), "a wow b");
         let cell = line.cells.iter().find(|c| c.ch == 'w').unwrap();
-        assert_eq!(cell.style.bg, theme::HIGHLIGHT.bg);
+        assert_eq!(cell.style.bg, theme::highlight().bg);
     }
 
     #[test]
@@ -749,7 +794,7 @@ mod tests {
         let done = r.lines.iter().find(|l| l.text().contains("done")).unwrap();
         assert_eq!(done.text(), "✓ done");
         assert_eq!(done.checkbox, Some(3));
-        assert!(done.cells[0].style.fg == theme::DONE.fg);
+        assert!(done.cells[0].style.fg == theme::done().fg);
     }
 
     #[test]

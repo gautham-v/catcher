@@ -1,13 +1,27 @@
 use crate::app::{App, EditRow, Item, Overlay, View};
+use crate::md::theme;
 use crate::render::PCell;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use ratatui_image::{CropOptions, Resize, StatefulImage};
 
-const DIM: Style = Style::new().fg(Color::DarkGray);
+/// Chrome that should read as present but never first. Not `DarkGray`: many
+/// terminal profiles set that slot almost to the background, which is where
+/// status text goes to die.
+fn dim() -> Style {
+    theme::marker()
+}
+
+/// Every panel in the app: one border style, one corner shape.
+fn panel() -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border())
+}
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let [content, status] =
@@ -192,8 +206,8 @@ struct Row {
 /// The rendered page: pre-wrapped so every row is exactly one screen line,
 /// which is what makes link and checkbox hit-testing exact.
 fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
-    let rendered = crate::render::render(&app.active_note().content);
     let width = area.width.max(1) as usize;
+    let rendered = crate::render::render_wide(&app.active_note().content, width);
     let dir = app.note_dir();
 
     // wrap, then give drawable images the rows they need
@@ -347,19 +361,16 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         View::Preview => "  preview",
     };
     let left = Line::from(vec![
-        Span::styled(format!(" {name}"), DIM),
-        Span::styled(mode, Style::new().fg(Color::Yellow)),
+        Span::styled(format!(" {name}"), dim()),
+        Span::styled(mode, theme::state()),
     ]);
     let mut right_spans = Vec::new();
     if let Some((msg, _)) = &app.status {
-        right_spans.push(Span::styled(
-            format!("{msg}   "),
-            Style::new().fg(Color::Magenta),
-        ));
+        right_spans.push(Span::styled(format!("{msg}   "), theme::state()));
     }
     right_spans.push(Span::styled(
         "^K palette  ^N new  ^P preview  ^G shortcuts  ^Q quit ",
-        DIM,
+        dim(),
     ));
     let right = Line::from(right_spans);
     f.render_widget(Paragraph::new(left), area);
@@ -379,7 +390,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let shown = items.len().min(10) as u16;
     let rect = overlay_rect(f, shown + 3);
     f.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL).border_style(DIM);
+    let block = panel();
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -388,7 +399,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical(rows).split(inner);
 
     let prompt = if app.query.is_empty() {
-        Line::from(Span::styled("search notes or run a command…", DIM))
+        Line::from(Span::styled("search notes or run a command…", dim()))
     } else {
         Line::from(app.query.as_str())
     };
@@ -435,12 +446,15 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
         };
         let line = Line::from(vec![
             Span::styled(format!(" {name}  "), base.add_modifier(Modifier::BOLD)),
-            Span::styled(detail.chars().take(40).collect::<String>(), base.patch(DIM)),
+            Span::styled(
+                detail.chars().take(40).collect::<String>(),
+                base.patch(dim()),
+            ),
         ]);
         f.render_widget(Paragraph::new(line).style(base), area);
         if !tag.is_empty() {
             f.render_widget(
-                Paragraph::new(Span::styled(format!("{tag} "), base.patch(DIM))).right_aligned(),
+                Paragraph::new(Span::styled(format!("{tag} "), base.patch(dim()))).right_aligned(),
                 area,
             );
         }
@@ -467,21 +481,21 @@ fn draw_help(f: &mut Frame) {
         }
         lines.push(Line::from(Span::styled(
             format!(" {group}"),
-            Style::new().fg(Color::Yellow),
+            theme::bright().add_modifier(Modifier::BOLD),
         )));
         for (key, what) in rows.iter() {
             let pad = " ".repeat(keyw - crate::md::str_width(key));
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {pad}{key}  "),
-                    Style::new().add_modifier(Modifier::BOLD),
+                    theme::bright().add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(*what, DIM),
+                Span::styled(*what, dim()),
             ]));
         }
     }
     lines.push(Line::default());
-    lines.push(Line::from(Span::styled(" any key closes", DIM)));
+    lines.push(Line::from(Span::styled(" any key closes", dim())));
 
     let area = f.area();
     let width = (keyw as u16 + 54).min(area.width.saturating_sub(2));
@@ -493,13 +507,7 @@ fn draw_help(f: &mut Frame) {
         height,
     );
     f.render_widget(Clear, rect);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(DIM)
-        .title(Span::styled(
-            " keyboard shortcuts ",
-            Style::new().fg(Color::Yellow),
-        ));
+    let block = panel().title(Span::styled(" keyboard shortcuts ", theme::state()));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     f.render_widget(Paragraph::new(lines), inner);
@@ -508,20 +516,18 @@ fn draw_help(f: &mut Frame) {
 fn draw_confirm(f: &mut Frame, app: &mut App) {
     let rect = overlay_rect(f, 4);
     f.render_widget(Clear, rect);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(Color::Red));
+    let block = panel().border_style(theme::danger());
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let title = app.active_note().title();
     let lines = vec![
         Line::from(Span::styled(
             format!(" delete “{title}”?"),
-            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+            theme::danger().add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             " this deletes the file. enter to confirm, esc to cancel.",
-            DIM,
+            dim(),
         )),
     ];
     f.render_widget(Paragraph::new(lines), inner);
@@ -532,23 +538,21 @@ fn draw_confirm(f: &mut Frame, app: &mut App) {
 fn draw_rename(f: &mut Frame, app: &mut App) {
     let rect = overlay_rect(f, 4);
     f.render_widget(Clear, rect);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(Color::Yellow));
+    let block = panel();
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let lines = vec![
         Line::from(vec![
-            Span::styled(" rename file  ", Style::new().fg(Color::Yellow)),
+            Span::styled(" rename file  ", theme::state()),
             Span::styled(
                 app.rename_input.as_str(),
                 Style::new().add_modifier(Modifier::BOLD),
             ),
-            Span::styled(".md", DIM),
+            Span::styled(".md", dim()),
         ]),
         Line::from(Span::styled(
             " enter renames the file on disk, esc cancels.",
-            DIM,
+            dim(),
         )),
     ];
     f.render_widget(Paragraph::new(lines), inner);

@@ -78,9 +78,10 @@ keybind = cmd+down=unbind
 ```toml
 notes_dir = "~/tinynote"                    # where the .md files live
 attachments_dir = "~/tinynote/attachments"  # where pasted images are written
+theme = "dark"                              # or "light"
 ```
 
-Both accept a leading `~/`. `TINYNOTE_DIR` overrides `notes_dir` for a single run: `TINYNOTE_DIR=/tmp/notes tinynote`. The palette's **Open settings** opens the file in `$EDITOR` and reloads on exit.
+The two paths accept a leading `~/`. `theme` picks which grey ramp to draw with — tinynote never paints a background of its own, so this only tells it which way your terminal's runs. `TINYNOTE_DIR` overrides `notes_dir` for a single run: `TINYNOTE_DIR=/tmp/notes tinynote`. The palette's **Open settings** opens the file in `$EDITOR` and reloads on exit.
 
 ## Development
 
@@ -90,7 +91,7 @@ cargo test
 cargo clippy
 ```
 
-Rust, ratatui + crossterm. `src/editor.rs` is the text buffer, `src/md.rs` the live-preview styling and click mapping, `src/render.rs` the full-page preview, `src/images.rs` inline images, `src/cli.rs` argument parsing, `src/config.rs` the config file, `src/clipboard.rs` copy and paste.
+Rust, ratatui + crossterm. `src/editor.rs` is the text buffer, `src/md.rs` the live-preview styling and click mapping, `src/render.rs` the full-page preview, `src/images.rs` inline images, `src/cli.rs` argument parsing, `src/config.rs` the config file, `src/clipboard.rs` copy and paste. Every colour in the app lives in one place: the `theme` module at the top of `src/md.rs`.
 
 ## License
 

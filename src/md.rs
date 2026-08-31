@@ -28,38 +28,155 @@ pub fn str_width(s: &str) -> usize {
 }
 
 /// The one place colours live, so preview and live preview agree.
+///
+/// A neutral grey chassis with a single accent. Hue is never decoration: it
+/// appears in exactly three places — the top-level heading, a checked task,
+/// and the status bar when tinynote is talking about itself. Everything else
+/// is a step on the grey ramp, which is why the ramp never reaches pure black
+/// or pure white at either end: text that hits #ffffff on someone's custom
+/// background looks like a bug, not emphasis.
+///
+/// The two palettes are the same structure at both polarities, not an
+/// inversion — the code background goes *darker* than the page in light mode,
+/// because "raised" means more contrast with the ground, not lighter.
 pub mod theme {
     use super::*;
+    use std::sync::OnceLock;
 
+    /// Which polarity the terminal is showing.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+    pub enum Mode {
+        #[default]
+        Dark,
+        Light,
+    }
+
+    /// Every colour tinynote can draw with, at one polarity.
+    pub struct Palette {
+        /// The one hue: h1, a checked mark, status-bar state.
+        pub accent: Color,
+        /// The brightest step — keys, group headings, anything that must lead.
+        pub bright: Color,
+        /// Second-rank headings and other structure that should recede.
+        pub grey: Color,
+        /// Markers, rules, quotes: present but never read first.
+        pub dim: Color,
+        /// Links, which lean on the underline rather than the colour.
+        pub link: Color,
+        /// Behind code, inline and fenced alike.
+        pub code_bg: Color,
+        /// Panel borders at rest.
+        pub border: Color,
+        /// Destructive confirmation, and nothing else.
+        pub danger: Color,
+        /// The ground a highlight or an inverted heading sits its text on.
+        pub ground: Color,
+    }
+
+    const DARK: Palette = Palette {
+        accent: Color::Rgb(0xff, 0x9e, 0x64),
+        bright: Color::Rgb(0xe1, 0xe1, 0xe1),
+        grey: Color::Rgb(0x78, 0x78, 0x78),
+        dim: Color::Rgb(0x6c, 0x6c, 0x6c),
+        link: Color::Rgb(0x9a, 0x9a, 0x9a),
+        code_bg: Color::Rgb(0x1c, 0x1c, 0x1c),
+        border: Color::Rgb(0x32, 0x32, 0x37),
+        danger: Color::Rgb(0xf7, 0x76, 0x8e),
+        ground: Color::Rgb(0x14, 0x14, 0x14),
+    };
+
+    const LIGHT: Palette = Palette {
+        accent: Color::Rgb(0xb8, 0x5c, 0x18),
+        bright: Color::Rgb(0x26, 0x26, 0x26),
+        grey: Color::Rgb(0x76, 0x76, 0x76),
+        dim: Color::Rgb(0x8d, 0x8d, 0x8d),
+        link: Color::Rgb(0x5a, 0x58, 0x52),
+        code_bg: Color::Rgb(0xe2, 0xe2, 0xe2),
+        border: Color::Rgb(0xc8, 0xc8, 0xcd),
+        danger: Color::Rgb(0xcd, 0x30, 0x48),
+        ground: Color::Rgb(0xee, 0xee, 0xee),
+    };
+
+    static MODE: OnceLock<Mode> = OnceLock::new();
+
+    /// Fix the polarity for the run. The first call wins; later ones are
+    /// ignored, so a stray call in a test can never change a palette a
+    /// rendered line was already measured against.
+    pub fn set_mode(mode: Mode) {
+        let _ = MODE.set(mode);
+    }
+
+    pub fn palette() -> &'static Palette {
+        match MODE.get().copied().unwrap_or_default() {
+            Mode::Dark => &DARK,
+            Mode::Light => &LIGHT,
+        }
+    }
+
+    /// Body text is never coloured: it inherits whatever foreground the
+    /// terminal is already using, so a custom Ghostty theme keeps its own
+    /// idea of what plain prose looks like.
     pub const PLAIN: Style = Style::new();
 
+    /// Headings fall off into the ramp rather than each taking a hue: the
+    /// accent leads, then grey, then weight alone.
     pub fn heading(level: usize) -> Style {
         match level {
-            1 => Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            2 => Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            1 => Style::new()
+                .fg(palette().accent)
+                .add_modifier(Modifier::BOLD),
+            2 => Style::new().fg(palette().grey).add_modifier(Modifier::BOLD),
             _ => Style::new().add_modifier(Modifier::BOLD),
         }
     }
 
-    pub const QUOTE: Style = Style::new()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::ITALIC);
-    pub const MARKER: Style = Style::new().fg(Color::DarkGray);
-    pub const CODE: Style = Style::new().fg(Color::Yellow);
-    pub const LINK: Style = Style::new()
-        .fg(Color::Blue)
-        .add_modifier(Modifier::UNDERLINED);
-    pub const HIGHLIGHT: Style = Style::new().fg(Color::Black).bg(Color::Yellow);
-    pub const DONE: Style = Style::new().fg(Color::Green);
+    pub fn quote() -> Style {
+        Style::new()
+            .fg(palette().dim)
+            .add_modifier(Modifier::ITALIC)
+    }
+    pub fn marker() -> Style {
+        Style::new().fg(palette().dim)
+    }
+    /// Code carries no hue of its own — the raised background is the signal.
+    pub fn code() -> Style {
+        Style::new().bg(palette().code_bg)
+    }
+    pub fn link() -> Style {
+        Style::new()
+            .fg(palette().link)
+            .add_modifier(Modifier::UNDERLINED)
+    }
+    pub fn highlight() -> Style {
+        Style::new().fg(palette().ground).bg(palette().accent)
+    }
+    pub fn done() -> Style {
+        Style::new().fg(palette().accent)
+    }
     /// The text of a finished task: dim and struck through.
-    pub const DONE_TEXT: Style = Style::new()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::CROSSED_OUT);
+    pub fn done_text() -> Style {
+        Style::new()
+            .fg(palette().dim)
+            .add_modifier(Modifier::CROSSED_OUT)
+    }
+    /// Status-bar state, panel titles: tinynote talking about itself.
+    pub fn state() -> Style {
+        Style::new().fg(palette().accent)
+    }
+    pub fn border() -> Style {
+        Style::new().fg(palette().border)
+    }
+    pub fn danger() -> Style {
+        Style::new().fg(palette().danger)
+    }
+    pub fn bright() -> Style {
+        Style::new().fg(palette().bright)
+    }
 
-    pub const CHECKED: &str = "✓";
-    pub const UNCHECKED: &str = "☐";
-    pub const BULLET: &str = "•";
-    pub const QUOTE_BAR: &str = "▌";
+    pub const CHECKED: &str = "\u{2713}";
+    pub const UNCHECKED: &str = "\u{2610}";
+    pub const BULLET: &str = "\u{2022}";
+    pub const QUOTE_BAR: &str = "\u{258c}";
 }
 
 /// Column alignment of a table column, shared by both views.
@@ -93,6 +210,55 @@ pub fn pad_for(content: usize, width: usize, align: Align) -> (usize, usize) {
         Align::Center => (pad / 2, pad - pad / 2),
         Align::Left => (0, pad),
     }
+}
+
+/// Narrowest a column is ever squeezed to: one character plus the ellipsis.
+pub const MIN_COL: usize = 2;
+
+/// Shrink `widths` until the whole table fits `total` display columns.
+///
+/// Columns are cut widest-first, so one runaway cell (a pasted URL) gives up
+/// its space before the short columns beside it lose any.
+pub fn fit_widths(widths: &[usize], total: usize) -> Vec<usize> {
+    let mut w = widths.to_vec();
+    if w.is_empty() {
+        return w;
+    }
+    let seps = COL_SEP.chars().count() * (w.len() - 1);
+    let budget = total.saturating_sub(seps);
+    // below this even the minimum does not fit; nothing left to give
+    let floor = MIN_COL * w.len();
+    if budget <= floor {
+        return vec![MIN_COL; w.len()];
+    }
+    while w.iter().sum::<usize>() > budget {
+        let (i, _) = w
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, v)| (**v, std::cmp::Reverse(*i)))
+            .unwrap();
+        w[i] -= 1;
+    }
+    w
+}
+
+/// `text` cut to `width` display columns, with an ellipsis when it was cut.
+pub fn truncate(text: &str, width: usize) -> String {
+    if str_width(text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let cw = char_width(ch);
+        if used + cw > width.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push('…');
+    out
 }
 
 /// The rule drawn under a table's head, sized to its columns.
@@ -408,7 +574,7 @@ pub fn style_line(src: &str) -> RLine {
     // fenced code lines: shown verbatim, dimmed
     if src.trim_start().starts_with("```") {
         for (idx, _) in chars.iter().enumerate() {
-            b.keep(idx, theme::CODE);
+            b.keep(idx, theme::code());
         }
         return RLine {
             cells: b.cells,
@@ -420,7 +586,7 @@ pub fn style_line(src: &str) -> RLine {
     let trimmed = src.trim();
     if trimmed.len() >= 3 && trimmed.chars().all(|c| c == '-') {
         for (idx, _) in chars.iter().enumerate() {
-            b.sub("─", theme::MARKER, idx);
+            b.sub("─", theme::marker(), idx);
         }
         return RLine {
             cells: b.cells,
@@ -435,7 +601,7 @@ pub fn style_line(src: &str) -> RLine {
             .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'));
         for (idx, ch) in chars.iter().enumerate() {
             let style = if rule || *ch == '|' {
-                theme::MARKER
+                theme::marker()
             } else {
                 theme::PLAIN
             };
@@ -457,15 +623,15 @@ pub fn style_line(src: &str) -> RLine {
         }
         if j < chars.len() && chars[j] == '>' {
             for k in i..j {
-                b.keep(k, theme::MARKER);
+                b.keep(k, theme::marker());
             }
-            b.sub(theme::QUOTE_BAR, theme::MARKER, j);
+            b.sub(theme::QUOTE_BAR, theme::marker(), j);
             i = j + 1;
             if i < chars.len() && chars[i] == ' ' {
-                b.keep(i, theme::MARKER);
+                b.keep(i, theme::marker());
                 i += 1;
             }
-            base = theme::QUOTE;
+            base = theme::quote();
         } else {
             break;
         }
@@ -508,7 +674,7 @@ pub fn style_line(src: &str) -> RLine {
         }
         i += width;
         if marker == theme::CHECKED {
-            base = base.patch(theme::DONE_TEXT);
+            base = base.patch(theme::done_text());
         }
     }
 
@@ -529,12 +695,12 @@ fn list_marker(chars: &[char], i: usize) -> Option<(&'static str, Style, usize)>
     }
     if at(i + 2) == Some('[') && at(i + 4) == Some(']') && at(i + 5) == Some(' ') {
         return match at(i + 3) {
-            Some(' ') => Some((theme::UNCHECKED, theme::MARKER, 6)),
-            Some('x') | Some('X') => Some((theme::CHECKED, theme::DONE, 6)),
-            _ => Some((theme::BULLET, theme::MARKER, 2)),
+            Some(' ') => Some((theme::UNCHECKED, theme::marker(), 6)),
+            Some('x') | Some('X') => Some((theme::CHECKED, theme::done(), 6)),
+            _ => Some((theme::BULLET, theme::marker(), 2)),
         };
     }
-    Some((theme::BULLET, theme::MARKER, 2))
+    Some((theme::BULLET, theme::marker(), 2))
 }
 
 /// Inline emphasis, code, links and highlights from source column `i` on.
@@ -554,7 +720,7 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
     // `code`
     if c == '`' {
         let end = find(b.src, i + 1, '`')?;
-        return Some(delimited(b, i, i + 1, end, end + 1, theme::CODE));
+        return Some(delimited(b, i, i + 1, end, end + 1, theme::code()));
     }
 
     // [text](url) — show the text, hide the target
@@ -562,7 +728,7 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
         if let Some(close) = find(b.src, i + 1, ']') {
             if b.src.get(close + 1) == Some(&'(') {
                 if let Some(paren) = find(b.src, close + 2, ')') {
-                    let style = base.patch(theme::LINK);
+                    let style = base.patch(theme::link());
                     b.sub("", style, i);
                     for k in i + 1..close {
                         b.keep(k, style);
@@ -585,7 +751,7 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
         while end > i && matches!(b.src[end - 1], '.' | ',' | ')' | ']' | '!' | '?') {
             end -= 1;
         }
-        let style = base.patch(theme::LINK);
+        let style = base.patch(theme::link());
         for k in i..end {
             b.keep(k, style);
         }
@@ -596,7 +762,7 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
     for (m, style) in [
         ('*', base.add_modifier(Modifier::BOLD)),
         ('~', base.add_modifier(Modifier::CROSSED_OUT)),
-        ('=', theme::HIGHLIGHT),
+        ('=', theme::highlight()),
     ] {
         if c == m && b.src.get(i + 1) == Some(&m) {
             if let Some(end) = find_pair(b.src, i + 2, m) {
@@ -838,7 +1004,7 @@ pub fn style_block_line(lines: &[String], block: &Block, row: usize, width: usiz
         BlockKind::Fence => fence_line(src, row == block.start || row == block.end),
         BlockKind::Rule => rule_line(src, width),
         BlockKind::Image => image_fallback_line(src),
-        BlockKind::Table => table_line(&lines[block.start..=block.end], row - block.start),
+        BlockKind::Table => table_line(&lines[block.start..=block.end], row - block.start, width),
     }
 }
 
@@ -866,7 +1032,7 @@ fn fence_line(src: &str, cap: bool) -> RLine {
             .enumerate()
             .map(|(i, ch)| Cell {
                 ch,
-                style: theme::CODE,
+                style: theme::code(),
                 src: i,
             })
             .collect();
@@ -880,7 +1046,7 @@ fn fence_line(src: &str, cap: bool) -> RLine {
         .skip_while(|(_, ch)| *ch == '`' || *ch == '~' || ch.is_whitespace())
         .map(|(i, ch)| Cell {
             ch,
-            style: theme::MARKER,
+            style: theme::marker(),
             src: i,
         })
         .collect();
@@ -895,7 +1061,7 @@ fn rule_line(src: &str, width: usize) -> RLine {
     let cells = (0..n)
         .map(|i| Cell {
             ch: '─',
-            style: theme::MARKER,
+            style: theme::marker(),
             src: i.min(len),
         })
         .collect();
@@ -916,7 +1082,7 @@ fn image_fallback_line(src: &str) -> RLine {
         .enumerate()
         .map(|(i, ch)| Cell {
             ch,
-            style: theme::MARKER,
+            style: theme::marker(),
             src: i.min(len),
         })
         .collect();
@@ -968,7 +1134,7 @@ fn align_of(spec: &str) -> Align {
 
 /// Lay a table's rows out in aligned columns, and draw row `row` of it.
 /// Every source row is exactly one display row, separator included.
-fn table_line(rows: &[String], row: usize) -> RLine {
+fn table_line(rows: &[String], row: usize, width: usize) -> RLine {
     let parsed: Vec<(Vec<TCell>, Vec<usize>)> = rows.iter().map(|r| split_row(r)).collect();
     let rule_row = rows.iter().position(|r| is_table_rule(r));
     let aligns: Vec<Align> = rule_row
@@ -981,7 +1147,7 @@ fn table_line(rows: &[String], row: usize) -> RLine {
         .filter(|(i, _)| Some(*i) != rule_row)
         .map(|(_, (c, _))| c.iter().map(|c| str_width(&c.text)).collect())
         .collect();
-    let widths = column_widths(&measured, cols);
+    let widths = fit_widths(&column_widths(&measured, cols), width);
 
     let src = rows.get(row).map(String::as_str).unwrap_or("");
     // the separator row becomes the rule under the head
@@ -992,7 +1158,7 @@ fn table_line(rows: &[String], row: usize) -> RLine {
             .enumerate()
             .map(|(i, ch)| Cell {
                 ch,
-                style: theme::MARKER,
+                style: theme::marker(),
                 src: i.min(len),
             })
             .collect();
@@ -1010,7 +1176,7 @@ fn table_line(rows: &[String], row: usize) -> RLine {
     for (ci, w) in widths.iter().enumerate() {
         if ci > 0 {
             let pipe = pipes.get(ci).copied().unwrap_or(0);
-            cells.extend(at(COL_SEP, theme::MARKER, pipe));
+            cells.extend(at(COL_SEP, theme::marker(), pipe));
         }
         let empty = TCell {
             start: pipes.last().copied().unwrap_or(0),
@@ -1018,16 +1184,17 @@ fn table_line(rows: &[String], row: usize) -> RLine {
         };
         let cell = row_cells.get(ci).unwrap_or(&empty);
         let align = aligns.get(ci).copied().unwrap_or(Align::Left);
-        let (left, right) = pad_for(str_width(&cell.text), *w, align);
+        let text = truncate(&cell.text, *w);
+        let (left, right) = pad_for(str_width(&text), *w, align);
         cells.extend(at(&" ".repeat(left), body, cell.start));
-        for (i, ch) in cell.text.chars().enumerate() {
+        for (i, ch) in text.chars().enumerate() {
             cells.push(Cell {
                 ch,
                 style: body,
                 src: cell.start + i,
             });
         }
-        let after = cell.start + cell.text.chars().count();
+        let after = cell.start + text.chars().count();
         cells.extend(at(&" ".repeat(right), body, after));
     }
     done(cells, src)
@@ -1078,18 +1245,18 @@ mod tests {
         let l = style_line("see [docs](http://x.y) now");
         assert_eq!(text(&l), "see docs now");
         assert_eq!(l.one_row().display_to_source(4), 5);
-        assert!(l.cells[4].style.fg == Some(Color::Blue));
+        assert!(l.cells[4].style.fg == theme::link().fg);
     }
 
     #[test]
     fn table_rows_keep_their_characters_and_dim_the_pipes() {
         let l = style_line("| a | b |");
         assert_eq!(text(&l), "| a | b |");
-        assert_eq!(l.cells[0].style, theme::MARKER);
+        assert_eq!(l.cells[0].style, theme::marker());
         assert_eq!(l.cells[2].style, theme::PLAIN);
         assert_eq!(l.one_row().display_to_source(4), 4);
         let sep = style_line("| --- | ---: |");
-        assert!(sep.cells.iter().all(|c| c.style == theme::MARKER));
+        assert!(sep.cells.iter().all(|c| c.style == theme::marker()));
     }
 
     #[test]
@@ -1097,7 +1264,7 @@ mod tests {
         let l = style_line("a ==wow== b");
         assert_eq!(text(&l), "a wow b");
         let w = l.cells.iter().find(|c| c.ch == 'w').unwrap();
-        assert_eq!(w.style.bg, theme::HIGHLIGHT.bg);
+        assert_eq!(w.style.bg, theme::highlight().bg);
     }
 
     #[test]
@@ -1105,7 +1272,7 @@ mod tests {
         let l = style_line("see https://x.y/z. ok");
         assert_eq!(text(&l), "see https://x.y/z. ok");
         let c = l.cells[4];
-        assert_eq!(c.style.fg, theme::LINK.fg);
+        assert_eq!(c.style.fg, theme::link().fg);
         // the trailing full stop is not part of the link
         assert_eq!(l.cells[17].style.fg, None);
     }
@@ -1268,7 +1435,7 @@ mod tests {
         // the opening cap keeps only the language, dimmed — no backticks
         let open = fence_line("```rust", true);
         assert_eq!(text(&open), "rust");
-        assert_eq!(open.cells[0].style, theme::MARKER);
+        assert_eq!(open.cells[0].style, theme::marker());
         // and the language still maps back to where it sits in the source
         assert_eq!(open.cells[0].src, 3);
         assert_eq!(open.one_row().display_to_source(0), 3);
@@ -1278,22 +1445,25 @@ mod tests {
         // a click on a blank cap still lands on that line, at its end
         assert_eq!(fence_line("```", true).one_row().display_to_source(0), 3);
         // the body is unchanged: one source line, one display line
-        assert_eq!(fence_line("let x = 1;", false).cells[0].style, theme::CODE);
+        assert_eq!(
+            fence_line("let x = 1;", false).cells[0].style,
+            theme::code()
+        );
         assert_eq!(text(&fence_line("let x = 1;", false)), "let x = 1;");
     }
 
     #[test]
     fn tables_are_laid_out_in_aligned_columns() {
         let rows = buf("| a | bbbb |\n| --- | ---: |\n| 1 | 2 |");
-        assert_eq!(text(&table_line(&rows, 0)), "a │ bbbb");
-        assert_eq!(text(&table_line(&rows, 1)), "──┼─────");
-        assert_eq!(text(&table_line(&rows, 2)), "1 │    2"); // right aligned
+        assert_eq!(text(&table_line(&rows, 0, 80)), "a │ bbbb");
+        assert_eq!(text(&table_line(&rows, 1, 80)), "──┼─────");
+        assert_eq!(text(&table_line(&rows, 2, 80)), "1 │    2"); // right aligned
                                                              // every row is the same width, and the head is bold
-        assert!(table_line(&rows, 0).cells[0]
+        assert!(table_line(&rows, 0, 80).cells[0]
             .style
             .add_modifier
             .contains(Modifier::BOLD));
-        assert!(!table_line(&rows, 2).cells[0]
+        assert!(!table_line(&rows, 2, 80).cells[0]
             .style
             .add_modifier
             .contains(Modifier::BOLD));
@@ -1309,16 +1479,28 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_table_is_squeezed_into_the_page_width() {
+        let rows = buf("| a | bbbbbbbbbbbbbbbbbbbb |\n| --- | --- |\n| 1 | 2 |");
+        for r in 0..3 {
+            let l = table_line(&rows, r, 16);
+            assert!(str_width(&text(&l)) <= 16, "{:?}", text(&l));
+        }
+        // the runaway column gave up the space, not the short one beside it
+        assert_eq!(text(&table_line(&rows, 0, 16)), "a │ bbbbbbbbbbb…");
+        assert_eq!(text(&table_line(&rows, 2, 16)), "1 │ 2           ");
+    }
+
+    #[test]
     fn clicking_a_laid_out_table_maps_back_into_the_source_row() {
         let rows = buf("| a | bbbb |\n| --- | ---: |\n| 1 | 2 |");
-        let l = table_line(&rows, 0);
+        let l = table_line(&rows, 0, 80);
         // "a" is source column 2; the separator maps to the pipe at column 4
         assert_eq!(l.one_row().display_to_source(0), 2);
         assert_eq!(l.one_row().display_to_source(2), 4);
         // "bbbb" starts at source column 6
         assert_eq!(l.one_row().display_to_source(4), 6);
         // the padding of a right-aligned cell clamps to its content
-        let body = table_line(&rows, 2);
+        let body = table_line(&rows, 2, 80);
         assert_eq!(body.one_row().display_to_source(4), 6);
     }
 
@@ -1342,3 +1524,4 @@ mod tests {
         assert_eq!(rev, "el");
     }
 }
+

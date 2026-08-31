@@ -203,6 +203,8 @@ impl App {
         use crate::cli::Launch;
         let config = Config::load()?;
         config.ensure_dirs()?;
+        // before anything is rendered: every style resolves against this
+        crate::md::theme::set_mode(config.theme);
 
         // where this session is rooted, and which note it should open on
         let (dir, want): (PathBuf, Option<Want>) = match &launch {

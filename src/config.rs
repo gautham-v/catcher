@@ -9,6 +9,7 @@
 //! there is always something to open and edit. `TINYNOTE_DIR` still wins over
 //! `notes_dir`, which keeps `TINYNOTE_DIR=/tmp/x cargo run` working.
 
+use crate::md::theme::Mode;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,12 +23,17 @@ const TEMPLATE: &str = "\
 
 # Where pasted images are written. Defaults to <notes_dir>/attachments.
 # attachments_dir = \"~/tinynote/attachments\"
+
+# Which palette to draw with: \"dark\" or \"light\". tinynote never paints a
+# background, so this only says which way your terminal's own background runs.
+# theme = \"dark\"
 ";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub notes_dir: PathBuf,
     pub attachments_dir: PathBuf,
+    pub theme: Mode,
 }
 
 /// Path to the config file, whether or not it exists yet.
@@ -68,9 +74,17 @@ impl Config {
         let attachments_dir = value(text, "attachments_dir")
             .map(|v| expand(&v, &home))
             .unwrap_or_else(|| notes_dir.join("attachments"));
+        // anything but "light" is dark: a typo should leave the default
+        // palette standing rather than flip it to the one that reads wrong on
+        // the overwhelmingly more common dark terminal
+        let theme = match value(text, "theme").as_deref() {
+            Some("light") => Mode::Light,
+            _ => Mode::Dark,
+        };
         Config {
             notes_dir,
             attachments_dir,
+            theme,
         }
     }
 
@@ -176,10 +190,18 @@ mod tests {
     }
 
     #[test]
+    fn theme_defaults_to_dark_and_only_light_flips_it() {
+        assert_eq!(Config::from_str("").theme, Mode::Dark);
+        assert_eq!(Config::from_str("theme = \"light\"").theme, Mode::Light);
+        assert_eq!(Config::from_str("theme = \"lite\"").theme, Mode::Dark);
+    }
+
+    #[test]
     fn links_are_relative_inside_the_notes_dir() {
         let c = Config {
             notes_dir: PathBuf::from("/n"),
             attachments_dir: PathBuf::from("/n/attachments"),
+            theme: Mode::Dark,
         };
         assert_eq!(
             c.link_for(Path::new("/n/attachments/a.png")),
