@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Raycast Notes in your terminal: a tiny markdown notes TUI over plain files"
 license = "MIT"
+repository = "https://github.com/tinycomputer-io/tinynote"
+readme = "README.md"
+keywords = ["notes", "markdown", "tui", "terminal"]
+categories = ["command-line-utilities", "text-editors"]
 
 [dependencies]
 ratatui = "0.29"
