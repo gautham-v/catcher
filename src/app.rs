@@ -53,6 +53,7 @@ pub enum Overlay {
     Palette,
     ConfirmDelete,
     RenameFile,
+    Help,
 }
 
 #[derive(Clone, PartialEq)]
@@ -61,15 +62,17 @@ pub enum Command {
     DeleteNote,
     RenameFile,
     TogglePreview,
+    Shortcuts,
     OpenSettings,
     Quit,
 }
 
-const COMMANDS: [Command; 6] = [
+const COMMANDS: [Command; 7] = [
     Command::NewNote,
     Command::DeleteNote,
     Command::RenameFile,
     Command::TogglePreview,
+    Command::Shortcuts,
     Command::OpenSettings,
     Command::Quit,
 ];
@@ -81,11 +84,70 @@ impl Command {
             Command::DeleteNote => ("Delete note", "remove the note on screen"),
             Command::RenameFile => ("Rename file", "change the filename on disk"),
             Command::TogglePreview => ("Toggle preview", "rendered markdown, read-only"),
+            Command::Shortcuts => ("Keyboard shortcuts", "every binding, on one card  ^G"),
             Command::OpenSettings => ("Open settings", "edit config.toml in $EDITOR"),
             Command::Quit => ("Quit", "save and exit"),
         }
     }
 }
+
+/// Every binding, grouped, for the ^G card. The single source of truth: the
+/// status bar's hints and this list are the only places bindings are named,
+/// so a key that isn't here isn't discoverable and shouldn't exist.
+pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "notes",
+        &[
+            ("^K", "command palette — search notes, run commands"),
+            ("^N", "new note"),
+            ("^S", "save now (notes autosave anyway)"),
+            ("^P", "toggle rendered preview"),
+            ("^G", "this card"),
+            ("^Q", "save and quit"),
+        ],
+    ),
+    (
+        "editing",
+        &[
+            ("^Z", "undo"),
+            ("^Y  ⇧^Z", "redo"),
+            ("^C", "copy selection"),
+            ("^X", "cut selection"),
+            ("^V", "paste — an image becomes an attachment"),
+            ("⌘A", "select all"),
+            ("⌥⌫", "delete the word before the cursor"),
+            ("⌘⌫", "delete to the start of the line"),
+            ("tab", "two spaces"),
+        ],
+    ),
+    (
+        "moving",
+        &[
+            ("⌥← ⌥→", "by word"),
+            ("⌘← ⌘→", "start / end of line"),
+            ("⌘↑ ⌘↓", "start / end of note"),
+            ("⇧ + any motion", "extend the selection"),
+            ("click, drag", "place the cursor, select (drag copies)"),
+            ("⌥click  ^click", "open the link under the pointer"),
+            ("wheel", "scroll without moving the cursor"),
+        ],
+    ),
+    (
+        "palette",
+        &[
+            ("type", "fuzzy-search titles and bodies"),
+            ("↑ ↓", "move  ·  ⏎ open or run  ·  esc close"),
+        ],
+    ),
+    (
+        "preview",
+        &[
+            ("↑ ↓  pgup pgdn", "scroll"),
+            ("click", "a link opens it, a checkbox toggles it"),
+            ("esc  ⏎", "back to editing"),
+        ],
+    ),
+];
 
 #[derive(Clone, PartialEq)]
 pub enum Item {
@@ -246,10 +308,6 @@ impl App {
         }
     }
 
-    pub fn saved(&self) -> bool {
-        !self.dirty
-    }
-
     pub fn flash(&mut self, msg: String) {
         self.status = Some((msg, Instant::now()));
     }
@@ -332,6 +390,7 @@ impl App {
             Item::Note(i) => self.switch_to(i),
             Item::Command(Command::NewNote) => self.new_note(),
             Item::Command(Command::TogglePreview) => self.toggle_preview(),
+            Item::Command(Command::Shortcuts) => self.overlay = Overlay::Help,
             Item::Command(Command::OpenSettings) => {
                 self.save_now();
                 self.edit_config = true;
@@ -395,8 +454,17 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Cmd stands in for Ctrl on these, for terminals that report it: ⌘Z
+        // and friends are what a Mac hand reaches for first. The buffer's own
+        // Cmd bindings are all arrows and backspace, so nothing collides.
+        let cmd = key.modifiers.contains(KeyModifiers::SUPER);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if cmd && matches!(key.code, KeyCode::Char('a')) {
+            self.editor.select_all();
+            return;
+        }
         // global bindings
-        match (ctrl, key.code) {
+        match (ctrl || cmd, key.code) {
             (true, KeyCode::Char('q')) => {
                 self.sync_editor_to_note();
                 self.save_now();
@@ -405,6 +473,37 @@ impl App {
             }
             (true, KeyCode::Char('c')) => {
                 self.copy_selection();
+                return;
+            }
+            (true, KeyCode::Char('x')) => {
+                self.cut_selection();
+                return;
+            }
+            (true, KeyCode::Char('s')) => {
+                self.sync_editor_to_note();
+                self.save_now();
+                self.flash("saved".to_string());
+                return;
+            }
+            // ⇧^Z is redo, the way every other editor spells it
+            (true, KeyCode::Char('z' | 'Z')) => {
+                if shift {
+                    self.redo();
+                } else {
+                    self.undo();
+                }
+                return;
+            }
+            (true, KeyCode::Char('y')) => {
+                self.redo();
+                return;
+            }
+            (true, KeyCode::Char('g')) => {
+                self.overlay = if self.overlay == Overlay::Help {
+                    Overlay::None
+                } else {
+                    Overlay::Help
+                };
                 return;
             }
             (true, KeyCode::Char('v')) => {
@@ -434,6 +533,7 @@ impl App {
         }
 
         match self.overlay {
+            Overlay::Help => self.overlay = Overlay::None,
             Overlay::Palette => self.on_palette_key(key),
             Overlay::ConfirmDelete => match key.code {
                 KeyCode::Enter => {
@@ -704,6 +804,48 @@ impl App {
         };
         self.editor.set_line(row, toggled);
         self.sync_editor_to_note();
+    }
+
+    /// ^Z / ^Y. Undo works on the buffer, so it also has to put the note and
+    /// the autosave timer back in step with it.
+    fn undo(&mut self) {
+        self.overlay = Overlay::None;
+        self.view = View::Edit;
+        if self.editor.undo() {
+            self.sync_editor_to_note();
+        } else {
+            self.flash("nothing to undo".to_string());
+        }
+    }
+
+    fn redo(&mut self) {
+        self.overlay = Overlay::None;
+        self.view = View::Edit;
+        if self.editor.redo() {
+            self.sync_editor_to_note();
+        } else {
+            self.flash("nothing to redo".to_string());
+        }
+    }
+
+    fn cut_selection(&mut self) {
+        if self.view != View::Edit {
+            self.flash("nothing selected".to_string());
+            return;
+        }
+        match self.editor.selected_text() {
+            Some(text) if !text.is_empty() => {
+                let chars = text.chars().count();
+                if crate::clipboard::copy(&text) {
+                    self.editor.delete_selection();
+                    self.sync_editor_to_note();
+                    self.flash(format!("cut {chars} chars"));
+                } else {
+                    self.flash("copy failed — nothing cut".to_string());
+                }
+            }
+            _ => self.flash("nothing selected".to_string()),
+        }
     }
 
     fn copy_selection(&mut self) {

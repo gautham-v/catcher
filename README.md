@@ -2,7 +2,7 @@
 
 Raycast Notes in your terminal. A tiny markdown notes TUI over plain files.
 
-Your notes are a flat folder of `.md` files in `~/notes` — nothing else. No folders, no tags, no sync, no accounts, no plugins, no vim. Open a terminal pane, jot something down, close it.
+Your notes are a flat folder of `.md` files in `~/tinynote` — nothing else. No folders, no tags, no sync, no accounts, no plugins, no vim. Open a terminal pane, jot something down, close it.
 
 ```
 cargo install --path .
@@ -29,7 +29,7 @@ Pointing tinynote at a file or a folder roots that one session there, as a per-i
 
 ## How it works
 
-- One note on screen at a time. **^K** opens the palette — fuzzy search across every note's title and body, plus the commands (new, delete, rename file, preview, settings, quit). Type, arrow, enter.
+- One note on screen at a time. **^K** opens the palette — fuzzy search across every note's title and body, plus the commands (new, delete, rename file, preview, shortcuts, settings, quit). Type, arrow, enter.
 - **^N** creates a note; the file is named after its first line and follows the title as it changes (`# Groceries` → `groceries.md`).
 - The filename is only *tracking* the title while it still equals the slug of it. Rename the file yourself — the palette's **Rename file** opens a small inline prompt on the current stem, or just `mv` it in a shell — and the two are detached: from then on the title can change all it likes and the file stays put. Nothing is recorded to make that work; the check is the name against the note's own heading. Once they are detached the palette lists the note as `Hello World (hello.md)`, so it's clear the file went its own way. The status bar always shows the filename and only the filename — the title is already the first line of the note on screen, but the file it is being written to isn't visible anywhere else.
 - The editor is a **live preview**, Obsidian-style: headings, emphasis, `==highlight==`, code, links, quote bars, bullets and `☐`/`✓` checkboxes are styled in place while you type. The line the cursor is on shows its raw markdown, so the syntax is always there to edit.
@@ -51,8 +51,8 @@ Because the notes are just files, everything else in your toolbox works on them 
 `~/.config/tinynote/config.toml` is written with commented defaults the first time you run tinynote. Two keys:
 
 ```toml
-notes_dir = "~/notes"                    # where the .md files live
-attachments_dir = "~/notes/attachments"  # where pasted images are written
+notes_dir = "~/tinynote"                    # where the .md files live
+attachments_dir = "~/tinynote/attachments"  # where pasted images are written
 ```
 
 `attachments_dir` defaults to `<notes_dir>/attachments`, and both accept a leading `~/`. `TINYNOTE_DIR` still overrides `notes_dir`, which is handy for a scratch folder: `TINYNOTE_DIR=/tmp/notes tinynote`.
@@ -64,9 +64,14 @@ The palette's **Open settings** suspends the TUI, opens the file in `$VISUAL`/`$
 | Key | Action |
 | --- | --- |
 | `^K` | Palette: search notes, run commands |
+| `^G` | Keyboard shortcuts card (any key closes it) |
 | `^N` | New note |
 | `^P` | Toggle markdown preview |
+| `^S` | Save now (notes autosave half a second after you stop typing anyway) |
+| `^Z` | Undo |
+| `^Y` / `⇧^Z` | Redo |
 | `^C` | Copy selection |
+| `^X` | Cut selection |
 | `^V` | Paste — clipboard image as an attachment, else text |
 | `Esc` | Close palette / cancel / leave preview / clear selection |
 | `Enter` / `e` | Leave the preview (in preview only) |
@@ -82,6 +87,7 @@ Editing, macOS-style. Add `⇧` to any of the movements to extend the selection.
 | `⌥←` / `⌥→` | Word left / right (`^←` / `^→` too) |
 | `⌘⌫` | Delete to the start of the line |
 | `⌥⌫` | Delete the previous word |
+| `⌘A` | Select all (needs the kitty protocol; see below) |
 | `^`-click / `⌥`-click | Follow the link under the cursor (editor) |
 
 These work in two quite different ways, and it is worth knowing which.
@@ -125,7 +131,7 @@ code=Char('a')  modifiers=KeyModifiers(CONTROL)  kind=Press  state=KeyEventState
 ## Development
 
 ```
-cargo run      # against ~/notes (set TINYNOTE_DIR to test elsewhere)
+cargo run      # against ~/tinynote (set TINYNOTE_DIR to test elsewhere)
 cargo test
 cargo clippy
 ```

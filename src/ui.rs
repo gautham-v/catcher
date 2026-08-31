@@ -38,6 +38,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Overlay::Palette => draw_palette(f, app),
         Overlay::ConfirmDelete => draw_confirm(f, app),
         Overlay::RenameFile => draw_rename(f, app),
+        Overlay::Help => draw_help(f),
         Overlay::None => {}
     }
 }
@@ -357,12 +358,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
     right_spans.push(Span::styled(
-        format!(
-            "{}  {} note{}  ^K palette  ^N new  ^P preview  ^C copy  ^Q quit ",
-            if app.saved() { "saved" } else { "…" },
-            app.notes.len(),
-            if app.notes.len() == 1 { "" } else { "s" },
-        ),
+        "^K palette  ^N new  ^P preview  ^G shortcuts  ^Q quit ",
         DIM,
     ));
     let right = Line::from(right_spans);
@@ -450,6 +446,63 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
         }
         app.palette_rows.push((area, item.clone()));
     }
+}
+
+/// The ^G card: every binding, in the groups `app::SHORTCUTS` declares. Sized
+/// to its content and centred, and dismissed by any key at all — it is a
+/// reference to glance at, not a mode to get stuck in.
+fn draw_help(f: &mut Frame) {
+    // the widest key column, so the descriptions line up down the whole card
+    let keyw = crate::app::SHORTCUTS
+        .iter()
+        .flat_map(|(_, rows)| rows.iter())
+        .map(|(k, _)| crate::md::str_width(k))
+        .max()
+        .unwrap_or(0);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, (group, rows)) in crate::app::SHORTCUTS.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::default());
+        }
+        lines.push(Line::from(Span::styled(
+            format!(" {group}"),
+            Style::new().fg(Color::Yellow),
+        )));
+        for (key, what) in rows.iter() {
+            let pad = " ".repeat(keyw - crate::md::str_width(key));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {pad}{key}  "),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(*what, DIM),
+            ]));
+        }
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(" any key closes", DIM)));
+
+    let area = f.area();
+    let width = (keyw as u16 + 54).min(area.width.saturating_sub(2));
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let rect = Rect::new(
+        (area.width.saturating_sub(width)) / 2,
+        (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    );
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(DIM)
+        .title(Span::styled(
+            " keyboard shortcuts ",
+            Style::new().fg(Color::Yellow),
+        ));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_confirm(f: &mut Frame, app: &mut App) {

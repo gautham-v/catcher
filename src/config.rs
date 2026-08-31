@@ -1,5 +1,10 @@
 //! `~/.config/tinynote/config.toml` — two keys, a tiny hand-rolled parser.
 //!
+//! Notes default to `~/tinynote`, not `~/notes`: tinynote renames files to
+//! follow their titles, so pointing it at a directory someone might already
+//! keep markdown in would let it quietly reorganize a collection it was never
+//! given. A directory named after the tool can only be the tool's.
+//!
 //! The file is written with commented defaults the first time tinynote runs, so
 //! there is always something to open and edit. `TINYNOTE_DIR` still wins over
 //! `notes_dir`, which keeps `TINYNOTE_DIR=/tmp/x cargo run` working.
@@ -13,10 +18,10 @@ const TEMPLATE: &str = "\
 # Paths may start with ~/. Delete a line to fall back to its default.
 
 # Where the .md notes live. Overridden by the TINYNOTE_DIR environment variable.
-# notes_dir = \"~/notes\"
+# notes_dir = \"~/tinynote\"
 
 # Where pasted images are written. Defaults to <notes_dir>/attachments.
-# attachments_dir = \"~/notes/attachments\"
+# attachments_dir = \"~/tinynote/attachments\"
 ";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,7 +63,7 @@ impl Config {
             Some(d) => PathBuf::from(d),
             None => value(text, "notes_dir")
                 .map(|v| expand(&v, &home))
-                .unwrap_or_else(|| home.join("notes")),
+                .unwrap_or_else(|| home.join("tinynote")),
         };
         let attachments_dir = value(text, "attachments_dir")
             .map(|v| expand(&v, &home))
@@ -148,6 +153,19 @@ mod tests {
     fn the_default_template_parses_to_the_defaults() {
         assert_eq!(value(TEMPLATE, "notes_dir"), None);
         assert_eq!(value(TEMPLATE, "attachments_dir"), None);
+    }
+
+    #[test]
+    fn the_defaults_are_tinynote_s_own_directory() {
+        // an unset notes_dir must never land on ~/notes: tinynote renames
+        // files to follow their titles, and that directory may be someone
+        // else's markdown
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let c = Config::from_str("# nothing set\n");
+        if std::env::var_os("TINYNOTE_DIR").is_none() {
+            assert_eq!(c.notes_dir, home.join("tinynote"));
+        }
+        assert_eq!(c.attachments_dir, c.notes_dir.join("attachments"));
     }
 
     #[test]

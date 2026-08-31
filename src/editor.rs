@@ -1,6 +1,6 @@
 //! A small line-based text buffer: the note being edited.
 //!
-//! Deliberately plain — no vim motions, no undo stack. Lines are `String`s and
+//! Deliberately plain — no vim motions. Lines are `String`s and
 //! positions are (line, char column); long lines are soft-wrapped by the view,
 //! which owns the wrapping because it also owns the styling. Everything the
 //! live-preview view needs is here.
@@ -8,6 +8,29 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub type Pos = (usize, usize);
+
+/// What an edit was, for the purpose of grouping undo steps. Consecutive
+/// edits of the same kind fold into one step, so undo goes back by word or by
+/// run of deletions rather than by keystroke.
+#[derive(Clone, Copy, PartialEq)]
+enum EditKind {
+    Type,
+    Delete,
+    /// Never coalesces: pastes, newlines, line kills, structural edits.
+    Other,
+}
+
+/// The whole buffer before one edit. Notes are small; copying the lines is far
+/// simpler than a diff, and cheap enough not to notice.
+#[derive(Clone)]
+struct Snapshot {
+    lines: Vec<String>,
+    cursor: Pos,
+    anchor: Option<Pos>,
+}
+
+/// How many undo steps to keep. Well past any plausible reach-back.
+const HISTORY_LIMIT: usize = 400;
 
 #[derive(Default)]
 pub struct Editor {
@@ -24,6 +47,15 @@ pub struct Editor {
     trailing_newline: bool,
     /// The file used CRLF line endings, and should again after a save.
     crlf: bool,
+    /// Pre-edit states, oldest first, and the states undone away from.
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    /// The kind of the last edit, or `None` when the next edit must start a
+    /// fresh undo step (after a cursor move, an undo, or a group break).
+    last_kind: Option<EditKind>,
+    /// Non-zero while a compound edit is running, so its inner mutations don't
+    /// each record a step of their own.
+    batch: usize,
 }
 
 impl Editor {
@@ -62,6 +94,70 @@ impl Editor {
             out.push_str(sep);
         }
         out
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            lines: self.lines.clone(),
+            cursor: self.cursor,
+            anchor: self.anchor,
+        }
+    }
+
+    /// Record the state *before* an edit. Same-kind edits in a row coalesce
+    /// into the step already on the stack; any edit clears the redo branch.
+    fn record(&mut self, kind: EditKind) {
+        if self.batch > 0 {
+            return;
+        }
+        self.redo.clear();
+        let coalesce =
+            kind != EditKind::Other && self.last_kind == Some(kind) && !self.undo.is_empty();
+        self.last_kind = Some(kind);
+        if coalesce {
+            return;
+        }
+        self.undo.push(self.snapshot());
+        if self.undo.len() > HISTORY_LIMIT {
+            self.undo.remove(0);
+        }
+    }
+
+    fn restore(&mut self, s: Snapshot) {
+        self.lines = s.lines;
+        self.anchor = s.anchor;
+        self.cursor = self.clamp(s.cursor);
+        self.follow_cursor = true;
+        self.last_kind = None;
+    }
+
+    /// Step back one edit. Returns false when there is nothing left to undo.
+    pub fn undo(&mut self) -> bool {
+        let Some(prev) = self.undo.pop() else {
+            return false;
+        };
+        let now = self.snapshot();
+        self.redo.push(now);
+        self.restore(prev);
+        true
+    }
+
+    /// Step forward again after an undo.
+    pub fn redo(&mut self) -> bool {
+        let Some(next) = self.redo.pop() else {
+            return false;
+        };
+        let now = self.snapshot();
+        self.undo.push(now);
+        self.restore(next);
+        true
+    }
+
+    pub fn select_all(&mut self) {
+        self.anchor = Some((0, 0));
+        self.cursor = self.doc_end();
+        self.follow_cursor = true;
+        self.last_kind = None;
     }
 
     fn line_len(&self, row: usize) -> usize {
@@ -127,6 +223,10 @@ impl Editor {
 
     /// Replace one line wholesale (the preview's checkbox toggle).
     pub fn set_line(&mut self, row: usize, text: String) {
+        if row >= self.lines.len() {
+            return;
+        }
+        self.record(EditKind::Other);
         if let Some(line) = self.lines.get_mut(row) {
             *line = text;
             self.cursor = self.clamp(self.cursor);
@@ -163,6 +263,16 @@ impl Editor {
     }
 
     pub fn delete_selection(&mut self) -> bool {
+        if self.selection().is_none() {
+            return false;
+        }
+        self.record(EditKind::Other);
+        self.remove_selection()
+    }
+
+    /// The selection removal itself, without touching the undo history: the
+    /// callers below have already recorded their own step.
+    fn remove_selection(&mut self) -> bool {
         let Some(((sr, sc), (er, ec))) = self.selection() else {
             return false;
         };
@@ -175,7 +285,12 @@ impl Editor {
     }
 
     pub fn insert_char(&mut self, c: char) {
-        self.delete_selection();
+        self.record(EditKind::Type);
+        // a run of word characters is one undo step; anything else ends it
+        if !c.is_alphanumeric() {
+            self.last_kind = None;
+        }
+        self.remove_selection();
         let at = self.byte_index(self.cursor);
         self.lines[self.cursor.0].insert(at, c);
         self.cursor.1 += 1;
@@ -183,7 +298,9 @@ impl Editor {
 
     /// Insert arbitrary text at the cursor, newlines and all (a paste).
     pub fn insert_str(&mut self, text: &str) {
-        self.delete_selection();
+        self.record(EditKind::Other);
+        self.batch += 1;
+        self.remove_selection();
         for (i, part) in text.replace("\r\n", "\n").split('\n').enumerate() {
             if i > 0 {
                 self.insert_newline();
@@ -194,10 +311,14 @@ impl Editor {
                 }
             }
         }
+        self.batch -= 1;
     }
 
     pub fn insert_newline(&mut self) {
-        self.delete_selection();
+        self.record(EditKind::Other);
+        self.batch += 1;
+        self.remove_selection();
+        self.batch -= 1;
         let (row, col) = self.cursor;
         let at = self.byte_index((row, col));
         let tail = self.lines[row].split_off(at);
@@ -206,7 +327,8 @@ impl Editor {
     }
 
     pub fn backspace(&mut self) {
-        if self.delete_selection() {
+        self.record(EditKind::Delete);
+        if self.remove_selection() {
             return;
         }
         let (row, col) = self.cursor;
@@ -223,7 +345,8 @@ impl Editor {
     }
 
     pub fn delete_forward(&mut self) {
-        if self.delete_selection() {
+        self.record(EditKind::Delete);
+        if self.remove_selection() {
             return;
         }
         let (row, col) = self.cursor;
@@ -262,7 +385,14 @@ impl Editor {
     /// On an already-empty prefix this joins with the previous line, like a
     /// plain backspace, so the key is never a no-op mid-buffer.
     pub fn delete_to_line_start(&mut self) {
-        if self.delete_selection() {
+        self.record(EditKind::Other);
+        self.batch += 1;
+        self.kill_to_line_start();
+        self.batch -= 1;
+    }
+
+    fn kill_to_line_start(&mut self) {
+        if self.remove_selection() {
             return;
         }
         let (row, col) = self.cursor;
@@ -278,7 +408,14 @@ impl Editor {
 
     /// Delete the word before the cursor (Option+Backspace).
     pub fn delete_prev_word(&mut self) {
-        if self.delete_selection() {
+        self.record(EditKind::Delete);
+        self.batch += 1;
+        self.kill_prev_word();
+        self.batch -= 1;
+    }
+
+    fn kill_prev_word(&mut self) {
+        if self.remove_selection() {
             return;
         }
         let (row, col) = self.cursor;
@@ -318,6 +455,9 @@ impl Editor {
         // this is the only path that sees it. They are the classic readline
         // chords besides, so binding them costs nothing.
         if let Some(changed) = self.legacy_chord(key, select) {
+            if !changed {
+                self.last_kind = None;
+            }
             return changed;
         }
 
@@ -386,6 +526,9 @@ impl Editor {
             KeyCode::Esc => self.clear_selection(),
             _ => {}
         }
+        // nothing changed, so this was a movement: the next typed run is a
+        // new undo step rather than a continuation of the one before it
+        self.last_kind = None;
         false
     }
 
@@ -717,6 +860,95 @@ mod tests {
         e.on_key(key(KeyCode::Backspace, ALT));
         assert_eq!(e.text(), "beta");
         assert_eq!(e.anchor, None);
+    }
+
+    #[test]
+    fn undo_walks_back_word_runs_and_redo_walks_forward() {
+        let mut e = Editor::new("");
+        for c in "hello world".chars() {
+            e.insert_char(c);
+        }
+        assert_eq!(e.text(), "hello world");
+        // a run of word characters is one step, and the space that ends the
+        // run belongs to the run before it
+        assert!(e.undo());
+        assert_eq!(e.text(), "hello ");
+        assert!(e.undo());
+        assert_eq!(e.text(), "");
+        assert!(!e.undo(), "nothing left to undo");
+        assert!(e.redo());
+        assert_eq!(e.text(), "hello ");
+        assert!(e.redo());
+        assert_eq!(e.text(), "hello world");
+        assert!(!e.redo());
+    }
+
+    #[test]
+    fn a_paste_is_one_undo_step_and_restores_the_cursor() {
+        let mut e = Editor::new("ab");
+        e.set_cursor((0, 1));
+        e.insert_str("X\nY\nZ");
+        assert_eq!(e.text(), "aX\nY\nZb");
+        assert!(e.undo());
+        assert_eq!(e.text(), "ab");
+        assert_eq!(e.cursor, (0, 1));
+    }
+
+    #[test]
+    fn a_new_edit_after_an_undo_drops_the_redo_branch() {
+        let mut e = Editor::new("");
+        e.insert_str("one");
+        e.insert_str("two");
+        e.undo();
+        assert_eq!(e.text(), "one");
+        e.insert_str("three");
+        assert!(!e.redo(), "the redo branch was abandoned by the new edit");
+        assert_eq!(e.text(), "onethree");
+    }
+
+    #[test]
+    fn moving_the_cursor_starts_a_fresh_undo_step() {
+        let mut e = Editor::new("");
+        for c in "abc".chars() {
+            e.insert_char(c);
+        }
+        e.on_key(key(KeyCode::Left, KeyModifiers::NONE));
+        e.insert_char('X');
+        assert_eq!(e.text(), "abXc");
+        e.undo();
+        assert_eq!(
+            e.text(),
+            "abc",
+            "the typing before the move is a separate step"
+        );
+    }
+
+    #[test]
+    fn deletions_coalesce_and_undo_restores_the_selection_they_ate() {
+        let mut e = Editor::new("alpha beta");
+        e.set_cursor((0, 10));
+        for _ in 0..4 {
+            e.backspace();
+        }
+        assert_eq!(e.text(), "alpha ");
+        assert!(e.undo());
+        assert_eq!(e.text(), "alpha beta");
+
+        let mut e = Editor::new("alpha beta");
+        e.anchor = Some((0, 0));
+        e.cursor = (0, 6);
+        e.insert_char('X');
+        assert_eq!(e.text(), "Xbeta");
+        e.undo();
+        assert_eq!(e.text(), "alpha beta");
+        assert_eq!(e.selected_text().unwrap(), "alpha ");
+    }
+
+    #[test]
+    fn select_all_spans_the_whole_buffer() {
+        let mut e = ed();
+        e.select_all();
+        assert_eq!(e.selected_text().unwrap(), "one\ntwo\nthree");
     }
 
     #[test]
