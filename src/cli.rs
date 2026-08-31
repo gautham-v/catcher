@@ -1,0 +1,198 @@
+//! Hand-rolled argument parsing. No clap: the surface is five shapes.
+//!
+//! ```text
+//! tinynote                 open the TUI on the newest note
+//! tinynote <name>          fuzzy-open a note by title, or create it
+//! tinynote <file>.md       open the TUI on that file, rooted at its parent
+//! tinynote <dir>           open the TUI rooted at that directory
+//! tinynote add "text"      capture a note without the TUI (stdin if no text)
+//! tinynote path            print the resolved notes dir
+//! ```
+
+use std::path::PathBuf;
+
+pub const USAGE: &str = "\
+tinynote — a tiny markdown notes TUI over plain files
+
+usage:
+  tinynote                 open the notes TUI
+  tinynote <name>          open the note whose title best matches, else create it
+  tinynote <file>.md       open that file, rooted at its parent directory
+  tinynote <dir>           open the TUI rooted at that directory
+  tinynote add [text]      write a new note from text (or stdin) and print its path
+  tinynote path            print the notes directory
+  tinynote --keys          print the key events this terminal sends (esc quits)
+  tinynote --help          this message
+";
+
+/// What a bare argument turned out to be on disk.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PathKind {
+    Missing,
+    File,
+    Dir,
+}
+
+/// Where a TUI session should start.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Launch {
+    /// The configured notes dir, newest note.
+    Default,
+    /// Fuzzy-match this against note titles; create it if nothing matches.
+    Name(String),
+    /// This file, with the session rooted at its parent directory.
+    File(PathBuf),
+    /// This directory, as a per-invocation notes dir.
+    Dir(PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cli {
+    Tui(Launch),
+    /// `add` with inline text, or `None` to read stdin.
+    Add(Option<String>),
+    PrintPath,
+    /// `--keys`: print raw key events until Esc, for debugging a terminal.
+    Keys,
+    Help,
+    /// Bad usage: message for stderr, exit 2.
+    Error(String),
+}
+
+/// Parse argv (without argv[0]). `probe` answers what a bare string is on disk,
+/// which is what separates `tinynote notes` the directory from `tinynote notes`
+/// the note title — injected so the dispatch is testable without a filesystem.
+pub fn parse(args: &[String], probe: impl Fn(&str) -> PathKind) -> Cli {
+    let Some(first) = args.first() else {
+        return Cli::Tui(Launch::Default);
+    };
+
+    match first.as_str() {
+        "-h" | "--help" | "help" => return Cli::Help,
+        "path" if args.len() == 1 => return Cli::PrintPath,
+        "--keys" => return Cli::Keys,
+        "add" => {
+            let rest = args[1..].join(" ");
+            let rest = rest.trim();
+            return Cli::Add(if rest.is_empty() {
+                None
+            } else {
+                Some(rest.to_string())
+            });
+        }
+        s if s.starts_with('-') => {
+            return Cli::Error(format!("unknown option “{s}”"));
+        }
+        _ => {}
+    }
+
+    // A single argument may be a path; anything else is a title to match.
+    if args.len() == 1 {
+        match probe(first) {
+            PathKind::Dir => return Cli::Tui(Launch::Dir(PathBuf::from(first))),
+            PathKind::File => return Cli::Tui(Launch::File(PathBuf::from(first))),
+            PathKind::Missing if looks_like_path(first) => {
+                return Cli::Error(format!("no such file or directory: {first}"));
+            }
+            PathKind::Missing => {}
+        }
+    }
+
+    Cli::Tui(Launch::Name(args.join(" ")))
+}
+
+/// Something the user clearly meant as a path, so a missing target is an error
+/// rather than the title of a note to create.
+fn looks_like_path(s: &str) -> bool {
+    s.contains('/') || s.starts_with('~') || s.ends_with(".md")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn nothing(_: &str) -> PathKind {
+        PathKind::Missing
+    }
+
+    #[test]
+    fn no_args_opens_the_tui() {
+        assert_eq!(parse(&[], nothing), Cli::Tui(Launch::Default));
+    }
+
+    #[test]
+    fn help_and_unknown_flags() {
+        assert_eq!(parse(&args(&["--help"]), nothing), Cli::Help);
+        assert_eq!(parse(&args(&["-h"]), nothing), Cli::Help);
+        assert!(matches!(parse(&args(&["--wat"]), nothing), Cli::Error(_)));
+    }
+
+    #[test]
+    fn path_subcommand() {
+        assert_eq!(parse(&args(&["path"]), nothing), Cli::PrintPath);
+        assert_eq!(parse(&args(&["--keys"]), nothing), Cli::Keys);
+        // "path" with more words is a title, not the subcommand
+        assert_eq!(
+            parse(&args(&["path", "of", "least"]), nothing),
+            Cli::Tui(Launch::Name("path of least".into()))
+        );
+    }
+
+    #[test]
+    fn add_takes_text_or_stdin() {
+        assert_eq!(
+            parse(&args(&["add", "buy milk"]), nothing),
+            Cli::Add(Some("buy milk".into()))
+        );
+        assert_eq!(
+            parse(&args(&["add", "buy", "milk"]), nothing),
+            Cli::Add(Some("buy milk".into()))
+        );
+        assert_eq!(parse(&args(&["add"]), nothing), Cli::Add(None));
+        assert_eq!(parse(&args(&["add", "  "]), nothing), Cli::Add(None));
+    }
+
+    #[test]
+    fn a_bare_word_is_a_note_title() {
+        assert_eq!(
+            parse(&args(&["groceries"]), nothing),
+            Cli::Tui(Launch::Name("groceries".into()))
+        );
+        assert_eq!(
+            parse(&args(&["meeting", "notes"]), nothing),
+            Cli::Tui(Launch::Name("meeting notes".into()))
+        );
+    }
+
+    #[test]
+    fn existing_paths_win_over_titles() {
+        let as_dir = |_: &str| PathKind::Dir;
+        assert_eq!(
+            parse(&args(&["notes"]), as_dir),
+            Cli::Tui(Launch::Dir("notes".into()))
+        );
+        let as_file = |_: &str| PathKind::File;
+        assert_eq!(
+            parse(&args(&["a/b.md"]), as_file),
+            Cli::Tui(Launch::File("a/b.md".into()))
+        );
+    }
+
+    #[test]
+    fn a_missing_path_is_an_error_not_a_new_note() {
+        assert!(matches!(
+            parse(&args(&["/nope/x.md"]), nothing),
+            Cli::Error(_)
+        ));
+        assert!(matches!(parse(&args(&["./nope"]), nothing), Cli::Error(_)));
+        // but a plain word with no slash is a title
+        assert_eq!(
+            parse(&args(&["nope"]), nothing),
+            Cli::Tui(Launch::Name("nope".into()))
+        );
+    }
+}

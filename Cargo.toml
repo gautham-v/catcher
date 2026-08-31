@@ -1,6 +1,6 @@
 [package]
 name = "tinynote"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Raycast Notes in your terminal: a tiny markdown notes TUI over plain files"
 license = "MIT"
@@ -12,7 +12,10 @@ categories = ["command-line-utilities", "text-editors"]
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
-tui-textarea = "0.7"
 anyhow = "1"
 dirs = "6"
 pulldown-cmark = { version = "0.13", default-features = false }
+ratatui-image = { version = "9", features = ["crossterm"] }
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+unicode-width = "=0.2.0"
