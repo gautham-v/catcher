@@ -1,4 +1,4 @@
-# jot
+# tinynote
 
 Raycast Notes in your terminal. A tiny markdown notes TUI over plain files.
 
@@ -6,7 +6,7 @@ Your notes are a flat folder of `.md` files in `~/notes` — nothing else. No fo
 
 ```
 cargo install --path .
-jot
+tinynote
 ```
 
 ## How it works
@@ -20,7 +20,7 @@ jot
 
 Because the notes are just files, everything else in your toolbox works on them too — `grep`, `cat`, git, Obsidian pointed at the same folder.
 
-Set `JOT_DIR` to use a different notes directory.
+Set `TINYNOTE_DIR` to use a different notes directory.
 
 ## Keys
 
@@ -35,7 +35,7 @@ Set `JOT_DIR` to use a different notes directory.
 ## Development
 
 ```
-cargo run      # against ~/notes (set JOT_DIR to test elsewhere)
+cargo run      # against ~/notes (set TINYNOTE_DIR to test elsewhere)
 cargo test
 cargo clippy
 ```

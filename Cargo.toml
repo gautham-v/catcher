@@ -1,5 +1,5 @@
 [package]
-name = "jot"
+name = "tinynote"
 version = "0.1.0"
 edition = "2021"
 description = "Raycast Notes in your terminal: a tiny markdown notes TUI over plain files"

@@ -53,7 +53,7 @@ pub fn slug(title: &str) -> String {
 }
 
 pub fn notes_dir() -> Result<PathBuf> {
-    let dir = match std::env::var_os("JOT_DIR") {
+    let dir = match std::env::var_os("TINYNOTE_DIR") {
         Some(d) => PathBuf::from(d),
         None => dirs::home_dir().context("no home directory")?.join("notes"),
     };
