@@ -1,5 +1,7 @@
 # tinynote
 
+https://github.com/user-attachments/assets/5a060469-40c5-4fd8-a17c-cab2e60b6f96
+
 A minimal note-taking app for the terminal. Local-first, no accounts, no sync — your notes are just a flat folder of `.md` files in `~/tinynote`, so `grep`, git, and Obsidian all work on them too.
 
 Open a terminal pane, jot something down, close it.
