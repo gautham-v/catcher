@@ -9,6 +9,7 @@
 //! link, toggle a checkbox, or click anywhere else to land in the editor at the
 //! same place.
 
+use crate::config::TableStyle;
 use crate::md::theme;
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
@@ -43,6 +44,10 @@ pub struct PLine {
     pub image: Option<usize>,
     /// Source line this rendered line came from, for click → cursor.
     pub src_line: Option<usize>,
+    /// This line is deliberately wider than the page and must not be
+    /// soft-wrapped: it is one row of a scrolling table, and the page pans
+    /// sideways across it instead.
+    pub wide: bool,
 }
 
 /// Merge equal-styled cells into a ratatui line.
@@ -98,9 +103,16 @@ pub fn render(markdown: &str) -> Rendered {
     render_wide(markdown, usize::MAX)
 }
 
-/// Render for a page `width` columns wide; tables are laid out to fit it.
+/// Render for a page `width` columns wide, with the default table shape.
+#[cfg(test)]
 pub fn render_wide(markdown: &str, width: usize) -> Rendered {
-    let mut r = Ren::new(markdown, width);
+    render_page(markdown, width, TableStyle::default())
+}
+
+/// Render for a page `width` columns wide, drawing wide tables the way the
+/// settings ask for.
+pub fn render_page(markdown: &str, width: usize, tables: TableStyle) -> Rendered {
+    let mut r = Ren::new(markdown, width, tables);
     r.run(markdown);
     r.finish()
 }
@@ -132,6 +144,8 @@ struct Ren {
     list_depth: usize,
     in_code_block: bool,
     table: Option<Table>,
+    /// How a table wider than the page is drawn.
+    tables: TableStyle,
     /// Page width in columns, used to size tables.
     width: usize,
     /// Byte offset of the start of each source line.
@@ -144,7 +158,7 @@ struct Ren {
 }
 
 impl Ren {
-    fn new(markdown: &str, width: usize) -> Ren {
+    fn new(markdown: &str, width: usize, tables: TableStyle) -> Ren {
         let mut line_starts = vec![0usize];
         for (i, b) in markdown.bytes().enumerate() {
             if b == b'\n' {
@@ -163,6 +177,7 @@ impl Ren {
             list_depth: 0,
             in_code_block: false,
             table: None,
+            tables,
             width,
             line_starts,
             src_line: None,
@@ -233,6 +248,7 @@ impl Ren {
             checkbox: self.pending_checkbox.take(),
             image: None,
             src_line: self.src_line,
+            wide: false,
         });
     }
 
@@ -463,6 +479,7 @@ impl Ren {
                         checkbox: None,
                         image: Some(idx),
                         src_line: self.src_line,
+                        wide: false,
                     });
                 }
             }
@@ -536,6 +553,7 @@ impl Ren {
                             checkbox: None,
                             image: None,
                             src_line: self.src_line,
+                            wide: false,
                         });
                     }
                 } else {
@@ -564,7 +582,9 @@ impl Ren {
         }
     }
 
-    /// Lay out the buffered table: aligned columns with a light rule under the head.
+    /// Lay out the buffered table. Three shapes, because one shape cannot
+    /// serve a two-column table and an eight-column one on the same page:
+    /// a grid, a grid whose cells wrap, or one labelled block per row.
     fn emit_table(&mut self) {
         let Some(t) = self.table.take() else { return };
         if t.rows.is_empty() {
@@ -576,36 +596,192 @@ impl Ren {
             .iter()
             .map(|r| r.iter().map(|c| cells_width(c)).collect())
             .collect();
-        let widths = crate::md::fit_widths(&crate::md::column_widths(&measured, cols), self.width);
-        let src_line = self.src_line;
-        for (ri, row) in t.rows.iter().enumerate() {
-            let mut cells: Vec<PCell> = Vec::new();
-            for (ci, w) in widths.iter().enumerate().take(cols) {
-                if ci > 0 {
-                    cells.extend(str_cells(crate::md::COL_SEP, theme::marker()));
-                }
-                let empty: Vec<PCell> = Vec::new();
-                let cell = truncate_cells(row.get(ci).unwrap_or(&empty), *w);
-                let align = align_of(t.aligns.get(ci).copied().unwrap_or(Alignment::None));
-                let (left, right) = crate::md::pad_for(cells_width(&cell), *w, align);
-                cells.extend(str_cells(&" ".repeat(left), theme::PLAIN));
-                cells.extend(cell.iter().cloned());
-                cells.extend(str_cells(&" ".repeat(right), theme::PLAIN));
+        let natural = crate::md::column_widths(&measured, cols);
+        let seps = crate::md::COL_SEP.chars().count() * cols.saturating_sub(1);
+        let fits = natural.iter().sum::<usize>() + seps <= self.width;
+
+        match self.table_shape(cols, seps, fits) {
+            Shape::Grid { wrap } => {
+                let widths = crate::md::fit_widths(&natural, self.width);
+                self.emit_grid(&t, cols, &widths, wrap, false);
             }
-            self.out.lines.push(PLine {
-                cells,
-                checkbox: None,
-                image: None,
-                src_line,
-            });
-            if ri == 0 {
-                let rule = crate::md::table_rule(&widths);
+            Shape::Scroll => {
+                let widths = self.scroll_widths(&natural);
+                self.emit_grid(&t, cols, &widths, true, true);
+            }
+            Shape::Cards => self.emit_cards(&t, cols),
+        }
+    }
+
+    /// Which shape this table gets. `auto` keeps the grid while its columns are
+    /// still wide enough to read a phrase in, and gives up on it — rather than
+    /// shaving every column to a stub and an ellipsis — once they are not.
+    fn table_shape(&self, cols: usize, seps: usize, fits: bool) -> Shape {
+        // below this the columns hit their floor and the grid runs off the
+        // page whatever it is told to do, so cards are the only shape left
+        let grid_possible = self.width >= cols * crate::md::MIN_COL + seps;
+        match self.tables {
+            TableStyle::Fit => Shape::Grid { wrap: false },
+            TableStyle::Wrap if grid_possible => Shape::Grid { wrap: !fits },
+            TableStyle::Wrap => Shape::Cards,
+            TableStyle::Cards => Shape::Cards,
+            TableStyle::Scroll => Shape::Scroll,
+            // a table that already fits is left exactly as it was; one that
+            // does not keeps its columns readable and pans instead
+            TableStyle::Auto if fits => Shape::Grid { wrap: false },
+            TableStyle::Auto => Shape::Scroll,
+        }
+    }
+
+    /// Column widths for a scrolling table: each column as wide as its widest
+    /// cell, capped so a single long URL cannot push every other column off
+    /// the far side. The cap is a share of the page, not a fixed number, so it
+    /// scales with the window the way Obsidian's does.
+    fn scroll_widths(&self, natural: &[usize]) -> Vec<usize> {
+        /// Narrowest a column is ever capped to, and the share of the page a
+        /// single column may claim before it starts wrapping.
+        const FLOOR: usize = 12;
+        let cap = (self.width / 3).clamp(FLOOR, 44);
+        natural.iter().map(|w| (*w).min(cap).max(1)).collect()
+    }
+
+    /// Aligned columns with a light rule under the head. `wrap` lets a cell
+    /// that does not fit run onto further lines instead of being cut.
+    fn emit_grid(&mut self, t: &Table, cols: usize, widths: &[usize], wrap: bool, wide: bool) {
+        let src_line = self.src_line;
+        // a rule between body rows only earns its keep once rows are taller
+        // than one line, where without it the eye loses which row it is on
+        let mut ruled = false;
+        for (ri, row) in t.rows.iter().enumerate() {
+            let empty: Vec<PCell> = Vec::new();
+            // every cell, already broken into the lines it will occupy
+            let parts: Vec<Vec<Vec<PCell>>> = (0..cols)
+                .map(|ci| {
+                    let cell = row.get(ci).unwrap_or(&empty);
+                    let w = widths.get(ci).copied().unwrap_or(0);
+                    if wrap {
+                        wrap_pcells(cell, w.max(1))
+                    } else {
+                        vec![truncate_cells(cell, w)]
+                    }
+                })
+                .collect();
+            let height = parts.iter().map(|p| p.len()).max().unwrap_or(1);
+            if height > 1 {
+                ruled = true;
+            }
+            for line in 0..height {
+                let mut cells: Vec<PCell> = Vec::new();
+                for (ci, w) in widths.iter().enumerate().take(cols) {
+                    if ci > 0 {
+                        cells.extend(str_cells(crate::md::COL_SEP, theme::marker()));
+                    }
+                    let blank: Vec<PCell> = Vec::new();
+                    let part = parts[ci].get(line).unwrap_or(&blank);
+                    let align = align_of(t.aligns.get(ci).copied().unwrap_or(Alignment::None));
+                    let (left, right) = crate::md::pad_for(cells_width(part), *w, align);
+                    cells.extend(str_cells(&" ".repeat(left), theme::PLAIN));
+                    cells.extend(part.iter().cloned());
+                    cells.extend(str_cells(&" ".repeat(right), theme::PLAIN));
+                }
+                self.out.lines.push(PLine {
+                    cells,
+                    checkbox: None,
+                    image: None,
+                    src_line,
+                    wide,
+                });
+            }
+            // under the head always; between wrapped body rows as well
+            let last = ri + 1 == t.rows.len();
+            if ri == 0 || (ruled && !last) {
+                let rule = crate::md::table_rule(widths);
                 self.out.lines.push(PLine {
                     cells: str_cells(&rule, theme::marker()),
                     checkbox: None,
                     image: None,
                     src_line,
+                    wide,
                 });
+            }
+        }
+    }
+
+    /// One block per row: the row's first cells as a heading, then every other
+    /// column as `label  value` under it. Nothing is truncated, so a table
+    /// twenty columns wide is still readable on an eighty-column terminal —
+    /// it is simply taller.
+    fn emit_cards(&mut self, t: &Table, cols: usize) {
+        let src_line = self.src_line;
+        let empty: Vec<PCell> = Vec::new();
+        let head: Vec<String> = (0..cols)
+            .map(|ci| {
+                t.rows
+                    .first()
+                    .and_then(|r| r.get(ci))
+                    .map(|c| c.iter().map(|p| p.ch).collect::<String>())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+        // the label column is as wide as the widest heading, so the values
+        // line up down the whole table and can be read as a column
+        let labelw = head
+            .iter()
+            .skip(1)
+            .map(|h| crate::md::str_width(h))
+            .max()
+            .unwrap_or(0);
+
+        let push = |cells: Vec<PCell>, out: &mut Rendered| {
+            out.lines.push(PLine {
+                cells,
+                checkbox: None,
+                image: None,
+                src_line,
+                wide: false,
+            });
+        };
+
+        for (ri, row) in t.rows.iter().enumerate().skip(1) {
+            if ri > 1 {
+                push(Vec::new(), &mut self.out);
+            }
+            // the heading: the first column, which is nearly always the row's
+            // name or date, marked with the same bar a blockquote uses
+            let mut title = str_cells(&format!("{} ", crate::md::theme::QUOTE_BAR), theme::state());
+            let first = truncate_cells(row.first().unwrap_or(&empty), self.width.saturating_sub(2));
+            title.extend(first.iter().map(|c| {
+                let mut c = c.clone();
+                c.style = c.style.patch(theme::heading(3)).fg(theme::palette().accent);
+                c
+            }));
+            push(title, &mut self.out);
+
+            for ci in 1..cols {
+                let value = row.get(ci).unwrap_or(&empty);
+                // an empty cell says nothing worth a line of its own
+                if value.iter().all(|c| c.ch.is_whitespace()) {
+                    continue;
+                }
+                let label = head.get(ci).cloned().unwrap_or_default();
+                let pad = labelw.saturating_sub(crate::md::str_width(&label));
+                let indent = 2 + labelw + 2;
+                let avail = self.width.saturating_sub(indent).max(8);
+                for (i, part) in wrap_pcells(value, avail).into_iter().enumerate() {
+                    let mut cells = if i == 0 {
+                        let mut c = str_cells("  ", theme::PLAIN);
+                        c.extend(str_cells(&label, theme::marker()));
+                        c.extend(str_cells(&" ".repeat(pad + 2), theme::PLAIN));
+                        c
+                    } else {
+                        // continuation lines hang under the value, not the label
+                        str_cells(&" ".repeat(indent), theme::PLAIN)
+                    };
+                    cells.extend(part);
+                    push(cells, &mut self.out);
+                }
             }
         }
     }
@@ -614,6 +790,31 @@ impl Ren {
         self.flush();
         self.out
     }
+}
+
+/// The three ways a table can be laid out, once `auto` has made up its mind.
+enum Shape {
+    Grid {
+        wrap: bool,
+    },
+    /// Natural column widths, capped so no one column runs away with the
+    /// table, and the page pans across whatever that adds up to.
+    Scroll,
+    Cards,
+}
+
+/// Word-wrap a run of rendered cells into rows no wider than `width` display
+/// columns. Shared by the preview's own soft wrap and by table cells, so a
+/// wrapped cell breaks where a wrapped paragraph would.
+pub fn wrap_pcells(cells: &[PCell], width: usize) -> Vec<Vec<PCell>> {
+    if width == 0 || cells_width(cells) <= width {
+        return vec![cells.to_vec()];
+    }
+    let chars: Vec<char> = cells.iter().map(|c| c.ch).collect();
+    crate::md::wrap_breaks(&chars, width, width)
+        .into_iter()
+        .map(|(s, e)| cells[s..e].to_vec())
+        .collect()
 }
 
 /// pulldown's alignment in the shared vocabulary.
@@ -718,14 +919,125 @@ mod tests {
         }
     }
 
+    const WIDE: &str = "| a | bbbbbbbbbbbbbbbbbbbb |\n| --- | --- |\n| 1 | 2 |\n";
+
+    /// The table this whole feature exists for: eight columns of real content.
+    const JOB_LOG: &str = concat!(
+        "| date | company | title | comp | location | path | doc | status |\n",
+        "|---|---|---|---|---|---|---|---|\n",
+        "| 2026-08-25 | Harrison Consulting | Director of Product | $220K/yr | ",
+        "Seattle, WA | LinkedIn Easy Apply | doc | applied |\n",
+    );
+
     #[test]
     fn a_wide_table_is_squeezed_into_the_page_width() {
-        let r = render_wide("| a | bbbbbbbbbbbbbbbbbbbb |\n| --- | --- |\n| 1 | 2 |\n", 16);
+        let r = render_page(WIDE, 16, TableStyle::Fit);
         for l in &r.lines {
             assert!(cells_width(&l.cells) <= 16);
         }
         let head: String = r.lines[0].cells.iter().map(|c| c.ch).collect();
         assert_eq!(head, "a │ bbbbbbbbbbb…");
+    }
+
+    #[test]
+    fn a_line_is_either_inside_the_page_or_marked_wide() {
+        // the whole contract in one assertion: a shape either fits the page,
+        // or says it does not so the view pans across it instead of wrapping
+        for width in [24usize, 40, 80, 100] {
+            for style in [
+                TableStyle::Auto,
+                TableStyle::Scroll,
+                TableStyle::Wrap,
+                TableStyle::Cards,
+            ] {
+                for l in &render_page(JOB_LOG, width, style).lines {
+                    assert!(
+                        l.wide || cells_width(&l.cells) <= width,
+                        "{style:?} at {width}: {:?}",
+                        l.text()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_scrolling_table_keeps_its_columns_and_cuts_nothing() {
+        let r = render_page(JOB_LOG, 60, TableStyle::Scroll);
+        let table: Vec<&PLine> = r.lines.iter().filter(|l| l.wide).collect();
+        assert!(!table.is_empty());
+        let text: String = table.iter().map(|l| l.text()).collect();
+        // no column was shaved down to an ellipsis
+        assert!(!text.contains('…'), "{text}");
+        // and the words are whole, not broken across a nine-column cell
+        assert!(text.contains("Harrison"), "{text}");
+        assert!(text.contains("applied"), "{text}");
+        // the table is genuinely wider than the page — that is the point
+        assert!(table.iter().any(|l| cells_width(&l.cells) > 60));
+        // every row of it is the same width, so the columns line up while it pans
+        let widths: Vec<usize> = table.iter().map(|l| cells_width(&l.cells)).collect();
+        assert!(widths.windows(2).all(|w| w[0] == w[1]), "{widths:?}");
+    }
+
+    #[test]
+    fn one_runaway_column_cannot_push_the_others_off_the_far_side() {
+        let md = concat!(
+            "| a | b |\n|---|---|\n",
+            "| short | https://example.com/an/extremely/long/url/that/goes/on/and/on/forever |\n",
+        );
+        let r = render_page(md, 60, TableStyle::Scroll);
+        // capped at a third of the page, so the long cell wraps rather than
+        // making the table hundreds of columns wide
+        for l in r.lines.iter().filter(|l| l.wide) {
+            assert!(cells_width(&l.cells) <= 60 + 60 / 3, "{:?}", l.text());
+        }
+    }
+
+    #[test]
+    fn wrapping_keeps_every_word_a_squeezed_grid_would_have_cut() {
+        let r = render_page(WIDE, 16, TableStyle::Wrap);
+        let text: String = r.lines.iter().map(|l| l.text()).collect();
+        assert!(text.contains("bbbbbbbb"), "{text:?}");
+        // nothing was cut, so no ellipsis was needed
+        assert!(!text.contains('…'), "{text:?}");
+    }
+
+    #[test]
+    fn cards_label_every_value_and_truncate_nothing() {
+        let md = concat!(
+            "| date | company | status |\n|---|---|---|\n",
+            "| 2026-08-25 | Harrison Consulting | applied |\n",
+        );
+        let r = render_page(md, 30, TableStyle::Cards);
+        let text: String = r.lines.iter().map(|l| format!("{}\n", l.text())).collect();
+        // the first column heads the block; the rest are labelled under it
+        assert!(text.contains("2026-08-25"), "{text}");
+        assert!(text.contains("company"), "{text}");
+        assert!(text.contains("Harrison Consulting"), "{text}");
+        assert!(text.contains("status"), "{text}");
+        assert!(text.contains("applied"), "{text}");
+        // the header row is the labels, never a card of its own
+        assert!(!text.contains("▌ date"), "{text}");
+        assert!(!text.contains('…'), "{text}");
+    }
+
+    #[test]
+    fn auto_leaves_a_table_that_fits_alone_and_scrolls_one_that_does_not() {
+        // two roomy columns: still a grid, with the head rule under it
+        let narrow = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let grid: String = render_page(narrow, 80, TableStyle::Auto)
+            .lines
+            .iter()
+            .map(|l| format!("{}\n", l.text()))
+            .collect();
+        assert!(grid.contains('┼'), "{grid}");
+        assert!(!grid.contains('▌'), "{grid}");
+
+        // one that does not fit keeps its columns and pans instead
+        let r = render_page(JOB_LOG, 60, TableStyle::Auto);
+        assert!(r.lines.iter().any(|l| l.wide));
+        let text: String = r.lines.iter().map(|l| l.text()).collect();
+        assert!(!text.contains('…'), "{text}");
     }
 
     #[test]

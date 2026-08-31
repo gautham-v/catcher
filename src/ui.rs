@@ -1,4 +1,5 @@
 use crate::app::{App, EditRow, Item, Overlay, View};
+use crate::config::BorderStyle;
 use crate::md::theme;
 use crate::render::PCell;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -15,20 +16,30 @@ fn dim() -> Style {
     theme::marker()
 }
 
-/// Every panel in the app: one border style, one corner shape.
-fn panel() -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(theme::border())
+/// Every panel in the app: one border style, one corner shape, both settable.
+fn panel(app: &App) -> Block<'static> {
+    let block = Block::default().border_style(theme::border());
+    match app.config.borders {
+        BorderStyle::Rounded => block.borders(Borders::ALL).border_type(BorderType::Rounded),
+        BorderStyle::Square => block.borders(Borders::ALL).border_type(BorderType::Plain),
+        // no border still needs the one-cell inset, or the text would sit
+        // flush against whatever is behind the overlay
+        BorderStyle::None => block
+            .borders(Borders::NONE)
+            .padding(ratatui::widgets::Padding::new(1, 1, 0, 0)),
+    }
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let status_h = if app.config.status_bar { 1 } else { 0 };
     let [content, status] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
+        Layout::vertical([Constraint::Min(1), Constraint::Length(status_h)]).areas(f.area());
 
-    // a centred column, like a note page
-    let width = content.width.min(100);
+    // a centred column, like a note page; `page_width: full` fills the window
+    let width = match app.config.page_width {
+        0 => content.width,
+        w => content.width.min(w),
+    };
     let [_, page, _] = Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(width),
@@ -46,13 +57,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         View::Preview => draw_preview(f, app, page),
     }
 
-    draw_status(f, app, status);
+    if app.config.status_bar {
+        draw_status(f, app, status);
+    }
 
     match app.overlay {
-        Overlay::Palette => draw_palette(f, app),
+        Overlay::Palette | Overlay::QuickOpen => draw_palette(f, app),
         Overlay::ConfirmDelete => draw_confirm(f, app),
         Overlay::RenameFile => draw_rename(f, app),
-        Overlay::Help => draw_help(f),
+        Overlay::Help => draw_help(f, app),
         Overlay::None => {}
     }
 }
@@ -201,13 +214,16 @@ struct Row {
     cells: Vec<PCell>,
     checkbox: Option<usize>,
     src_line: Option<usize>,
+    /// A row of a scrolling table: never soft-wrapped, panned instead.
+    wide: bool,
 }
 
 /// The rendered page: pre-wrapped so every row is exactly one screen line,
 /// which is what makes link and checkbox hit-testing exact.
 fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let width = area.width.max(1) as usize;
-    let rendered = crate::render::render_wide(&app.active_note().content, width);
+    let rendered =
+        crate::render::render_page(&app.active_note().content, width, app.config.table_style);
     let dir = app.note_dir();
 
     // wrap, then give drawable images the rows they need
@@ -228,19 +244,43 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
                         cells: Vec::new(),
                         checkbox: None,
                         src_line: pline.src_line,
+                        wide: false,
                     });
                 }
                 continue;
             }
+        }
+        // a wide row is one row, however long it is: it pans, it never wraps
+        if pline.wide {
+            rows.push(Row {
+                cells: pline.cells.clone(),
+                checkbox: pline.checkbox,
+                src_line: pline.src_line,
+                wide: true,
+            });
+            continue;
         }
         for (i, cells) in wrap_cells(&pline.cells, width).into_iter().enumerate() {
             rows.push(Row {
                 cells,
                 checkbox: if i == 0 { pline.checkbox } else { None },
                 src_line: pline.src_line,
+                wide: false,
             });
         }
     }
+
+    // the furthest right the page can pan: the widest table on it, less the
+    // page itself. Measured here because only the draw knows the real width.
+    let widest = rows
+        .iter()
+        .filter(|r| r.wide)
+        .map(|r| crate::render::cells_width(&r.cells))
+        .max()
+        .unwrap_or(0);
+    app.preview_hmax = widest.saturating_sub(width) as u16;
+    app.preview_hscroll = app.preview_hscroll.min(app.preview_hmax);
+    let pan = app.preview_hscroll as usize;
 
     // clamp the scroll so the page can't be scrolled off the bottom
     let height = area.height as usize;
@@ -251,9 +291,13 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     app.preview_links.clear();
     app.preview_checkboxes.clear();
     app.preview_rows.clear();
+    app.preview_page_rows.clear();
+    let span = app.preview_span();
 
     let mut lines: Vec<Line> = Vec::new();
     let mut images: Vec<(Rect, usize, bool)> = Vec::new();
+    // the chevrons go on the first wide row on screen, and only there
+    let mut marked = false;
     for (start, h, idx) in &bands {
         // a band only partly on screen is drawn cropped to its visible slice,
         // so a picture scrolls in and out instead of popping into view whole
@@ -268,14 +312,41 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     for (i, row) in rows.iter().skip(top).take(height).enumerate() {
         let y = area.y + i as u16;
         let rect = Rect::new(area.x, y, area.width, 1);
-        lines.push(crate::render::to_line(&row.cells));
+        let page_row = top + i;
+        // a wide row shows the slice the pan has arrived at; everything else
+        // starts at column zero, so prose never moves when a table does
+        let offset = if row.wide { pan } else { 0 };
+        let mut shown = if row.wide {
+            columns_from(&row.cells, pan, width)
+        } else {
+            row.cells.clone()
+        };
+        // a table that carries on past an edge says so — but once per table,
+        // on its topmost visible row. A marker on every row would stripe the
+        // whole page with chevrons to say one thing.
+        if row.wide && !marked {
+            marked = true;
+            if pan > 0 {
+                edge(&mut shown, 0, '‹');
+            }
+            if crate::render::cells_width(&row.cells) > pan + width && !shown.is_empty() {
+                let last = shown.len() - 1;
+                edge(&mut shown, last, '›');
+            }
+        }
+        app.preview_page_rows.push((page_row, rect, offset));
+        lines.push(crate::render::to_line(&selected(
+            &shown, page_row, offset, span,
+        )));
         if let Some(src) = row.src_line {
-            app.preview_rows.push((rect, src, row.cells.clone()));
+            app.preview_rows.push((rect, src, shown.clone()));
             if row.checkbox.is_some() {
                 app.preview_checkboxes.push((rect, src));
             }
         }
-        for (start, len, url) in link_runs(&row.cells, &rendered) {
+        // link hit boxes are measured on what is actually on screen, so a
+        // half-panned link is clickable over exactly the part you can see
+        for (start, len, url) in link_runs(&shown, &rendered) {
             let x = area.x + start as u16;
             app.preview_links
                 .push((Rect::new(x, y, len as u16, 1), url));
@@ -289,6 +360,59 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
             f.render_stateful_widget(cropped(clip_top), rect, protocol);
         }
     }
+}
+
+/// Overwrite one drawn cell with a continuation mark.
+fn edge(cells: &mut [PCell], at: usize, ch: char) {
+    if let Some(c) = cells.get_mut(at) {
+        c.ch = ch;
+        c.style = theme::state();
+        c.link = None;
+    }
+}
+
+/// The `width` display columns of `cells` starting at column `from`. A wide
+/// character straddling the edge is dropped rather than half-drawn.
+fn columns_from(cells: &[PCell], from: usize, width: usize) -> Vec<PCell> {
+    let mut out = Vec::new();
+    let mut col = 0;
+    for c in cells {
+        let w = crate::md::char_width(c.ch);
+        if col >= from && col + w <= from + width {
+            out.push(c.clone());
+        }
+        col += w;
+    }
+    out
+}
+
+/// A row's cells with the selected span inverted. The preview has no cursor,
+/// so the highlight *is* the feedback that a drag is doing anything.
+fn selected(
+    cells: &[PCell],
+    page_row: usize,
+    offset: usize,
+    span: Option<(crate::app::PSel, crate::app::PSel)>,
+) -> Vec<PCell> {
+    let Some(((sr, sc), (er, ec))) = span else {
+        return cells.to_vec();
+    };
+    if page_row < sr || page_row > er {
+        return cells.to_vec();
+    }
+    let from = if page_row == sr { sc } else { 0 };
+    let to = if page_row == er { ec } else { usize::MAX };
+    let mut out = Vec::with_capacity(cells.len());
+    let mut col = offset;
+    for c in cells {
+        let mut c = c.clone();
+        if col >= from && col < to {
+            c.style = c.style.add_modifier(Modifier::REVERSED);
+        }
+        col += crate::md::char_width(c.ch);
+        out.push(c);
+    }
+    out
 }
 
 /// The image widget for one band. Cropping, not fitting: the protocol state
@@ -336,14 +460,7 @@ fn link_runs(cells: &[PCell], rendered: &crate::render::Rendered) -> Vec<(usize,
 /// wrap; the preview's own rows are already indented by the renderer, so every
 /// row here gets the full width.
 fn wrap_cells(cells: &[PCell], width: usize) -> Vec<Vec<PCell>> {
-    if width == 0 || crate::render::cells_width(cells) <= width {
-        return vec![cells.to_vec()];
-    }
-    let chars: Vec<char> = cells.iter().map(|c| c.ch).collect();
-    crate::md::wrap_breaks(&chars, width, width)
-        .into_iter()
-        .map(|(s, e)| cells[s..e].to_vec())
-        .collect()
+    crate::render::wrap_pcells(cells, width)
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
@@ -356,8 +473,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // the mode is named in both views, not just the unusual one: a bar that
+    // only speaks up half the time makes you check which half you are in
     let mode = match app.view {
-        View::Edit => "",
+        View::Edit => "  edit",
         View::Preview => "  preview",
     };
     let left = Line::from(vec![
@@ -368,10 +487,23 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if let Some((msg, _)) = &app.status {
         right_spans.push(Span::styled(format!("{msg}   "), theme::state()));
     }
-    right_spans.push(Span::styled(
-        "^K palette  ^N new  ^P preview  ^G shortcuts  ^Q quit ",
-        dim(),
-    ));
+    if app.config.key_hints {
+        // ^P is a toggle, so the hint names where it goes, not where you are
+        let flip = match app.view {
+            View::Edit => "^P preview",
+            View::Preview => "^P edit",
+        };
+        // ← → only earns a place in the bar when there is something to pan
+        let pan = if app.view == View::Preview && app.preview_hmax > 0 {
+            "← → table  "
+        } else {
+            ""
+        };
+        right_spans.push(Span::styled(
+            format!("{pan}^K palette  ^O open  ^N new  {flip}  ^G shortcuts "),
+            dim(),
+        ));
+    }
     let right = Line::from(right_spans);
     f.render_widget(Paragraph::new(left), area);
     f.render_widget(Paragraph::new(right).right_aligned(), area);
@@ -386,11 +518,12 @@ fn overlay_rect(f: &Frame, height: u16) -> Rect {
 }
 
 fn draw_palette(f: &mut Frame, app: &mut App) {
-    let items = app.palette_items();
+    let items = app.overlay_items();
+    let quick = app.overlay == Overlay::QuickOpen;
     let shown = items.len().min(10) as u16;
     let rect = overlay_rect(f, shown + 3);
     f.render_widget(Clear, rect);
-    let block = panel();
+    let block = panel(app);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -399,7 +532,12 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical(rows).split(inner);
 
     let prompt = if app.query.is_empty() {
-        Line::from(Span::styled("search notes or run a command…", dim()))
+        let hint = if quick {
+            "open a note — any folder, most recent first…"
+        } else {
+            "search notes or run a command…"
+        };
+        Line::from(Span::styled(hint, dim()))
     } else {
         Line::from(app.query.as_str())
     };
@@ -438,6 +576,22 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
                 };
                 (name, n.snippet(), "")
             }
+            // quick-open shows the folder rather than a body snippet: two
+            // notes called "log" are told apart by where they live, and the
+            // list is ranked by what was opened last, not by what it says
+            // a typed path that exists — always the top row, and labelled so
+            // it is clear this is the file on disk and not a search hit
+            Item::Path(path) => (
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                crate::index::short(path.parent().unwrap_or(path)),
+                "path",
+            ),
+            Item::Entry(idx) => match app.open_index.get(*idx) {
+                Some(e) => (e.title.clone(), e.folder.clone(), ""),
+                None => (String::new(), String::new(), ""),
+            },
         };
         let base = if selected {
             Style::new().add_modifier(Modifier::REVERSED)
@@ -465,7 +619,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
 /// The ^G card: every binding, in the groups `app::SHORTCUTS` declares. Sized
 /// to its content and centred, and dismissed by any key at all — it is a
 /// reference to glance at, not a mode to get stuck in.
-fn draw_help(f: &mut Frame) {
+fn draw_help(f: &mut Frame, app: &App) {
     // the widest key column, so the descriptions line up down the whole card
     let keyw = crate::app::SHORTCUTS
         .iter()
@@ -507,7 +661,7 @@ fn draw_help(f: &mut Frame) {
         height,
     );
     f.render_widget(Clear, rect);
-    let block = panel().title(Span::styled(" keyboard shortcuts ", theme::state()));
+    let block = panel(app).title(Span::styled(" keyboard shortcuts ", theme::state()));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     f.render_widget(Paragraph::new(lines), inner);
@@ -516,7 +670,7 @@ fn draw_help(f: &mut Frame) {
 fn draw_confirm(f: &mut Frame, app: &mut App) {
     let rect = overlay_rect(f, 4);
     f.render_widget(Clear, rect);
-    let block = panel().border_style(theme::danger());
+    let block = panel(app).border_style(theme::danger());
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let title = app.active_note().title();
@@ -538,7 +692,7 @@ fn draw_confirm(f: &mut Frame, app: &mut App) {
 fn draw_rename(f: &mut Frame, app: &mut App) {
     let rect = overlay_rect(f, 4);
     f.render_widget(Clear, rect);
-    let block = panel();
+    let block = panel(app);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let lines = vec![

@@ -128,6 +128,23 @@ pub fn load_all(dir: &Path) -> Result<Vec<Note>> {
     Ok(notes)
 }
 
+/// One note, read from a path that may be anywhere at all. Quick-open uses
+/// this to pull a file in from another folder, and the settings note is loaded
+/// the same way — it is a note like any other.
+pub fn load_one(path: &Path) -> Result<Note> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let modified = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    Ok(Note {
+        disk_title: title_of(&content),
+        path: path.to_path_buf(),
+        content,
+        modified,
+    })
+}
+
 /// A fresh path for a new note, never clobbering an existing file.
 pub fn unique_path(dir: &Path, title: &str, keep: Option<&Path>) -> PathBuf {
     let base = slug(title);

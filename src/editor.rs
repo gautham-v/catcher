@@ -56,6 +56,8 @@ pub struct Editor {
     /// Non-zero while a compound edit is running, so its inner mutations don't
     /// each record a step of their own.
     batch: usize,
+    /// Spaces one `tab` inserts. Set from the settings; never zero.
+    pub tab_width: usize,
 }
 
 impl Editor {
@@ -69,6 +71,7 @@ impl Editor {
             follow_cursor: true,
             trailing_newline: content.ends_with('\n'),
             crlf: content.contains("\r\n"),
+            tab_width: 2,
             ..Default::default()
         }
     }
@@ -487,7 +490,7 @@ impl Editor {
                 return true;
             }
             KeyCode::Tab => {
-                for _ in 0..2 {
+                for _ in 0..self.tab_width.max(1) {
                     self.insert_char(' ');
                 }
                 return true;

@@ -1,16 +1,15 @@
-use crate::config::Config;
+use crate::config::{Config, PreviewClick};
 use crate::editor::{Editor, Pos};
 use crate::images::Images;
+use crate::index;
 use crate::md;
 use crate::notes::{self, Note};
 use crate::search;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-
-const AUTOSAVE_AFTER: Duration = Duration::from_millis(500);
 
 /// Which note a CLI invocation asked to open.
 enum Want {
@@ -41,6 +40,11 @@ pub struct EditRow {
     pub seg: usize,
 }
 
+/// A point in the rendered preview: which row of the whole page, and which
+/// display column of it. Rows are page rows rather than screen rows so a
+/// selection survives scrolling.
+pub type PSel = (usize, usize);
+
 #[derive(PartialEq, Clone, Copy)]
 pub enum View {
     Edit,
@@ -51,6 +55,8 @@ pub enum View {
 pub enum Overlay {
     None,
     Palette,
+    /// ^O: every note in the vault, recently opened first.
+    QuickOpen,
     ConfirmDelete,
     RenameFile,
     Help,
@@ -59,6 +65,7 @@ pub enum Overlay {
 #[derive(Clone, PartialEq)]
 pub enum Command {
     NewNote,
+    QuickOpen,
     DeleteNote,
     RenameFile,
     TogglePreview,
@@ -67,8 +74,9 @@ pub enum Command {
     Quit,
 }
 
-const COMMANDS: [Command; 7] = [
+const COMMANDS: [Command; 8] = [
     Command::NewNote,
+    Command::QuickOpen,
     Command::DeleteNote,
     Command::RenameFile,
     Command::TogglePreview,
@@ -81,11 +89,12 @@ impl Command {
     pub fn label(&self) -> (&'static str, &'static str) {
         match self {
             Command::NewNote => ("New note", "create an empty note and start typing"),
+            Command::QuickOpen => ("Open note", "any note in the vault, recent first  ^O"),
             Command::DeleteNote => ("Delete note", "remove the note on screen"),
             Command::RenameFile => ("Rename file", "change the filename on disk"),
             Command::TogglePreview => ("Toggle preview", "rendered markdown, read-only"),
             Command::Shortcuts => ("Keyboard shortcuts", "every binding, on one card  ^G"),
-            Command::OpenSettings => ("Open settings", "edit config.toml in $EDITOR"),
+            Command::OpenSettings => ("Settings", "edit them here, as a note  ^,"),
             Command::Quit => ("Quit", "save and exit"),
         }
     }
@@ -99,10 +108,11 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         "notes",
         &[
             ("^K", "command palette — search notes, run commands"),
+            ("^O", "open a note — every folder, recent first"),
             ("^N", "new note"),
+            ("^,", "settings, as a note you can edit"),
             ("^S", "save now (notes autosave anyway)"),
             ("^P", "toggle rendered preview"),
-            ("^G", "this card"),
             ("^Q", "save and quit"),
         ],
     ),
@@ -111,13 +121,12 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("^Z", "undo"),
             ("^Y  ⇧^Z", "redo"),
-            ("^C", "copy selection"),
-            ("^X", "cut selection"),
+            ("^C  ^X", "copy / cut selection"),
             ("^V", "paste — an image becomes an attachment"),
             ("⌘A", "select all"),
             ("⌥⌫", "delete the word before the cursor"),
             ("⌘⌫", "delete to the start of the line"),
-            ("tab", "two spaces"),
+            ("tab", "indent (tab_width spaces)"),
         ],
     ),
     (
@@ -143,8 +152,10 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         "preview",
         &[
             ("↑ ↓  pgup pgdn", "scroll"),
+            ("← →", "pan a table too wide for the page"),
+            ("drag", "select text — it copies on release"),
             ("click", "a link opens it, a checkbox toggles it"),
-            ("esc  ⏎", "back to editing"),
+            ("^P  esc  ⏎", "back to editing"),
         ],
     ),
 ];
@@ -152,6 +163,11 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
 #[derive(Clone, PartialEq)]
 pub enum Item {
     Note(usize),
+    /// A file from the quick-open index, which may live in another folder and
+    /// may not be loaded into this session at all yet.
+    Entry(usize),
+    /// A path typed into quick-open that turned out to exist.
+    Path(PathBuf),
     Command(Command),
 }
 
@@ -166,6 +182,13 @@ pub struct App {
     pub query: String,
     pub selected: usize,
     pub preview_scroll: u16,
+    /// How far the page has panned sideways, in columns. Only lines a table
+    /// marked `wide` move; prose stays where it is, so the note never slides
+    /// out from under you.
+    pub preview_hscroll: u16,
+    /// The furthest right the page can pan, worked out by the last draw from
+    /// the widest table on it. Zero when nothing overflows.
+    pub preview_hmax: u16,
     pub status: Option<(String, Instant)>,
     pub quit: bool,
     dirty: bool,
@@ -185,15 +208,27 @@ pub struct App {
     pub preview_rows: Vec<(Rect, usize, Vec<crate::render::PCell>)>,
     pub images: Images,
     dragging: bool,
-    /// Set when the palette asks for the config file; `main` suspends the TUI,
-    /// runs $EDITOR, and clears it.
-    pub edit_config: bool,
+    /// Every `.md` file quick-open can reach, rebuilt each time ^O opens.
+    pub open_index: Vec<index::Entry>,
+    /// Recently opened notes, most recent first; persisted between runs.
+    pub recents: Vec<PathBuf>,
+    /// A preview selection, as (page row, display column) pairs into the rows
+    /// the last draw laid out. Anchor first, moving end second.
+    pub preview_sel: Option<(PSel, PSel)>,
+    /// True while the pointer is down and dragging out a preview selection.
+    preview_dragging: bool,
+    /// The rows the last draw put on screen: (page row index, rect, the
+    /// display column the row's first drawn cell stands for). That last one is
+    /// the pan for a scrolling table row and zero for everything else, and is
+    /// what keeps a click landing on the character under the pointer.
+    pub preview_page_rows: Vec<(usize, Rect, usize)>,
     /// Buffer for the inline rename prompt.
     pub rename_input: String,
     /// True when the session is rooted outside the configured notes dir (a
-    /// `tinynote <file>` / `<dir>` invocation). Foreign filenames are then
-    /// never renamed to follow a title — Obsidian links depend on them — and
-    /// image paste is refused rather than scattering attachments about.
+    /// `tinynote <file>` / `<dir>` invocation). Renaming and image paste are
+    /// decided per note now — quick-open can reach anywhere — but the flag
+    /// still says what kind of session this is.
+    #[allow(dead_code)]
     pub foreign_root: bool,
 }
 
@@ -204,7 +239,7 @@ impl App {
         let config = Config::load()?;
         config.ensure_dirs()?;
         // before anything is rendered: every style resolves against this
-        crate::md::theme::set_mode(config.theme);
+        config.apply();
 
         // where this session is rooted, and which note it should open on
         let (dir, want): (PathBuf, Option<Want>) = match &launch {
@@ -257,6 +292,8 @@ impl App {
             query: String::new(),
             selected: 0,
             preview_scroll: 0,
+            preview_hscroll: 0,
+            preview_hmax: 0,
             status: None,
             quit: false,
             dirty: false,
@@ -268,8 +305,13 @@ impl App {
             preview_checkboxes: Vec::new(),
             preview_rows: Vec::new(),
             dragging: false,
-            edit_config: false,
+            open_index: Vec::new(),
+            recents: index::load_recent(),
+            preview_sel: None,
+            preview_dragging: false,
+            preview_page_rows: Vec::new(),
         };
+        app.remember_active();
         app.load_active_into_editor();
         Ok(app)
     }
@@ -280,7 +322,10 @@ impl App {
 
     fn load_active_into_editor(&mut self) {
         self.editor = Editor::new(&self.notes[self.active].content);
+        self.editor.tab_width = self.config.tab_width;
         self.preview_scroll = 0;
+        self.preview_hscroll = 0;
+        self.preview_sel = None;
     }
 
     fn sync_editor_to_note(&mut self) {
@@ -292,20 +337,60 @@ impl App {
         }
     }
 
+    /// Is `path` a file tinynote may rename to follow its title? Only inside
+    /// the configured notes dir, and only while `rename_files` is on: an
+    /// Obsidian vault's links are its filenames, and moving one breaks them.
+    fn may_rename(&self, path: &Path) -> bool {
+        if !self.config.rename_files {
+            return false;
+        }
+        let parent = match path.parent() {
+            Some(p) => std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()),
+            None => return false,
+        };
+        let notes_dir = std::fs::canonicalize(&self.config.notes_dir)
+            .unwrap_or_else(|_| self.config.notes_dir.clone());
+        parent == notes_dir
+    }
+
+    /// Is the note on screen the settings note?
+    pub fn editing_settings(&self) -> bool {
+        crate::config::settings_path()
+            .ok()
+            .and_then(|p| std::fs::canonicalize(p).ok())
+            .zip(std::fs::canonicalize(&self.active_note().path).ok())
+            .is_some_and(|(a, b)| a == b)
+    }
+
     pub fn save_now(&mut self) {
         if !self.dirty {
             return;
         }
-        let allow_rename = !self.foreign_root;
-        let dir = self.dir.clone();
+        let path = self.notes[self.active].path.clone();
+        let allow_rename = self.may_rename(&path);
+        // the note's own folder, not the session's: quick-open reaches into
+        // other directories, and a note must always be written back where it
+        // actually lives
+        let dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.dir.clone());
+        let was_settings = self.editing_settings();
         match notes::save(&dir, &mut self.notes[self.active], allow_rename) {
             Ok(_) => self.dirty = false,
-            Err(e) => self.flash(format!("save failed: {e}")),
+            Err(e) => {
+                self.flash(format!("save failed: {e}"));
+                return;
+            }
+        }
+        if was_settings {
+            self.reload_config();
         }
     }
 
     pub fn maybe_autosave(&mut self) {
-        if self.dirty && self.last_edit.elapsed() >= AUTOSAVE_AFTER {
+        let after = Duration::from_millis(self.config.autosave_ms);
+        if self.dirty && self.last_edit.elapsed() >= after {
             self.save_now();
         }
     }
@@ -328,6 +413,162 @@ impl App {
         self.active = idx;
         self.view = View::Edit;
         self.load_active_into_editor();
+        self.remember_active();
+    }
+
+    /// Put the note on screen at the front of the recents list, which is what
+    /// quick-open ranks by.
+    fn remember_active(&mut self) {
+        // the settings note has its own key and its own palette row; putting
+        // it at the top of "recently opened" would only push notes down
+        if self.editing_settings() {
+            return;
+        }
+        let path = self.notes[self.active].path.clone();
+        index::push_recent(&mut self.recents, &path);
+    }
+
+    /// Open any `.md` file by path, from anywhere. Already-loaded notes are
+    /// switched to; anything else is read in and added to this session, so it
+    /// can be edited, saved and switched back to like any other note.
+    pub fn open_path(&mut self, path: &Path) {
+        let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if let Some(i) = self.notes.iter().position(|n| {
+            std::fs::canonicalize(&n.path).unwrap_or_else(|_| n.path.clone()) == target
+        }) {
+            self.switch_to(i);
+            return;
+        }
+        match notes::load_one(&target) {
+            Ok(note) => {
+                self.save_now();
+                self.notes.insert(0, note);
+                self.active = 0;
+                self.view = View::Edit;
+                self.load_active_into_editor();
+                self.remember_active();
+            }
+            Err(e) => self.flash(format!("open failed: {e}")),
+        }
+    }
+
+    /// ^,: the settings, opened as a note. Regenerated first when it is
+    /// missing, so there is always a document with every setting in it.
+    fn open_settings(&mut self) {
+        let path = match crate::config::settings_path() {
+            Ok(p) => p,
+            Err(e) => {
+                self.flash(format!("settings: {e}"));
+                return;
+            }
+        };
+        if !path.exists() {
+            if let Err(e) = crate::config::Config::load() {
+                self.flash(format!("settings: {e}"));
+                return;
+            }
+        }
+        self.open_path(&path);
+        self.flash("settings — ^S applies them".to_string());
+    }
+
+    /// Build the quick-open index. Rebuilt on every open rather than cached:
+    /// notes are files, and anything could have written one since.
+    fn refresh_index(&mut self) {
+        if !self.config.quick_open_recursive {
+            self.open_index = index::scan(std::slice::from_ref(&self.dir), &self.recents);
+            return;
+        }
+        let mut roots = vec![self.config.notes_dir.clone()];
+        if !self.quick_open_root_is_notes_dir() {
+            roots.push(self.dir.clone());
+        }
+        // vaults and work folders the user has named in the settings
+        roots.extend(self.config.quick_open_dirs.iter().cloned());
+        self.open_index = index::scan(&roots, &self.recents);
+    }
+
+    /// A typed path — `~/vault/spec.md`, `/tmp/x.md` — as an openable file.
+    /// The escape hatch for a note in a folder tinynote has never been shown:
+    /// you can always say where it is.
+    fn typed_path(&self) -> Option<PathBuf> {
+        let q = self.query.trim();
+        if !(q.starts_with('/') || q.starts_with("~/")) {
+            return None;
+        }
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let path = match q.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => PathBuf::from(q),
+        };
+        // a bare name is taken to mean the markdown file of that name
+        let path = if path.extension().is_none() {
+            path.with_extension("md")
+        } else {
+            path
+        };
+        path.is_file().then_some(path)
+    }
+
+    fn quick_open_root_is_notes_dir(&self) -> bool {
+        std::fs::canonicalize(&self.dir).unwrap_or_else(|_| self.dir.clone())
+            == std::fs::canonicalize(&self.config.notes_dir)
+                .unwrap_or_else(|_| self.config.notes_dir.clone())
+    }
+
+    fn open_quick_open(&mut self) {
+        self.query.clear();
+        self.selected = 0;
+        self.refresh_index();
+        self.overlay = Overlay::QuickOpen;
+    }
+
+    /// Quick-open rows for the current query. With no query this is simply the
+    /// index order — most recently opened first, then most recently modified —
+    /// which is the whole point of having a second list beside the palette.
+    pub fn open_items(&self) -> Vec<Item> {
+        if self.query.is_empty() {
+            return (0..self.open_index.len()).map(Item::Entry).collect();
+        }
+        // a path that exists is not a guess, so it leads the list outright
+        if let Some(path) = self.typed_path() {
+            let mut rows = vec![Item::Path(path.clone())];
+            rows.extend(
+                self.open_index
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.path != path)
+                    .filter(|(_, e)| search::fuzzy(&self.query, &e.rel).is_some())
+                    .map(|(i, _)| Item::Entry(i)),
+            );
+            return rows;
+        }
+        let n = self.open_index.len().max(1) as i64;
+        let mut scored: Vec<(i64, usize)> = Vec::new();
+        for (i, e) in self.open_index.iter().enumerate() {
+            // the title is what people search by; the folder path is a weaker
+            // second chance, so "applications/log" finds it too
+            let by_title = search::fuzzy(&self.query, &e.title).map(|s| s * 10 + 100);
+            let by_path = search::fuzzy(&self.query, &e.rel);
+            let Some(base) = by_title.into_iter().chain(by_path).max() else {
+                continue;
+            };
+            // a nudge, not a verdict: recency breaks ties between equally good
+            // matches without ever burying a better one
+            let recency = ((n - i as i64) * 20) / n;
+            scored.push((base + recency, i));
+        }
+        scored.sort_by_key(|(s, i)| (std::cmp::Reverse(*s), *i));
+        scored.into_iter().map(|(_, i)| Item::Entry(i)).collect()
+    }
+
+    /// The rows the open overlay is showing, whichever overlay that is.
+    pub fn overlay_items(&self) -> Vec<Item> {
+        match self.overlay {
+            Overlay::Palette => self.palette_items(),
+            Overlay::QuickOpen => self.open_items(),
+            _ => Vec::new(),
+        }
     }
 
     fn new_note(&mut self) {
@@ -338,6 +579,7 @@ impl App {
                 self.active = 0;
                 self.view = View::Edit;
                 self.load_active_into_editor();
+                self.remember_active();
             }
             Err(e) => self.flash(format!("create failed: {e}")),
         }
@@ -390,13 +632,17 @@ impl App {
         self.overlay = Overlay::None;
         match item {
             Item::Note(i) => self.switch_to(i),
+            Item::Entry(i) => {
+                if let Some(path) = self.open_index.get(i).map(|e| e.path.clone()) {
+                    self.open_path(&path);
+                }
+            }
+            Item::Path(path) => self.open_path(&path),
             Item::Command(Command::NewNote) => self.new_note(),
+            Item::Command(Command::QuickOpen) => self.open_quick_open(),
             Item::Command(Command::TogglePreview) => self.toggle_preview(),
             Item::Command(Command::Shortcuts) => self.overlay = Overlay::Help,
-            Item::Command(Command::OpenSettings) => {
-                self.save_now();
-                self.edit_config = true;
-            }
+            Item::Command(Command::OpenSettings) => self.open_settings(),
             Item::Command(Command::Quit) => {
                 self.save_now();
                 self.quit = true;
@@ -446,6 +692,18 @@ impl App {
             View::Preview => View::Edit,
         };
         self.preview_scroll = 0;
+        self.preview_hscroll = 0;
+    }
+
+    /// Pan the page sideways, clamped to what the last draw measured. A
+    /// selection is dropped: it is anchored to columns that are about to mean
+    /// something else on screen.
+    fn pan(&mut self, by: i32) {
+        let to = (self.preview_hscroll as i32 + by).clamp(0, self.preview_hmax as i32);
+        if to as u16 != self.preview_hscroll {
+            self.preview_hscroll = to as u16;
+            self.preview_sel = None;
+        }
     }
 
     fn open_palette(&mut self) {
@@ -474,7 +732,11 @@ impl App {
                 return;
             }
             (true, KeyCode::Char('c')) => {
-                self.copy_selection();
+                if self.view == View::Preview {
+                    self.copy_preview_selection();
+                } else {
+                    self.copy_selection();
+                }
                 return;
             }
             (true, KeyCode::Char('x')) => {
@@ -483,8 +745,13 @@ impl App {
             }
             (true, KeyCode::Char('s')) => {
                 self.sync_editor_to_note();
+                // saving the settings note reports what it applied, which is
+                // more use than being told the file was written
+                let settings = self.editing_settings();
                 self.save_now();
-                self.flash("saved".to_string());
+                if !settings {
+                    self.flash("saved".to_string());
+                }
                 return;
             }
             // ⇧^Z is redo, the way every other editor spells it
@@ -514,11 +781,24 @@ impl App {
                 return;
             }
             (true, KeyCode::Char('k')) => {
-                if self.overlay == Overlay::Palette {
+                if matches!(self.overlay, Overlay::Palette | Overlay::QuickOpen) {
                     self.overlay = Overlay::None;
                 } else {
                     self.open_palette();
                 }
+                return;
+            }
+            (true, KeyCode::Char('o')) => {
+                if self.overlay == Overlay::QuickOpen {
+                    self.overlay = Overlay::None;
+                } else {
+                    self.open_quick_open();
+                }
+                return;
+            }
+            (true, KeyCode::Char(',')) => {
+                self.overlay = Overlay::None;
+                self.open_settings();
                 return;
             }
             (true, KeyCode::Char('n')) => {
@@ -536,7 +816,7 @@ impl App {
 
         match self.overlay {
             Overlay::Help => self.overlay = Overlay::None,
-            Overlay::Palette => self.on_palette_key(key),
+            Overlay::Palette | Overlay::QuickOpen => self.on_palette_key(key),
             Overlay::ConfirmDelete => match key.code {
                 KeyCode::Enter => {
                     self.overlay = Overlay::None;
@@ -556,12 +836,21 @@ impl App {
             },
             Overlay::None => match self.view {
                 View::Preview => match key.code {
+                    // ← and → pan a table too wide for the page; with nothing
+                    // to pan they do nothing rather than something surprising
+                    KeyCode::Left => self.pan(-4),
+                    KeyCode::Right => self.pan(4),
+                    KeyCode::Home => self.preview_hscroll = 0,
                     KeyCode::Up => self.preview_scroll = self.preview_scroll.saturating_sub(1),
                     KeyCode::Down => self.preview_scroll = self.preview_scroll.saturating_add(1),
                     KeyCode::PageUp => self.preview_scroll = self.preview_scroll.saturating_sub(10),
                     KeyCode::PageDown => {
                         self.preview_scroll = self.preview_scroll.saturating_add(10)
                     }
+                    // esc drops a selection before it drops the preview, the
+                    // same order it takes in the editor
+                    KeyCode::Esc if self.preview_sel.is_some() => self.preview_sel = None,
+                    KeyCode::Esc if self.preview_hscroll > 0 => self.preview_hscroll = 0,
                     KeyCode::Esc | KeyCode::Enter | KeyCode::Char('e') => self.view = View::Edit,
                     _ => {}
                 },
@@ -588,7 +877,7 @@ impl App {
     }
 
     fn on_palette_key(&mut self, key: KeyEvent) {
-        let count = self.palette_items().len();
+        let count = self.overlay_items().len();
         match key.code {
             KeyCode::Esc => self.overlay = Overlay::None,
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
@@ -598,7 +887,7 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if let Some(item) = self.palette_items().get(self.selected).cloned() {
+                if let Some(item) = self.overlay_items().get(self.selected).cloned() {
                     self.run_item(item);
                 }
             }
@@ -749,8 +1038,11 @@ impl App {
             .unwrap_or_else(|| self.dir.clone())
     }
 
-    /// A click in the preview: open a link, toggle a checkbox, or drop into the
-    /// editor at the same spot.
+    /// A click in the preview: open a link, toggle a checkbox, or start a
+    /// selection. It deliberately does *not* jump into the editor any more —
+    /// the preview is for reading, and a click that changed mode made it
+    /// impossible to drag out a quote and copy it. `preview_click: edit` in the
+    /// settings puts the old behaviour back.
     fn click_preview(&mut self, x: u16, y: u16) {
         let at = ratatui::layout::Position { x, y };
         if let Some((_, url)) = self.preview_links.iter().find(|(r, _)| r.contains(at)) {
@@ -763,10 +1055,21 @@ impl App {
             self.toggle_checkbox(row);
             return;
         }
+        if self.config.preview_click == PreviewClick::Edit {
+            self.edit_at_preview(x, y);
+            return;
+        }
+        self.preview_sel = self.preview_point(x, y).map(|p| (p, p));
+        self.preview_dragging = true;
+    }
+
+    /// The old behaviour, kept behind `preview_click: edit`: land in the
+    /// editor at the spot that was clicked.
+    fn edit_at_preview(&mut self, x: u16, y: u16) {
         let hit = self
             .preview_rows
             .iter()
-            .find(|(r, _, _)| r.contains(at))
+            .find(|(r, _, _)| r.contains(ratatui::layout::Position { x, y }))
             .map(|(r, row, cells)| (*r, *row, cells.clone()));
         self.view = View::Edit;
         if let Some((rect, row, cells)) = hit {
@@ -775,6 +1078,84 @@ impl App {
             self.editor.clear_selection();
             self.editor.set_cursor(pos);
         }
+    }
+
+    /// Where a screen point lands in the rendered page. Points above or below
+    /// the drawn rows clamp to the first or last one, so dragging off the top
+    /// or bottom of the window extends the selection rather than stalling.
+    fn preview_point(&self, x: u16, y: u16) -> Option<PSel> {
+        let first = self.preview_page_rows.first()?;
+        let last = self.preview_page_rows.last()?;
+        let (page_row, rect, offset) = if y < first.1.y {
+            *first
+        } else if y > last.1.y {
+            *last
+        } else {
+            *self
+                .preview_page_rows
+                .iter()
+                .find(|(_, r, _)| y >= r.y && y < r.y + r.height)
+                .unwrap_or(last)
+        };
+        Some((page_row, x.saturating_sub(rect.x) as usize + offset))
+    }
+
+    /// The preview selection ordered from its earlier point to its later one.
+    pub fn preview_span(&self) -> Option<(PSel, PSel)> {
+        let (a, b) = self.preview_sel?;
+        Some(if a <= b { (a, b) } else { (b, a) })
+    }
+
+    /// Copy whatever the preview selection covers, as the rendered text a
+    /// reader is actually looking at — a table comes out as its drawn columns,
+    /// not as pipes.
+    fn copy_preview_selection(&mut self) {
+        let Some(text) = self.preview_selected_text() else {
+            return;
+        };
+        let text = text.trim_end_matches('\n').to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        let chars = text.chars().count();
+        if crate::clipboard::copy(&text) {
+            self.flash(format!("copied {chars} chars"));
+        } else {
+            self.flash("copy failed".to_string());
+        }
+    }
+
+    /// The text the preview selection covers, assembled from the rows the last
+    /// draw recorded. `None` when nothing is selected.
+    pub fn preview_selected_text(&self) -> Option<String> {
+        let ((sr, sc), (er, ec)) = self.preview_span()?;
+        let mut out = String::new();
+        for (page_row, _, offset) in &self.preview_page_rows {
+            let row = *page_row;
+            if row < sr || row > er {
+                continue;
+            }
+            let cells = self.preview_cells(row)?;
+            let from = if row == sr { sc } else { *offset };
+            let to = if row == er { ec } else { usize::MAX };
+            out.push_str(&slice_cells(cells, *offset, from, to));
+            if row < er {
+                out.push('\n');
+            }
+        }
+        Some(out)
+    }
+
+    /// The drawn cells of one page row, as the last draw laid them out.
+    fn preview_cells(&self, page_row: usize) -> Option<&Vec<crate::render::PCell>> {
+        let (_, rect, _) = self
+            .preview_page_rows
+            .iter()
+            .find(|(r, _, _)| *r == page_row)?;
+        self.preview_rows
+            .iter()
+            .find(|(r, _, _)| r.y == rect.y)
+            .map(|(_, _, cells)| cells)
     }
 
     /// Hand a URL to the desktop.
@@ -882,7 +1263,7 @@ impl App {
     }
 
     fn paste_image(&mut self, png: &[u8]) {
-        if self.foreign_root {
+        if !self.may_rename(&self.active_note().path.clone()) {
             self.flash("image paste disabled outside notes dir".to_string());
             return;
         }
@@ -903,7 +1284,10 @@ impl App {
         }
     }
 
-    /// Reload the config after the settings file was edited.
+    /// Re-read the settings note and apply it. Everything but `notes_dir`
+    /// takes effect on the very next frame — the colours, the page width, the
+    /// table style — which is what makes editing settings in the app worth
+    /// doing at all.
     pub fn reload_config(&mut self) {
         match Config::load() {
             Ok(config) => {
@@ -911,27 +1295,31 @@ impl App {
                 // keep the probed graphics support: it is only asked for once,
                 // in raw mode at startup, and cannot be asked for again here
                 self.images.set_attachments(config.attachments_dir.clone());
+                config.apply();
+                self.editor.tab_width = config.tab_width;
                 self.config = config;
                 if moved {
                     self.flash("notes_dir changed — restart tinynote".to_string());
                 } else {
-                    self.flash("settings reloaded".to_string());
+                    self.flash("settings applied".to_string());
                 }
             }
-            Err(e) => self.flash(format!("config reload failed: {e}")),
+            Err(e) => self.flash(format!("settings reload failed: {e}")),
         }
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         match ev.kind {
             MouseEventKind::ScrollUp => match (self.overlay, self.view) {
-                (Overlay::Palette, _) => self.selected = self.selected.saturating_sub(1),
+                (Overlay::Palette | Overlay::QuickOpen, _) => {
+                    self.selected = self.selected.saturating_sub(1)
+                }
                 (_, View::Preview) => self.preview_scroll = self.preview_scroll.saturating_sub(2),
                 (_, View::Edit) => self.editor.scroll_by(-2),
             },
             MouseEventKind::ScrollDown => match (self.overlay, self.view) {
-                (Overlay::Palette, _) => {
-                    let count = self.palette_items().len();
+                (Overlay::Palette | Overlay::QuickOpen, _) => {
+                    let count = self.overlay_items().len();
                     if count > 0 && self.selected + 1 < count {
                         self.selected += 1;
                     }
@@ -939,9 +1327,11 @@ impl App {
                 (_, View::Preview) => self.preview_scroll = self.preview_scroll.saturating_add(2),
                 (_, View::Edit) => self.editor.scroll_by(2),
             },
+            MouseEventKind::ScrollLeft if self.view == View::Preview => self.pan(-4),
+            MouseEventKind::ScrollRight if self.view == View::Preview => self.pan(4),
             MouseEventKind::Down(MouseButton::Left) => {
                 let (x, y) = (ev.column, ev.row);
-                if self.overlay == Overlay::Palette {
+                if matches!(self.overlay, Overlay::Palette | Overlay::QuickOpen) {
                     if let Some((_, item)) = self
                         .palette_rows
                         .iter()
@@ -982,6 +1372,30 @@ impl App {
                     self.editor.set_cursor(pos);
                     self.editor.anchor = Some(self.editor.cursor);
                     self.dragging = true;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.preview_dragging => {
+                if let (Some(point), Some((anchor, _))) =
+                    (self.preview_point(ev.column, ev.row), self.preview_sel)
+                {
+                    self.preview_sel = Some((anchor, point));
+                }
+                // dragging past an edge scrolls the page, so a selection can
+                // run past what happens to be on screen
+                if ev.row <= self.editor_area.y {
+                    self.preview_scroll = self.preview_scroll.saturating_sub(1);
+                } else if ev.row + 1 >= self.editor_area.y + self.editor_area.height {
+                    self.preview_scroll = self.preview_scroll.saturating_add(1);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.preview_dragging => {
+                self.preview_dragging = false;
+                match self.preview_span() {
+                    // a plain click, not a drag: nothing to copy, and the
+                    // stray one-cell selection would only be visual noise
+                    Some((a, b)) if a == b => self.preview_sel = None,
+                    Some(_) => self.copy_preview_selection(),
+                    None => {}
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
@@ -1065,6 +1479,23 @@ pub fn toggle_task(line: &str) -> Option<String> {
     Some(out)
 }
 
+/// The text of `cells` between two display columns, as drawn. Columns rather
+/// than indices because that is what a pointer lands on, and a wide character
+/// covers two of them. `offset` is the column the first cell stands for — the
+/// pan, for a row of a scrolling table.
+fn slice_cells(cells: &[crate::render::PCell], offset: usize, from: usize, to: usize) -> String {
+    let mut out = String::new();
+    let mut col = offset;
+    for c in cells {
+        let w = md::char_width(c.ch);
+        if col >= from && col < to {
+            out.push(c.ch);
+        }
+        col += w;
+    }
+    out.trim_end().to_string()
+}
+
 /// Where a click on display column `dcol` of a rendered preview row lands in
 /// the source. Rendered rows carry the source position of every character they
 /// drew, so wrapped continuations, table cells, indented code and quote bars all
@@ -1131,6 +1562,31 @@ mod tests {
         );
         assert_eq!(toggle_task("see the - [ ] convention"), None);
         assert_eq!(toggle_task("+ [x] plus"), Some("+ [ ] plus".to_string()));
+    }
+
+    #[test]
+    fn a_preview_selection_takes_the_text_it_covers_by_column() {
+        let cells = pcells("date  │  company");
+        // a selection that starts mid-word takes only what it covers
+        assert_eq!(slice_cells(&cells, 0, 0, 4), "date");
+        assert_eq!(slice_cells(&cells, 0, 9, usize::MAX), "company");
+        // trailing padding a table put there is not worth copying
+        assert_eq!(slice_cells(&cells, 0, 0, 8), "date  │");
+        // a column range past the end of the row is simply the rest of it
+        assert_eq!(slice_cells(&cells, 0, 99, usize::MAX), "");
+        // a panned row's first cell stands for a later column
+        assert_eq!(slice_cells(&cells, 6, 6, 10), "date");
+    }
+
+    fn pcells(text: &str) -> Vec<crate::render::PCell> {
+        text.chars()
+            .map(|ch| crate::render::PCell {
+                ch,
+                style: ratatui::style::Style::default(),
+                link: None,
+                src: None,
+            })
+            .collect()
     }
 
     #[test]

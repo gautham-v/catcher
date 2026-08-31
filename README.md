@@ -22,11 +22,17 @@ Then run `tinynote`.
 
 ## Using it
 
-One note on screen at a time. **^K** opens the palette — fuzzy search across every note's title and body, plus commands (new, delete, rename file, preview, shortcuts, settings, quit).
+One note on screen at a time. **^K** opens the palette — fuzzy search across every note's title and body, plus commands (new, open, delete, rename file, preview, shortcuts, settings, quit).
+
+**^O** opens a note. It is the palette's twin, and the difference is what it ranks by: notes you opened most recently first, then the most recently edited, and it walks *subfolders* — so pointing tinynote at an Obsidian vault still lets you jump straight to `applications/log.md` from wherever you are. Type to fuzzy-search titles and folder paths.
+
+It reaches past your notes dir three ways. A note **you have opened before** is always offered, wherever it lives — that is what the recents list is for, and it survives restarts. Folders listed in `quick_open_dirs` are searched every time. And typing a **path** — `~/vault/spec.md`, or `~/vault/spec` — opens that file directly, which is the escape hatch for a note tinynote has never been shown. Opening a note from another folder pulls it into the session; it saves back where it lives, and is never renamed.
 
 The editor is a **live preview**, Obsidian-style: headings, emphasis, `==highlight==`, code, links, quotes, bullets and `☐`/`✓` checkboxes are styled as you type, and the line the cursor is on shows its raw markdown so it's always editable. Code fences, tables, rules and images are drawn whole and flip back to source when the cursor lands inside. Long lines soft-wrap; nothing scrolls sideways. **^P** flips to the full rendered page, with images drawn inline in terminals that support graphics (Ghostty, kitty, iTerm2).
 
-Notes autosave half a second after you stop typing. Mouse works as expected: click to place the cursor, drag to select (copies on release), scroll, click a palette row. **^V** pastes — a clipboard image becomes a PNG in your attachments folder with the markdown link inserted for you.
+In the reading view a wide table is not squeezed into columns two characters across. Its columns keep a readable width and wrap inside it, and the table itself pans sideways — **←** and **→**, or a sideways scroll — with a `›` on the header row where it carries on. Nothing is cut. `table_style` in the settings picks the rule: `auto` (leave a table that fits alone, scroll one that doesn't), `scroll`, `fit`, `wrap`, or `cards` for one labelled block per row.
+
+Notes autosave half a second after you stop typing. Mouse works as expected: click to place the cursor, drag to select (copies on release), scroll, click a palette row. In the reading view a click no longer drops you into the editor — drag to select and it copies on release, so you can lift a quote out of a rendered page. **^V** pastes — a clipboard image becomes a PNG in your attachments folder with the markdown link inserted for you.
 
 **^N** creates a note. Its filename follows the first line (`# Groceries` → `groceries.md`) until you rename the file yourself, after which the title and filename go their own ways.
 
@@ -51,8 +57,10 @@ Pointing tinynote at a file or folder roots that one session there without touch
 | Key | Action |
 | --- | --- |
 | `^K` | Palette: search notes, run commands |
+| `^O` | Open a note: every folder, recent first |
 | `^G` | Keyboard shortcuts card |
 | `^N` | New note |
+| `^,` | Settings |
 | `^P` | Toggle markdown preview |
 | `^S` | Save now |
 | `^Z` / `^Y` | Undo / redo |
@@ -71,17 +79,28 @@ keybind = cmd+down=unbind
 
 `⌥`-click on a link needs `macos-option-as-alt` set; `^`-click always works.
 
-## Configuration
+## Settings
 
-`~/.config/tinynote/config.toml` is written with commented defaults on first run:
+Settings are a note. **^,** opens `~/.config/tinynote/settings.md` in tinynote itself — same editor, same preview, no `$EDITOR` and no TOML — and **^S** applies it at once. Colours, page width and everything else but `notes_dir` change on the next frame.
 
-```toml
-notes_dir = "~/tinynote"                    # where the .md files live
-attachments_dir = "~/tinynote/attachments"  # where pasted images are written
-theme = "dark"                              # or "light"
-```
+Every setting is a `- key: value` line; delete one and its default stands. The file is written on first run with all of them in it, and the prose beside each says what it does.
 
-The two paths accept a leading `~/`. `theme` picks which grey ramp to draw with — tinynote never paints a background of its own, so this only tells it which way your terminal's runs. `TINYNOTE_DIR` overrides `notes_dir` for a single run: `TINYNOTE_DIR=/tmp/notes tinynote`. The palette's **Open settings** opens the file in `$EDITOR` and reloads on exit.
+| | |
+| --- | --- |
+| `notes_dir`, `attachments_dir` | where notes and pasted images live (`~/` expands; `TINYNOTE_DIR` overrides the first) |
+| `theme` | `dark` or `light` — which way your terminal's own background runs |
+| `accent`, `bright`, `grey`, `dim`, `link`, `code_bg`, `border`, `danger`, `ground` | the nine colours, as `#rrggbb`, `#rgb`, an ANSI name, or `default` |
+| `page_width` | widest the note column is drawn, in columns, or `full` |
+| `borders` | `rounded`, `square`, `none` |
+| `bold_headings`, `status_bar`, `key_hints` | chrome, on or off |
+| `autosave_ms`, `tab_width` | how soon a note saves, how far `tab` goes |
+| `rename_files` | whether a filename follows its note's title |
+| `table_style` | `auto`, `scroll`, `fit`, `wrap`, `cards` — what happens to a table wider than the page |
+| `preview_click` | `select` or `edit` — what a click in the reading view does |
+| `quick_open` | `recursive` or `folder` — how far **^O** looks |
+| `quick_open_dirs` | extra folders **^O** searches; repeat the line, or separate with commas |
+
+An existing `config.toml` is read once, to seed `settings.md`, and then left alone.
 
 ## Development
 
@@ -91,7 +110,7 @@ cargo test
 cargo clippy
 ```
 
-Rust, ratatui + crossterm. `src/editor.rs` is the text buffer, `src/md.rs` the live-preview styling and click mapping, `src/render.rs` the full-page preview, `src/images.rs` inline images, `src/cli.rs` argument parsing, `src/config.rs` the config file, `src/clipboard.rs` copy and paste. Every colour in the app lives in one place: the `theme` module at the top of `src/md.rs`.
+Rust, ratatui + crossterm. `src/editor.rs` is the text buffer, `src/md.rs` the live-preview styling and click mapping, `src/render.rs` the full-page preview, `src/images.rs` inline images, `src/cli.rs` argument parsing, `src/config.rs` the settings note, `src/index.rs` the quick-open index and recents, `src/clipboard.rs` copy and paste. Every colour in the app lives in one place: the `theme` module at the top of `src/md.rs`.
 
 ## License
 

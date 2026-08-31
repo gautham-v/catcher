@@ -41,7 +41,7 @@ pub fn str_width(s: &str) -> usize {
 /// because "raised" means more contrast with the ground, not lighter.
 pub mod theme {
     use super::*;
-    use std::sync::OnceLock;
+    use std::sync::RwLock;
 
     /// Which polarity the terminal is showing.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -51,7 +51,10 @@ pub mod theme {
         Light,
     }
 
-    /// Every colour tinynote can draw with, at one polarity.
+    /// Every colour tinynote can draw with, at one polarity. Each field is
+    /// settable by name from the settings file, so a user who wants their own
+    /// hue for links or headings sets that one field and inherits the rest.
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct Palette {
         /// The one hue: h1, a checked mark, status-bar state.
         pub accent: Color,
@@ -73,7 +76,49 @@ pub mod theme {
         pub ground: Color,
     }
 
-    const DARK: Palette = Palette {
+    /// The colour field names the settings file accepts, in the order the
+    /// settings document lists them. The single source of truth: a name that
+    /// isn't here can't be set and isn't documented.
+    pub const COLOR_KEYS: [&str; 9] = [
+        "accent", "bright", "grey", "dim", "link", "code_bg", "border", "danger", "ground",
+    ];
+
+    impl Palette {
+        /// Set one field by its settings-file name. Returns false for a name
+        /// that isn't a colour, so the caller can report the typo.
+        pub fn set(&mut self, key: &str, color: Color) -> bool {
+            match key {
+                "accent" => self.accent = color,
+                "bright" => self.bright = color,
+                "grey" => self.grey = color,
+                "dim" => self.dim = color,
+                "link" => self.link = color,
+                "code_bg" => self.code_bg = color,
+                "border" => self.border = color,
+                "danger" => self.danger = color,
+                "ground" => self.ground = color,
+                _ => return false,
+            }
+            true
+        }
+
+        pub fn get(&self, key: &str) -> Option<Color> {
+            Some(match key {
+                "accent" => self.accent,
+                "bright" => self.bright,
+                "grey" => self.grey,
+                "dim" => self.dim,
+                "link" => self.link,
+                "code_bg" => self.code_bg,
+                "border" => self.border,
+                "danger" => self.danger,
+                "ground" => self.ground,
+                _ => return None,
+            })
+        }
+    }
+
+    pub const DARK: Palette = Palette {
         accent: Color::Rgb(0xff, 0x9e, 0x64),
         bright: Color::Rgb(0xe1, 0xe1, 0xe1),
         grey: Color::Rgb(0x78, 0x78, 0x78),
@@ -85,7 +130,7 @@ pub mod theme {
         ground: Color::Rgb(0x14, 0x14, 0x14),
     };
 
-    const LIGHT: Palette = Palette {
+    pub const LIGHT: Palette = Palette {
         accent: Color::Rgb(0xb8, 0x5c, 0x18),
         bright: Color::Rgb(0x26, 0x26, 0x26),
         grey: Color::Rgb(0x76, 0x76, 0x76),
@@ -97,19 +142,50 @@ pub mod theme {
         ground: Color::Rgb(0xee, 0xee, 0xee),
     };
 
-    static MODE: OnceLock<Mode> = OnceLock::new();
+    /// The palette in force. A lock rather than a `OnceLock`: settings are
+    /// edited inside the app now, and a saved change has to be visible on the
+    /// very next frame without a restart.
+    static PALETTE: RwLock<Palette> = RwLock::new(DARK);
+    static BOLD_HEADINGS: RwLock<bool> = RwLock::new(true);
 
-    /// Fix the polarity for the run. The first call wins; later ones are
-    /// ignored, so a stray call in a test can never change a palette a
-    /// rendered line was already measured against.
-    pub fn set_mode(mode: Mode) {
-        let _ = MODE.set(mode);
+    /// The built-in palette for a polarity, before any user overrides.
+    pub fn base(mode: Mode) -> Palette {
+        match mode {
+            Mode::Dark => DARK,
+            Mode::Light => LIGHT,
+        }
     }
 
-    pub fn palette() -> &'static Palette {
-        match MODE.get().copied().unwrap_or_default() {
-            Mode::Dark => &DARK,
-            Mode::Light => &LIGHT,
+    /// Install the palette for the run. Called at startup and again every time
+    /// the settings are saved.
+    pub fn set_palette(p: Palette) {
+        if let Ok(mut w) = PALETTE.write() {
+            *w = p;
+        }
+    }
+
+    /// Install a built-in palette by polarity, with no user overrides.
+    #[allow(dead_code)]
+    pub fn set_mode(mode: Mode) {
+        set_palette(base(mode));
+    }
+
+    pub fn set_bold_headings(on: bool) {
+        if let Ok(mut w) = BOLD_HEADINGS.write() {
+            *w = on;
+        }
+    }
+
+    pub fn palette() -> Palette {
+        PALETTE.read().map(|p| *p).unwrap_or(DARK)
+    }
+
+    fn bold() -> Modifier {
+        let on = BOLD_HEADINGS.read().map(|b| *b).unwrap_or(true);
+        if on {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
         }
     }
 
@@ -122,11 +198,9 @@ pub mod theme {
     /// accent leads, then grey, then weight alone.
     pub fn heading(level: usize) -> Style {
         match level {
-            1 => Style::new()
-                .fg(palette().accent)
-                .add_modifier(Modifier::BOLD),
-            2 => Style::new().fg(palette().grey).add_modifier(Modifier::BOLD),
-            _ => Style::new().add_modifier(Modifier::BOLD),
+            1 => Style::new().fg(palette().accent).add_modifier(bold()),
+            2 => Style::new().fg(palette().grey).add_modifier(bold()),
+            _ => Style::new().add_modifier(bold()),
         }
     }
 
@@ -171,6 +245,62 @@ pub mod theme {
     }
     pub fn bright() -> Style {
         Style::new().fg(palette().bright)
+    }
+
+    /// `#rrggbb`, `#rgb`, or one of the sixteen ANSI names, as written in the
+    /// settings file. `None` for anything else, which the settings reader
+    /// reports rather than silently ignoring.
+    pub fn parse_color(text: &str) -> Option<Color> {
+        let t = text.trim();
+        if let Some(hex) = t.strip_prefix('#') {
+            let digits: Vec<u32> = hex
+                .chars()
+                .map(|c| c.to_digit(16))
+                .collect::<Option<Vec<u32>>>()?;
+            return match digits.len() {
+                // #rgb is the shorthand every CSS-trained hand tries first
+                3 => Some(Color::Rgb(
+                    (digits[0] * 17) as u8,
+                    (digits[1] * 17) as u8,
+                    (digits[2] * 17) as u8,
+                )),
+                6 => Some(Color::Rgb(
+                    (digits[0] * 16 + digits[1]) as u8,
+                    (digits[2] * 16 + digits[3]) as u8,
+                    (digits[4] * 16 + digits[5]) as u8,
+                )),
+                _ => None,
+            };
+        }
+        Some(match t.to_ascii_lowercase().as_str() {
+            "black" => Color::Black,
+            "red" => Color::Red,
+            "green" => Color::Green,
+            "yellow" => Color::Yellow,
+            "blue" => Color::Blue,
+            "magenta" => Color::Magenta,
+            "cyan" => Color::Cyan,
+            "white" => Color::White,
+            "gray" | "grey" | "darkgray" | "darkgrey" => Color::DarkGray,
+            "brightred" => Color::LightRed,
+            "brightgreen" => Color::LightGreen,
+            "brightyellow" => Color::LightYellow,
+            "brightblue" => Color::LightBlue,
+            "brightmagenta" => Color::LightMagenta,
+            "brightcyan" => Color::LightCyan,
+            "brightwhite" => Color::Gray,
+            "default" | "terminal" => Color::Reset,
+            _ => return None,
+        })
+    }
+
+    /// A colour written back the way the settings file spells it.
+    pub fn color_to_string(c: Color) -> String {
+        match c {
+            Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+            Color::Reset => "default".to_string(),
+            other => format!("{other:?}").to_lowercase(),
+        }
     }
 
     pub const CHECKED: &str = "\u{2713}";
@@ -1458,7 +1588,7 @@ mod tests {
         assert_eq!(text(&table_line(&rows, 0, 80)), "a │ bbbb");
         assert_eq!(text(&table_line(&rows, 1, 80)), "──┼─────");
         assert_eq!(text(&table_line(&rows, 2, 80)), "1 │    2"); // right aligned
-                                                             // every row is the same width, and the head is bold
+                                                                 // every row is the same width, and the head is bold
         assert!(table_line(&rows, 0, 80).cells[0]
             .style
             .add_modifier
@@ -1524,4 +1654,3 @@ mod tests {
         assert_eq!(rev, "el");
     }
 }
-

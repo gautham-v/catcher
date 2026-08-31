@@ -4,6 +4,7 @@ mod clipboard;
 mod config;
 mod editor;
 mod images;
+mod index;
 mod md;
 mod notes;
 mod render;
@@ -179,43 +180,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Result<()
                 _ => {}
             }
         }
-        if app.edit_config {
-            app.edit_config = false;
-            if let Err(e) = edit_config(terminal, app) {
-                app.flash(format!("editor failed: {e}"));
-            }
-        }
         app.tick();
     }
     app.save_now();
-    Ok(())
-}
-
-/// Suspend the TUI, hand the config file to $EDITOR, then resume and reload.
-/// The alternate screen and mouse capture are put back either way.
-fn edit_config(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Result<()> {
-    let path = config::config_path()?;
-    let _ = config::Config::load(); // make sure the file exists to open
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".to_string());
-
-    // $EDITOR gets a plain terminal: the enhanced key encoding is ours, and
-    // leaving it pushed would confuse vim's own key handling.
-    pop_keyboard();
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
-    ratatui::restore();
-
-    let status = std::process::Command::new(&editor).arg(&path).status();
-
-    *terminal = ratatui::init();
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
-    push_keyboard();
-    terminal.clear()?;
-
-    match status {
-        Ok(_) => app.reload_config(),
-        Err(e) => app.flash(format!("{editor}: {e}")),
-    }
     Ok(())
 }
