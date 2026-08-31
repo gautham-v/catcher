@@ -2,7 +2,7 @@
 name = "tinynote"
 version = "0.3.0"
 edition = "2021"
-description = "Raycast Notes in your terminal: a tiny markdown notes TUI over plain files"
+description = "A minimal, local-first markdown notes TUI over plain files"
 license = "MIT"
 repository = "https://github.com/tinycomputer-io/tinynote"
 readme = "README.md"
