@@ -76,6 +76,7 @@ Pointing tinynote at a file or folder roots that one session there without touch
 | `^Z` / `^Y` | Undo / redo |
 | `^C` `^X` `^V` | Copy / cut / paste |
 | `⌥⏎` | Follow the `[[wikilink]]` under the cursor |
+| `⌥P` | Peek at the `[[wikilink]]` under the cursor; in preview, hovering a link does the same |
 | `^⌥←` / `^⌥→` | Back / forward through the notes you have opened, browser-style |
 | `Tab` | In **^O**: flip between the ranked list and the folder tree |
 | `Esc` | Close palette, cancel, leave preview, clear selection |
@@ -123,7 +124,7 @@ Every setting is a `- key: value` line with a one-line hint after it. The file i
 | `quick_open` | `recursive` or `folder` — how far **^O** looks |
 | `quick_open_mode` | `search` or `browse` — which half of **^O** it opens on |
 | `quick_open_dirs` | extra folders **^O** searches; repeat the line, or separate with commas |
-| `key_palette`, `key_open`, `key_new`, `key_settings`, `key_preview`, `key_save`, `key_help` (`key_shortcuts` still read), `key_quit`, `key_copy`, `key_cut`, `key_paste`, `key_undo`, `key_redo`, `key_delete`, `key_rename`, `key_follow`, `key_back`, `key_forward` | one key each — `^K`, `cmd+k`, `alt+k`, `f5`, or `none` |
+| `key_palette`, `key_open`, `key_new`, `key_settings`, `key_preview`, `key_save`, `key_help` (`key_shortcuts` still read), `key_quit`, `key_copy`, `key_cut`, `key_paste`, `key_undo`, `key_redo`, `key_delete`, `key_rename`, `key_follow`, `key_back`, `key_forward`, `key_peek` | one key each — `^K`, `cmd+k`, `alt+k`, `f5`, or `none` |
 
 An existing `config.toml` is read once, to seed `settings.md`, and then left alone.
 
