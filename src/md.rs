@@ -146,7 +146,7 @@ pub mod theme {
     pub const LIGHT: Palette = Palette {
         accent: Color::Rgb(0xb8, 0x5c, 0x18),
         bright: Color::Rgb(0x26, 0x26, 0x26),
-        grey: Color::Rgb(0x76, 0x76, 0x76),
+        grey: Color::Rgb(0x55, 0x55, 0x55),
         dim: Color::Rgb(0x8d, 0x8d, 0x8d),
         link: Color::Rgb(0x5a, 0x58, 0x52),
         code_bg: Color::Rgb(0xe2, 0xe2, 0xe2),
@@ -284,6 +284,11 @@ pub mod theme {
     pub fn marker() -> Style {
         Style::new().fg(palette().dim)
     }
+    /// Secondary text that still has to be read: the status-bar path, struck
+    /// tasks. One step darker than `marker`, which is for chrome.
+    pub fn grey() -> Style {
+        Style::new().fg(palette().grey)
+    }
     /// Code carries no hue of its own — the raised background is the signal.
     /// It states its foreground anyway: see `code_fg`.
     pub fn code() -> Style {
@@ -300,10 +305,12 @@ pub mod theme {
     pub fn done() -> Style {
         Style::new().fg(palette().accent)
     }
-    /// The text of a finished task: dim and struck through.
+    /// The text of a finished task: struck through, in `grey` rather than
+    /// `dim`. It is still content you sometimes need to read, so it sits one
+    /// step above hints and markers.
     pub fn done_text() -> Style {
         Style::new()
-            .fg(palette().dim)
+            .fg(palette().grey)
             .add_modifier(Modifier::CROSSED_OUT)
     }
     /// Status-bar state, panel titles: catcher talking about itself.

@@ -577,7 +577,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // that identifies the note
     let left = Line::from(Span::styled(
         format!(" {}", truncate_left(&left_text, total.saturating_sub(8))),
-        dim(),
+        theme::grey(),
     ));
     let mut right_spans = Vec::new();
     if let Some(msg) = status {
