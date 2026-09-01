@@ -22,6 +22,8 @@ Then run `tinynote`.
 
 ## Using it
 
+A bare `tinynote` reopens the note you had open when you closed it, wherever it lives. Naming something — `tinynote spec.md`, `tinynote ~/vault` — asks for that instead.
+
 One note on screen at a time. **^K** opens the palette — fuzzy search across every note's title and body, plus commands (new, open, delete, rename file, preview, shortcuts, settings, quit).
 
 **^O** opens a note. It is the palette's twin, and the difference is what it ranks by: notes you opened most recently first, then the most recently edited, and it walks *subfolders* — so pointing tinynote at an Obsidian vault still lets you jump straight to `applications/log.md` from wherever you are. Type to fuzzy-search titles and folder paths.
@@ -39,7 +41,7 @@ Notes autosave half a second after you stop typing. Mouse works as expected: cli
 ## CLI
 
 ```
-tinynote                  open the TUI on the most recent note
+tinynote                  open the TUI on the note you last had open
 tinynote groceries        open the note whose title best matches; create it if none does
 tinynote add "buy milk"   write a new note and print its path — no TUI
 cat x | tinynote add      same, from stdin
@@ -68,7 +70,7 @@ Pointing tinynote at a file or folder roots that one session there without touch
 | `Esc` | Close palette, cancel, leave preview, clear selection |
 | `^Q` | Quit |
 
-Every key in that table is settable. The settings note has a `## Keys` section with one line per action — `key_palette: ^K`, `key_open: ^O` — and takes `^K`, `cmd+k`, `alt+k`, `f5`, or `none` to unbind. `^K` answers to either ctrl or cmd, so the same file works on a Mac and on Linux; spell out `cmd+` or `ctrl+` when you want one exactly. **Delete note** and **Rename file** ship unbound and are yours to claim. The palette shows each command's current key beside it, and so does the **^G** card. The palette itself is monochrome — it is chrome over the note, and a hue there would compete with the one the note spends on its headings.
+Every key in that table is settable. The settings note has a `## Keys` section with one line per action — `key_palette: ^K`, `key_open: ^O` — and takes `^K`, `cmd+k`, `alt+k`, `f5`, or `none` to unbind. `^K` answers to either ctrl or cmd, so the same file works on a Mac and on Linux; spell out `cmd+` or `ctrl+` when you want one exactly. **Delete note** and **Rename file** ship unbound and are yours to claim. The palette shows each command's current key beside it, and so does the **^G** card — which is itself searchable: type `save` on it and only the saving rows stay. Esc closes it. The palette itself is monochrome — it is chrome over the note, and a hue there would compete with the one the note spends on its headings.
 
 The palette's search box takes the Mac editing keys too: `⌘⌫` clears it, `⌥⌫` deletes a word.
 
@@ -97,6 +99,7 @@ Every setting is a `- key: value` line with a one-line hint after it. The file i
 | `page_width` | widest the note column is drawn, in columns, or `full` |
 | `borders` | `rounded`, `square`, `none` |
 | `bold_headings`, `status_bar`, `key_hints` | chrome, on or off |
+| `status_bar_items` | what the bottom line shows, in order: `path`, `name`, `mode`, `keys`, `message` |
 | `autosave_ms`, `tab_width` | how soon a note saves, how far `tab` goes |
 | `rename_files` | whether a filename follows its note's title |
 | `table_style` | `auto`, `scroll`, `fit`, `wrap`, `cards` — what happens to a table wider than the page |

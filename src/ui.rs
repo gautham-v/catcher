@@ -467,27 +467,56 @@ fn wrap_cells(cells: &[PCell], width: usize) -> Vec<Vec<PCell>> {
 /// keys do — laid out so a narrow window loses the least useful part first
 /// rather than letting the two halves collide.
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+    use crate::config::StatusItem;
     let note = app.active_note();
-    // the filename, and only the filename: the title is already the first line
-    // of the note on screen, so repeating it here says nothing, while the name
-    // of the file the note is being written to is not visible anywhere else
+    // the whole path, `~/`-shortened: with quick-open reaching other folders,
+    // *which* log.md you are in is the thing the bar alone can tell you
+    let path = crate::index::short(&note.path);
     let name = note
         .path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    // the mode is named in both views, not just the unusual one: a bar that
-    // only speaks up half the time makes you check which half you are in
     let mode = match app.view {
         View::Edit => "edit",
         View::Preview => "preview",
     };
-
     let status = app.status.as_ref().map(|(m, _)| m.clone());
-    let hints = hint_pairs(app);
+    let items = &app.config.status_bar_items;
+    let shows = |i: StatusItem| items.contains(&i);
+
+    // the left half is what the note is; the right half is what you can do
+    let mut left_text = String::new();
+    for item in items {
+        let piece = match item {
+            StatusItem::Path => path.clone(),
+            StatusItem::Name => name.clone(),
+            StatusItem::Mode => mode.to_string(),
+            _ => continue,
+        };
+        if piece.is_empty() {
+            continue;
+        }
+        if !left_text.is_empty() {
+            left_text.push_str("  ");
+        }
+        left_text.push_str(&piece);
+    }
+    let status = status.filter(|_| shows(StatusItem::Message));
+    // `key_hints` is the older, blunter switch for the same thing; off still
+    // means no keys, whatever the item list says
+    let hints = if shows(StatusItem::Keys) && app.config.key_hints {
+        hint_pairs(app)
+    } else {
+        Vec::new()
+    };
+
     let total = area.width as usize;
-    // what the left-hand side needs: " name  mode "
-    let left_w = crate::md::str_width(&name) + crate::md::str_width(mode) + 3;
+    let left_w = if left_text.is_empty() {
+        0
+    } else {
+        crate::md::str_width(&left_text) + 1
+    };
     let status_w = status
         .as_ref()
         .map(|m| crate::md::str_width(m) + 3)
@@ -500,13 +529,12 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // the right, which is the order they are worth least in
     let right = fit_hints(&hints, room);
 
-    let left = Line::from(vec![
-        Span::styled(
-            format!(" {}", truncate(&name, total.saturating_sub(8))),
-            dim(),
-        ),
-        Span::styled(format!("  {mode}"), theme::state()),
-    ]);
+    // a long path gives up its head, not its tail: the filename is the part
+    // that identifies the note
+    let left = Line::from(Span::styled(
+        format!(" {}", truncate_left(&left_text, total.saturating_sub(8))),
+        dim(),
+    ));
     let mut right_spans = Vec::new();
     if let Some(msg) = status {
         right_spans.push(Span::styled(format!("{msg}   "), theme::state()));
@@ -527,23 +555,14 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 fn hint_pairs(app: &App) -> Vec<(String, &'static str)> {
     use crate::keys::Action;
     let keys = &app.config.keys;
-    // ^P is a toggle, so the hint names where it goes, not where you are
-    let flip = match app.view {
-        View::Edit => "preview",
-        View::Preview => "edit",
-    };
     let mut pairs: Vec<(String, &'static str)> = Vec::new();
     // ← → only earns a place in the bar when there is something to pan
     if app.view == View::Preview && app.preview_hmax > 0 {
         pairs.push(("← →".to_string(), "table"));
     }
-    for (action, what) in [
-        (Action::Palette, "palette"),
-        (Action::QuickOpen, "open"),
-        (Action::NewNote, "new"),
-        (Action::TogglePreview, flip),
-        (Action::Shortcuts, "shortcuts"),
-    ] {
+    // only the two that get you everywhere else: the card lists every other
+    // binding, and a bar that lists them all is a bar you stop reading
+    for (action, what) in [(Action::Shortcuts, "shortcuts"), (Action::Quit, "quit")] {
         let key = keys.label(action);
         if !key.is_empty() {
             pairs.push((key, what));
@@ -814,6 +833,23 @@ fn draw_help(f: &mut Frame, app: &App) {
         .max()
         .unwrap_or(0);
 
+    // typing filters the card: a row matches on its keys, its description or
+    // its group, so "save" finds ^S and "word" finds ⌥←
+    let q = app.help_query.trim();
+    let groups: Vec<(&str, Vec<(String, &str)>)> = groups
+        .into_iter()
+        .map(|(group, rows)| {
+            let rows = rows
+                .into_iter()
+                .filter(|(k, w)| {
+                    crate::search::fuzzy(q, &format!("{group} {k} {w}")).is_some()
+                })
+                .collect::<Vec<_>>();
+            (group, rows)
+        })
+        .filter(|(_, rows)| !rows.is_empty())
+        .collect();
+
     let mut lines: Vec<Line> = Vec::new();
     for (i, (group, rows)) in groups.iter().enumerate() {
         if i > 0 {
@@ -834,8 +870,19 @@ fn draw_help(f: &mut Frame, app: &App) {
             ]));
         }
     }
+    if groups.is_empty() {
+        lines.push(Line::from(Span::styled(" nothing matches", dim())));
+    }
     lines.push(Line::default());
-    lines.push(Line::from(Span::styled(" any key closes", dim())));
+    lines.push(if q.is_empty() {
+        Line::from(Span::styled(" type to search · esc closes", dim()))
+    } else {
+        Line::from(vec![
+            Span::styled(" search ", dim()),
+            Span::styled(app.help_query.clone(), theme::state()),
+            Span::styled("  · esc closes", dim()),
+        ])
+    });
 
     let area = f.area();
     let width = (keyw as u16 + 54).min(area.width.saturating_sub(2));
@@ -954,4 +1001,23 @@ mod tests {
         assert_eq!(*len, 4);
         assert_eq!(url, "http://x.y");
     }
+}
+
+/// Cut from the left, with a leading `…`: for a path, whose end is the part
+/// worth keeping.
+fn truncate_left(text: &str, width: usize) -> String {
+    if crate::md::str_width(text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for c in text.chars().rev() {
+        let cw = crate::md::str_width(&c.to_string());
+        if w + cw + 1 > width {
+            break;
+        }
+        out.insert(0, c);
+        w += cw;
+    }
+    format!("…{out}")
 }

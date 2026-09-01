@@ -224,6 +224,8 @@ pub struct App {
     pub preview_page_rows: Vec<(usize, Rect, usize)>,
     /// Buffer for the inline rename prompt.
     pub rename_input: String,
+    /// What has been typed into the shortcuts card, which filters its rows.
+    pub help_query: String,
     /// True when the session is rooted outside the configured notes dir (a
     /// `tinynote <file>` / `<dir>` invocation). Renaming and image paste are
     /// decided per note now — quick-open can reach anywhere — but the flag
@@ -259,6 +261,14 @@ impl App {
             != std::fs::canonicalize(&config.notes_dir)
                 .unwrap_or_else(|_| config.notes_dir.clone());
 
+        let recents = index::load_recent();
+        // a plain `tinynote` picks up where you left off: the note you had
+        // open when you closed it, wherever it lives. Only a launch that names
+        // nothing gets this — `tinynote <file>` asked for something else.
+        let restore = matches!(launch, Launch::Default)
+            .then(|| recents.first().cloned())
+            .flatten();
+
         let mut all = notes::load_all(&dir)?;
         let mut active = 0;
         match want {
@@ -275,11 +285,19 @@ impl App {
             None => {}
         }
         if all.is_empty() {
+            // an empty folder plus a note to restore is not an empty session:
+            // creating an untitled note here would leave a stray file behind
+            if let Some(note) = restore.as_ref().and_then(|p| notes::load_one(p).ok()) {
+                all.push(note);
+            }
+        }
+        if all.is_empty() {
             all.push(notes::create(&dir)?);
         }
 
         let mut app = App {
             rename_input: String::new(),
+            help_query: String::new(),
             foreign_root,
             images: Images::new(config.attachments_dir.clone()),
             config,
@@ -306,13 +324,20 @@ impl App {
             preview_rows: Vec::new(),
             dragging: false,
             open_index: Vec::new(),
-            recents: index::load_recent(),
+            recents,
             preview_sel: None,
             preview_dragging: false,
             preview_page_rows: Vec::new(),
         };
         app.remember_active();
         app.load_active_into_editor();
+        // after the session exists, so a last note from another folder is
+        // pulled in the same way quick-open pulls one
+        if let Some(path) = restore {
+            if path.exists() {
+                app.open_path(&path);
+            }
+        }
         Ok(app)
     }
 
@@ -641,7 +666,10 @@ impl App {
             Item::Command(Command::NewNote) => self.new_note(),
             Item::Command(Command::QuickOpen) => self.open_quick_open(),
             Item::Command(Command::TogglePreview) => self.toggle_preview(),
-            Item::Command(Command::Shortcuts) => self.overlay = Overlay::Help,
+            Item::Command(Command::Shortcuts) => {
+                self.help_query.clear();
+                self.overlay = Overlay::Help;
+            }
             Item::Command(Command::OpenSettings) => self.open_settings(),
             Item::Command(Command::Quit) => {
                 self.save_now();
@@ -733,7 +761,16 @@ impl App {
         }
 
         match self.overlay {
-            Overlay::Help => self.overlay = Overlay::None,
+            // the card is searchable, so typing filters it rather than
+            // dismissing it; esc and enter are how you leave
+            Overlay::Help => {
+                if !edit_line(&mut self.help_query, &key) {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Enter => self.overlay = Overlay::None,
+                        _ => {}
+                    }
+                }
+            }
             Overlay::Palette | Overlay::QuickOpen => self.on_palette_key(key),
             Overlay::ConfirmDelete => match key.code {
                 KeyCode::Enter => {
@@ -836,6 +873,7 @@ impl App {
                 }
             }
             Action::Shortcuts => {
+                self.help_query.clear();
                 self.overlay = if self.overlay == Overlay::Help {
                     Overlay::None
                 } else {

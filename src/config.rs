@@ -57,6 +57,45 @@ pub enum BorderStyle {
     None,
 }
 
+/// One thing the status bar can show. The order they are listed in the
+/// settings is the order they are drawn in, left half first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusItem {
+    /// The note's full path, `~/`-shortened.
+    Path,
+    /// Just the filename.
+    Name,
+    /// `edit` / `preview`.
+    Mode,
+    /// The key hints.
+    Keys,
+    /// Transient messages — saves, failures, confirmations.
+    Message,
+}
+
+impl StatusItem {
+    fn parse(word: &str) -> Option<StatusItem> {
+        Some(match word {
+            "path" => StatusItem::Path,
+            "name" | "file" | "filename" => StatusItem::Name,
+            "mode" => StatusItem::Mode,
+            "keys" | "hints" => StatusItem::Keys,
+            "message" | "status" => StatusItem::Message,
+            _ => return None,
+        })
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            StatusItem::Path => "path",
+            StatusItem::Name => "name",
+            StatusItem::Mode => "mode",
+            StatusItem::Keys => "keys",
+            StatusItem::Message => "message",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub notes_dir: PathBuf,
@@ -71,6 +110,8 @@ pub struct Config {
     pub bold_headings: bool,
     pub status_bar: bool,
     pub key_hints: bool,
+    /// What the status bar shows, in the order given.
+    pub status_bar_items: Vec<StatusItem>,
     pub autosave_ms: u64,
     pub tab_width: usize,
     /// Whether a filename follows its note's title. Off means tinynote never
@@ -101,6 +142,7 @@ impl Default for Config {
             bold_headings: true,
             status_bar: true,
             key_hints: true,
+            status_bar_items: vec![StatusItem::Path, StatusItem::Message, StatusItem::Keys],
             autosave_ms: 500,
             tab_width: 2,
             rename_files: true,
@@ -214,6 +256,20 @@ impl Config {
         c.bold_headings = flag(text, "bold_headings", c.bold_headings);
         c.status_bar = flag(text, "status_bar", c.status_bar);
         c.key_hints = flag(text, "key_hints", c.key_hints);
+        let items: Vec<StatusItem> = values(text, "status_bar_items")
+            .iter()
+            .flat_map(|v| v.split(',').map(str::trim).map(str::to_ascii_lowercase))
+            .filter_map(|w| StatusItem::parse(&w))
+            .fold(Vec::new(), |mut acc, item| {
+                // listing a thing twice draws it once
+                if !acc.contains(&item) {
+                    acc.push(item);
+                }
+                acc
+            });
+        if !items.is_empty() {
+            c.status_bar_items = items;
+        }
         c.rename_files = flag(text, "rename_files", c.rename_files);
         c.quick_open_recursive = match value(text, "quick_open").as_deref() {
             Some("folder") => false,
@@ -328,6 +384,15 @@ impl Config {
         d.row("bold_headings", yn(self.bold_headings), "yes · no");
         d.row("status_bar", yn(self.status_bar), "the bottom line at all");
         d.row("key_hints", yn(self.key_hints), "the shortcuts in it");
+        d.row(
+            "status_bar_items",
+            self.status_bar_items
+                .iter()
+                .map(|i| i.word())
+                .collect::<Vec<_>>()
+                .join(", "),
+            "path · name · mode · keys · message, in order",
+        );
 
         d.section("Colours");
         d.note("#rrggbb · #rgb · red, brightblue · default");
@@ -788,6 +853,24 @@ mod tests {
         assert!(Config::from_str("- quick_open_dirs:\n")
             .quick_open_dirs
             .is_empty());
+    }
+
+    #[test]
+    fn the_status_bar_is_a_list_of_parts_in_the_order_given() {
+        let c = Config::from_str("- status_bar_items: name, keys\n");
+        assert_eq!(c.status_bar_items, vec![StatusItem::Name, StatusItem::Keys]);
+        // unknown words are ignored, repeats drawn once
+        let c = Config::from_str("- status_bar_items: keys, weather, keys, path\n");
+        assert_eq!(c.status_bar_items, vec![StatusItem::Keys, StatusItem::Path]);
+        // nothing usable leaves the default standing
+        assert_eq!(
+            Config::from_str("- status_bar_items: weather\n").status_bar_items,
+            Config::default().status_bar_items
+        );
+        assert_eq!(
+            Config::from_str("").status_bar_items,
+            vec![StatusItem::Path, StatusItem::Message, StatusItem::Keys]
+        );
     }
 
     #[test]
