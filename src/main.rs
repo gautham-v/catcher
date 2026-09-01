@@ -165,8 +165,92 @@ fn pop_title() {
     let _ = crossterm::execute!(out, crossterm::terminal::SetTitle(""));
 }
 
+/// Ask the terminal which way its background runs, for `theme: auto`.
+///
+/// OSC 11 (`]11;?`) answers with the background colour on every terminal
+/// that matters — Ghostty, iTerm2, kitty, WezTerm, Terminal.app, foot,
+/// Alacritty — and a Device Status Report (`[5n`) is sent right behind it
+/// so a terminal that ignores the colour query still ends the read. When
+/// neither arrives in time, `COLORFGBG` (rxvt, Konsole and a few others set
+/// it) is the fallback, and dark is the fallback for that.
+fn detect_background() -> md::theme::Mode {
+    use std::io::{IsTerminal, Read, Write};
+    if !std::io::stdin().is_terminal() || std::env::var_os("TMUX").is_some() {
+        return from_colorfgbg().unwrap_or_default();
+    }
+    if crossterm::terminal::enable_raw_mode().is_err() {
+        return from_colorfgbg().unwrap_or_default();
+    }
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x1b]11;?\x1b\\\x1b[5n");
+    let _ = out.flush();
+
+    // a blocking read on a thread, so a terminal that never answers costs a
+    // short wait rather than a hang; the DSR makes that the rare case
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        while std::io::stdin().read(&mut byte).is_ok_and(|n| n == 1) {
+            buf.push(byte[0]);
+            if buf.ends_with(b"\x1b[0n") || buf.len() > 256 {
+                break;
+            }
+        }
+        let _ = tx.send(buf);
+    });
+    let reply = rx.recv_timeout(Duration::from_millis(250)).unwrap_or_default();
+    let _ = crossterm::terminal::disable_raw_mode();
+    parse_osc11(&reply)
+        .or_else(from_colorfgbg)
+        .unwrap_or_default()
+}
+
+/// The polarity in an OSC 11 reply: `]11;rgb:RRRR/GGGG/BBBB` with 1–4 hex
+/// digits per channel, terminated by ST or BEL.
+fn parse_osc11(reply: &[u8]) -> Option<md::theme::Mode> {
+    let text = String::from_utf8_lossy(reply);
+    let rest = text.split("]11;").nth(1)?;
+    let rest = rest.strip_prefix("rgb:")?;
+    let mut chan = rest
+        .split(['\x1b', '\x07'])
+        .next()?
+        .split('/')
+        .map(|h| {
+            // scale any width to 8 bits from its leading digits
+            let h = h.trim();
+            let n = u32::from_str_radix(h, 16).ok()?;
+            let bits = 4 * h.len() as u32;
+            match bits {
+                4 => Some((n * 17) as u8),
+                8 | 12 | 16 => Some((n >> (bits - 8)) as u8),
+                _ => None,
+            }
+        });
+    let (r, g, b) = (chan.next()??, chan.next()??, chan.next()??);
+    Some(md::theme::mode_of_background(r, g, b))
+}
+
+/// `COLORFGBG=fg;bg`, with the background as an ANSI index: 0–6 and 8 are
+/// dark, 7 and 9–15 are light.
+fn from_colorfgbg() -> Option<md::theme::Mode> {
+    use md::theme::Mode;
+    let v = std::env::var("COLORFGBG").ok()?;
+    let bg: u8 = v.rsplit(';').next()?.trim().parse().ok()?;
+    Some(match bg {
+        7 | 9..=15 => Mode::Light,
+        _ => Mode::Dark,
+    })
+}
+
 fn tui(launch: cli::Launch) -> Result<()> {
     push_title();
+    // before the settings load: `theme: auto` resolves against this
+    let detected = detect_background();
+    md::theme::set_detected(detected);
+    // a terminal whose background matches the system appearance is taken to
+    // follow it, and the palette then follows too — see `follow_system_theme`
+    md::theme::set_follows_system(md::theme::system_mode() == Some(detected));
     let mut app = app::App::launch(launch)?;
     let mut terminal = ratatui::init();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
@@ -209,4 +293,27 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Result<()
     }
     app.save_now();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use md::theme::Mode;
+
+    #[test]
+    fn osc11_reply_tells_light_from_dark() {
+        assert_eq!(
+            parse_osc11(b"\x1b]11;rgb:eeee/eeee/eeee\x1b\\\x1b[0n"),
+            Some(Mode::Light)
+        );
+        assert_eq!(
+            parse_osc11(b"\x1b]11;rgb:1414/1414/1414\x07\x1b[0n"),
+            Some(Mode::Dark)
+        );
+        // 8-bit channels too
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:ff/ff/ff\x1b\\"), Some(Mode::Light));
+        // no colour reply, only the status report
+        assert_eq!(parse_osc11(b"\x1b[0n"), None);
+        assert_eq!(parse_osc11(b""), None);
+    }
 }

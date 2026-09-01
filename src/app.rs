@@ -207,6 +207,8 @@ pub struct App {
     /// The furthest right the page can pan, worked out by the last draw from
     /// the widest table on it. Zero when nothing overflows.
     pub preview_hmax: u16,
+    /// When the terminal's polarity was last checked against the system's.
+    theme_checked: Instant,
     pub status: Option<(String, Instant)>,
     pub quit: bool,
     dirty: bool,
@@ -443,6 +445,7 @@ impl App {
             preview_scroll: 0,
             preview_hscroll: 0,
             preview_hmax: 0,
+            theme_checked: Instant::now(),
             status: None,
             quit: false,
             last_title: None,
@@ -607,6 +610,7 @@ impl App {
 
     pub fn tick(&mut self) {
         self.maybe_autosave();
+        self.follow_system_theme();
         self.poll_index_scan();
         self.maybe_peek();
         // a filename that followed its title on save
@@ -614,6 +618,31 @@ impl App {
         if let Some((_, at)) = self.status {
             if at.elapsed() > Duration::from_secs(3) {
                 self.status = None;
+            }
+        }
+    }
+
+    /// With `theme: auto` on a terminal that was found to track the system
+    /// appearance, flip the palette when the system does — the terminal has
+    /// already repainted itself by then, and the old palette reads wrong on
+    /// it. Checked every couple of seconds; a change reloads the settings so
+    /// colour overrides still sit on top of the new base.
+    fn follow_system_theme(&mut self) {
+        if self.config.theme != crate::config::Theme::Auto
+            || !crate::md::theme::follows_system()
+            || self.theme_checked.elapsed() < Duration::from_secs(2)
+        {
+            return;
+        }
+        self.theme_checked = Instant::now();
+        let Some(mode) = crate::md::theme::system_mode() else {
+            return;
+        };
+        if mode != crate::md::theme::detected() {
+            crate::md::theme::set_detected(mode);
+            if let Ok(config) = Config::load() {
+                config.apply();
+                self.config = config;
             }
         }
     }

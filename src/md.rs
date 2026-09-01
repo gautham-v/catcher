@@ -134,8 +134,8 @@ pub mod theme {
         accent: Color::Rgb(0xff, 0x9e, 0x64),
         bright: Color::Rgb(0xe1, 0xe1, 0xe1),
         grey: Color::Rgb(0x78, 0x78, 0x78),
-        dim: Color::Rgb(0x6c, 0x6c, 0x6c),
-        link: Color::Rgb(0x9a, 0x9a, 0x9a),
+        dim: Color::Rgb(0x82, 0x82, 0x82),
+        link: Color::Rgb(0xb4, 0xb4, 0xb4),
         code_bg: Color::Rgb(0x1c, 0x1c, 0x1c),
         code_fg: Color::Rgb(0xe1, 0xe1, 0xe1),
         border: Color::Rgb(0x32, 0x32, 0x37),
@@ -161,6 +161,64 @@ pub mod theme {
     /// very next frame without a restart.
     static PALETTE: RwLock<Palette> = RwLock::new(DARK);
     static BOLD_HEADINGS: RwLock<bool> = RwLock::new(true);
+    /// The polarity the terminal was found to be showing at startup, for a
+    /// `theme: auto` setting. Dark until a probe says otherwise: the far more
+    /// common terminal, and the palette the app always used to assume.
+    static DETECTED: RwLock<Mode> = RwLock::new(Mode::Dark);
+
+    /// Record what the terminal reported about its own background.
+    pub fn set_detected(mode: Mode) {
+        if let Ok(mut w) = DETECTED.write() {
+            *w = mode;
+        }
+    }
+
+    /// Whether the terminal's background agreed with the system appearance at
+    /// startup — the sign that it follows the system, and will flip with it.
+    static FOLLOWS_SYSTEM: RwLock<bool> = RwLock::new(false);
+
+    pub fn set_follows_system(on: bool) {
+        if let Ok(mut w) = FOLLOWS_SYSTEM.write() {
+            *w = on;
+        }
+    }
+
+    pub fn follows_system() -> bool {
+        FOLLOWS_SYSTEM.read().map(|b| *b).unwrap_or(false)
+    }
+
+    /// The operating system's own appearance, where it has one to ask about.
+    /// macOS only for now: `AppleInterfaceStyle` is `Dark` or unset.
+    pub fn system_mode() -> Option<Mode> {
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
+        let out = std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleInterfaceStyle"])
+            .output()
+            .ok()?;
+        Some(if String::from_utf8_lossy(&out.stdout).trim() == "Dark" {
+            Mode::Dark
+        } else {
+            Mode::Light
+        })
+    }
+
+    /// The polarity a `theme: auto` setting resolves to.
+    pub fn detected() -> Mode {
+        DETECTED.read().map(|m| *m).unwrap_or(Mode::Dark)
+    }
+
+    /// Which way a background colour runs, by relative luminance. The
+    /// components are 8-bit; anything brighter than mid-grey is light.
+    pub fn mode_of_background(r: u8, g: u8, b: u8) -> Mode {
+        let lum = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
+        if lum > 127.5 {
+            Mode::Light
+        } else {
+            Mode::Dark
+        }
+    }
 
     /// The built-in palette for a polarity, before any user overrides.
     pub fn base(mode: Mode) -> Palette {

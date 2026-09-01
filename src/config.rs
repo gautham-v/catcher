@@ -116,11 +116,32 @@ impl StatusItem {
     }
 }
 
+/// The `theme` setting: a polarity, or `auto` to follow what the terminal
+/// reports its background to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Theme {
+    #[default]
+    Auto,
+    Dark,
+    Light,
+}
+
+impl Theme {
+    /// The polarity this setting means right now.
+    pub fn mode(self) -> Mode {
+        match self {
+            Theme::Auto => theme::detected(),
+            Theme::Dark => Mode::Dark,
+            Theme::Light => Mode::Light,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub notes_dir: PathBuf,
     pub attachments_dir: PathBuf,
-    pub theme: Mode,
+    pub theme: Theme,
     /// User colour overrides, already applied on top of the theme's palette.
     pub palette: Palette,
     /// Widest the note column is ever drawn, in terminal columns. `0` fills
@@ -170,8 +191,8 @@ impl Default for Config {
         Config {
             attachments_dir: notes_dir.join("attachments"),
             notes_dir,
-            theme: Mode::Dark,
-            palette: theme::DARK,
+            theme: Theme::Auto,
+            palette: theme::base(theme::detected()),
             page_width: 100,
             borders: BorderStyle::Rounded,
             bold_headings: true,
@@ -266,14 +287,14 @@ impl Config {
             c.attachments_dir = expand(&v, &home);
         }
 
-        // anything but "light" is dark: a typo should leave the default
-        // palette standing rather than flip it to the one that reads wrong on
-        // the overwhelmingly more common dark terminal
+        // anything unrecognised is auto: a typo should leave the terminal's
+        // own polarity standing rather than pin a palette that reads wrong
         c.theme = match value(text, "theme").as_deref() {
-            Some("light") => Mode::Light,
-            _ => Mode::Dark,
+            Some("light") => Theme::Light,
+            Some("dark") => Theme::Dark,
+            _ => Theme::Auto,
         };
-        c.palette = theme::base(c.theme);
+        c.palette = theme::base(c.theme.mode());
         for key in theme::COLOR_KEYS {
             if let Some(color) = value(text, key).and_then(|v| theme::parse_color(&v)) {
                 c.palette.set(key, color);
@@ -413,10 +434,11 @@ impl Config {
         d.row(
             "theme",
             match self.theme {
-                Mode::Light => "light",
-                Mode::Dark => "dark",
+                Theme::Auto => "auto",
+                Theme::Light => "light",
+                Theme::Dark => "dark",
             },
-            "dark · light",
+            "auto · dark · light",
         );
         d.row(
             "page_width",
@@ -458,7 +480,7 @@ impl Config {
         // and `theme: light` then changed nothing — the overrides underneath
         // put every colour back. The key stays in the document so it is still
         // discoverable; only the value defers.
-        let base = theme::base(self.theme);
+        let base = theme::base(self.theme.mode());
         for (key, hint) in COLOUR_HINTS {
             let mine = self.palette.get(key);
             let value = match (mine, base.get(key)) {
@@ -795,7 +817,7 @@ mod tests {
         let mut palette = theme::base(Mode::Light);
         palette.accent = theme::parse_color("#00ff88").unwrap();
         let c = Config {
-            theme: Mode::Light,
+            theme: Theme::Light,
             palette,
             page_width: 72,
             borders: BorderStyle::None,
@@ -911,7 +933,7 @@ mod tests {
         let fresh = c.to_document();
         assert!(covers_every_setting(&fresh, &c));
         let back = Config::from_str(&fresh);
-        assert_eq!(back.theme, Mode::Light);
+        assert_eq!(back.theme, Theme::Light);
         if std::env::var_os("TINYNOTE_DIR").is_none() {
             assert_eq!(back.notes_dir, PathBuf::from("/vault"));
         }
@@ -926,7 +948,7 @@ mod tests {
         // a hand-written comment beside a setting does not read as missing
         let edited = c
             .to_document()
-            .replace("- theme: dark", "- theme: dark  # mine");
+            .replace("- theme: auto", "- theme: auto  # mine");
         assert!(covers_every_setting(&edited, &c));
     }
 
@@ -979,9 +1001,12 @@ mod tests {
 
     #[test]
     fn theme_defaults_to_dark_and_only_light_flips_it() {
-        assert_eq!(Config::from_str("").theme, Mode::Dark);
-        assert_eq!(Config::from_str("- theme: light").theme, Mode::Light);
-        assert_eq!(Config::from_str("- theme: lite").theme, Mode::Dark);
+        assert_eq!(Config::from_str("").theme, Theme::Auto);
+        assert_eq!(Config::from_str("- theme: light").theme, Theme::Light);
+        assert_eq!(Config::from_str("- theme: dark").theme, Theme::Dark);
+        assert_eq!(Config::from_str("- theme: lite").theme, Theme::Auto);
+        assert_eq!(Theme::Dark.mode(), Mode::Dark);
+        assert_eq!(Theme::Light.mode(), Mode::Light);
     }
 
     #[test]
@@ -1098,9 +1123,9 @@ mod tests {
         // colours made `theme: light` inert, because the dark hexes below it
         // put the dark palette straight back
         let doc = Config::default().to_document();
-        let light = doc.replace("- theme: dark", "- theme: light");
+        let light = doc.replace("- theme: auto", "- theme: light");
         let c = Config::from_str(&light);
-        assert_eq!(c.theme, Mode::Light);
+        assert_eq!(c.theme, Theme::Light);
         assert_eq!(c.palette.code_bg, theme::LIGHT.code_bg);
         assert_eq!(c.palette.accent, theme::LIGHT.accent);
     }

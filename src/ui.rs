@@ -1104,17 +1104,17 @@ fn draw_help(f: &mut Frame, app: &App) {
         if i > 0 {
             lines.push(Line::default());
         }
+        // the heading in the h2 grey, the keys in the leading step without
+        // weight: bold on a light ground reads as shouting, and the column
+        // alignment already does the separating
         lines.push(Line::from(Span::styled(
             format!(" {group}"),
-            theme::bright().add_modifier(Modifier::BOLD),
+            theme::heading(2),
         )));
         for (key, what) in rows.iter() {
             let pad = " ".repeat(keyw.saturating_sub(crate::md::str_width(key)));
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {pad}{key}  "),
-                    theme::bright().add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(format!(" {pad}{key}  "), theme::bright()),
                 Span::styled(what.to_string(), dim()),
             ]));
         }

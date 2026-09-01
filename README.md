@@ -108,7 +108,7 @@ Every setting is a `- key: value` line with a one-line hint after it. The file i
 | | |
 | --- | --- |
 | `notes_dir`, `attachments_dir` | where notes and pasted images live (`~/` expands; `TINYNOTE_DIR` overrides the first) |
-| `theme` | `dark` or `light` — which way your terminal's own background runs |
+| `theme` | `auto` (the default: tinynote asks the terminal which way its background runs at startup), `dark`, or `light` |
 | `accent`, `bright`, `grey`, `dim`, `link`, `code_bg`, `code_fg`, `border`, `danger`, `ground` | the ten colours, as `#rrggbb`, `#rgb`, an ANSI name, `default`, or `theme` to leave it to the theme |
 | `page_width` | widest the note column is drawn, in columns, or `full` |
 | `borders` | `rounded`, `square`, `none` |
