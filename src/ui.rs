@@ -927,7 +927,9 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
                 Some(name) => format!("{} ({name})", n.title()),
                 None => n.title(),
             };
-            (name, n.snippet(), "note")
+            // where the note lives, as the open picker shows it: empty at
+            // the root, `work/airstream` below it, `~/…` outside the dir
+            (name, crate::index::folder_of(&n.path, &app.dir), "note")
         }
         // a typed path that exists — labelled so it is clear this is the file
         // on disk and not a search hit
