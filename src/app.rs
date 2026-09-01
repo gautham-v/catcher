@@ -99,7 +99,7 @@ impl Command {
             Command::DeleteNote => Action::DeleteNote,
             Command::RenameFile => Action::RenameFile,
             Command::TogglePreview => Action::TogglePreview,
-            Command::Shortcuts => Action::Shortcuts,
+            Command::Shortcuts => Action::Help,
             Command::OpenSettings => Action::Settings,
             Command::Quit => Action::Quit,
         })
@@ -112,7 +112,7 @@ impl Command {
             Command::DeleteNote => ("Delete note", "delete the file on disk"),
             Command::RenameFile => ("Rename file", "change the name on disk"),
             Command::TogglePreview => ("Reading view", "the page, rendered"),
-            Command::Shortcuts => ("Shortcuts", "every binding, on one card"),
+            Command::Shortcuts => ("Help", "every key, on one card"),
             Command::OpenSettings => ("Settings", "edit them here, as a note"),
             Command::Quit => ("Quit", "save and exit"),
         }
@@ -1162,7 +1162,7 @@ impl App {
     }
 
     /// Do one of the actions a key can be bound to. The single place a
-    /// binding leads, so the palette, the ^G card and the settings all agree
+    /// binding leads, so the palette, the help card and the settings all agree
     /// about what a key does.
     fn run_action(&mut self, action: Action) {
         match action {
@@ -1202,7 +1202,7 @@ impl App {
                     self.flash("saved".to_string());
                 }
             }
-            Action::Shortcuts => {
+            Action::Help => {
                 self.help_query.clear();
                 self.overlay = if self.overlay == Overlay::Help {
                     Overlay::None

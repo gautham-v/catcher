@@ -2,7 +2,7 @@
 //!
 //! Every global action tinynote has is named here once, with the key it
 //! answers to. The settings file overrides any of them by name, the palette
-//! shows each command's current key beside it, and the ^G card is generated
+//! shows each command's current key beside it, and the help card is generated
 //! from the same table — so a rebound key is right everywhere, and an action
 //! that isn't in this list has no key and isn't discoverable.
 //!
@@ -11,7 +11,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// Something a key can do. The order is the order the ^G card lists them.
+/// Something a key can do. The order is the order the help card lists them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     Palette,
@@ -20,7 +20,7 @@ pub enum Action {
     Settings,
     TogglePreview,
     Save,
-    Shortcuts,
+    Help,
     Quit,
     Copy,
     Cut,
@@ -67,7 +67,10 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         Some("^S"),
         "save now (notes autosave anyway)",
     ),
-    (Action::Shortcuts, "key_shortcuts", Some("^G"), "this card"),
+    // ^/ on a legacy terminal arrives as ^_ (0x1F), and on some as ^7; those
+    // are folded into ^/ in `matches`. F1 is there for terminals that send
+    // none of them.
+    (Action::Help, "key_help", Some("^/ f1"), "this card"),
     (Action::Quit, "key_quit", Some("^Q"), "save and quit"),
     (Action::Copy, "key_copy", Some("^C"), "copy selection"),
     (Action::Cut, "key_cut", Some("^X"), "cut selection"),
@@ -102,6 +105,10 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
     ),
 ];
 
+/// A settings key that used to go by another name: the old spelling is still
+/// read, the new one is what gets written.
+const ALIASES: &[(&str, &str)] = &[("key_help", "key_shortcuts")];
+
 /// One key, as the settings file spells it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Binding {
@@ -117,6 +124,18 @@ pub struct Binding {
 }
 
 impl Binding {
+    /// Parse a spec of one or more keys — `^/ f1`, `^K, cmd+k` — into every
+    /// key it names. Empty for `none` and for anything unreadable.
+    pub fn parse_all(text: &str) -> Vec<Binding> {
+        // split on whitespace only: `^,` is itself a key, so a comma can
+        // separate keys only when it trails one — `^K, f5`
+        text.split_whitespace()
+            .filter_map(|t| {
+                Binding::parse(t).or_else(|| t.strip_suffix(',').and_then(Binding::parse))
+            })
+            .collect()
+    }
+
     /// Parse `^K`, `ctrl+k`, `cmd+,`, `alt+p`, `f5`, `⌘k`. `None` for anything
     /// unreadable, and for the word `none`, which unbinds.
     pub fn parse(text: &str) -> Option<Binding> {
@@ -176,7 +195,7 @@ impl Binding {
         let ctrl = m.contains(KeyModifiers::CONTROL);
         let cmd = m.contains(KeyModifiers::SUPER);
         let alt = m.contains(KeyModifiers::ALT);
-        if !same_key(self.code, key.code) {
+        if !same_key(self.code, normalize(key.code, ctrl)) {
             return false;
         }
         if self.ctrl_or_cmd {
@@ -217,6 +236,17 @@ impl Binding {
     }
 }
 
+/// What a terminal reports for a ctrl chord is not always the key that was
+/// pressed: ^/ is byte 0x1F, which crossterm hands back as ctrl+`_`, and a
+/// few terminals send it as ctrl+`7`. Fold those into ^/ so one binding
+/// answers to all of them.
+fn normalize(code: KeyCode, ctrl: bool) -> KeyCode {
+    match code {
+        KeyCode::Char('_') | KeyCode::Char('7') if ctrl => KeyCode::Char('/'),
+        _ => code,
+    }
+}
+
 /// Case-insensitive for letters: `^K` and `^k` are the same key.
 fn same_key(a: KeyCode, b: KeyCode) -> bool {
     match (a, b) {
@@ -254,7 +284,7 @@ fn key_code(text: &str) -> Option<KeyCode> {
 /// Every action's current binding.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Keymap {
-    bound: Vec<(Action, Option<Binding>)>,
+    bound: Vec<(Action, Vec<Binding>)>,
 }
 
 impl Default for Keymap {
@@ -262,7 +292,7 @@ impl Default for Keymap {
         Keymap {
             bound: ACTIONS
                 .iter()
-                .map(|(a, _, default, _)| (*a, default.and_then(Binding::parse)))
+                .map(|(a, _, default, _)| (*a, default.map(Binding::parse_all).unwrap_or_default()))
                 .collect(),
         }
     }
@@ -274,16 +304,17 @@ impl Keymap {
     pub fn from_settings(lookup: impl Fn(&str) -> Option<String>) -> Keymap {
         let mut map = Keymap::default();
         for (action, key, _, _) in ACTIONS {
-            if let Some(spec) = lookup(key) {
+            let old = ALIASES.iter().find(|(new, _)| new == key).map(|(_, old)| *old);
+            if let Some(spec) = lookup(key).or_else(|| old.and_then(&lookup)) {
                 // an unreadable spec unbinds rather than silently keeping the
                 // default, so a typo is visible instead of mysterious
-                map.set(*action, Binding::parse(&spec));
+                map.set(*action, Binding::parse_all(&spec));
             }
         }
         map
     }
 
-    fn set(&mut self, action: Action, binding: Option<Binding>) {
+    fn set(&mut self, action: Action, binding: Vec<Binding>) {
         if let Some(slot) = self.bound.iter_mut().find(|(a, _)| *a == action) {
             slot.1 = binding;
         }
@@ -294,30 +325,43 @@ impl Keymap {
     pub fn action(&self, key: &KeyEvent) -> Option<Action> {
         self.bound
             .iter()
-            .find(|(_, b)| b.is_some_and(|b| b.matches(key)))
+            .find(|(_, bs)| bs.iter().any(|b| b.matches(key)))
             .map(|(a, _)| *a)
     }
 
-    pub fn binding(&self, action: Action) -> Option<Binding> {
+    /// Every key bound to `action`, first the one hints show.
+    pub fn bindings(&self, action: Action) -> &[Binding] {
         self.bound
             .iter()
             .find(|(a, _)| *a == action)
-            .and_then(|(_, b)| *b)
+            .map(|(_, b)| b.as_slice())
+            .unwrap_or(&[])
     }
 
-    /// How this action's key is written, or an empty string when unbound.
+    /// How this action's key is written — the first one, where it has
+    /// several — or an empty string when unbound.
     pub fn label(&self, action: Action) -> String {
-        self.binding(action).map(|b| b.label()).unwrap_or_default()
+        self.bindings(action)
+            .first()
+            .map(|b| b.label())
+            .unwrap_or_default()
     }
 
-    /// (key, what it does) for every bound action, for the ^G card.
+    /// Every key for `action`, space-separated, or an empty string.
+    fn labels(&self, action: Action) -> String {
+        self.bindings(action)
+            .iter()
+            .map(|b| b.label())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// (key, what it does) for every bound action, for the help card.
     pub fn card_rows(&self) -> Vec<(String, &'static str)> {
         ACTIONS
             .iter()
-            .filter_map(|(a, _, _, what)| {
-                let b = self.binding(*a)?;
-                Some((b.label(), *what))
-            })
+            .filter(|(a, _, _, _)| !self.bindings(*a).is_empty())
+            .map(|(a, _, _, what)| (self.labels(*a), *what))
             .collect()
     }
 
@@ -326,10 +370,10 @@ impl Keymap {
         ACTIONS
             .iter()
             .map(|(a, key, _, what)| {
-                let spec = self
-                    .binding(*a)
-                    .map(|b| b.label())
-                    .unwrap_or_else(|| "none".to_string());
+                let spec = match self.labels(*a) {
+                    s if s.is_empty() => "none".to_string(),
+                    s => s,
+                };
                 (*key, spec, *what)
             })
             .collect()
@@ -418,6 +462,61 @@ mod tests {
         assert_eq!(map.label(Action::Settings), "^,");
         // delete and rename ship unbound: they are palette commands
         assert_eq!(map.label(Action::DeleteNote), "");
+    }
+
+    #[test]
+    fn help_answers_to_ctrl_slash_however_the_terminal_spells_it() {
+        let map = Keymap::default();
+        for c in ['/', '_', '7'] {
+            assert_eq!(
+                map.action(&ev(KeyCode::Char(c), KeyModifiers::CONTROL)),
+                Some(Action::Help),
+                "ctrl+{c}"
+            );
+        }
+        assert_eq!(map.action(&ev(KeyCode::F(1), KeyModifiers::NONE)), Some(Action::Help));
+        // the old key is free
+        assert_eq!(map.action(&ev(KeyCode::Char('g'), KeyModifiers::CONTROL)), None);
+        // plain _ and 7 still type
+        assert_eq!(map.action(&ev(KeyCode::Char('_'), KeyModifiers::NONE)), None);
+        assert_eq!(map.action(&ev(KeyCode::Char('7'), KeyModifiers::NONE)), None);
+        // hints show the short one, the card and settings show both
+        assert_eq!(map.label(Action::Help), "^/");
+        assert_eq!(map.labels(Action::Help), "^/ F1");
+        let row = map.settings_rows().into_iter().find(|(k, _, _)| *k == "key_help").unwrap();
+        assert_eq!(row.1, "^/ F1");
+        // and the spelling the settings writer emits reads back to the same keys
+        assert_eq!(Keymap::from_settings(|k| (k == "key_help").then(|| row.1.clone())), map);
+    }
+
+    #[test]
+    fn a_spec_can_name_several_keys() {
+        let bs = Binding::parse_all("^K, f5 alt+k");
+        assert_eq!(bs.len(), 3);
+        assert!(Binding::parse_all("none").is_empty());
+        // one bad key drops only itself
+        assert_eq!(Binding::parse_all("^K junk").len(), 1);
+        // a comma can be a key, not just a separator
+        assert_eq!(Binding::parse_all("^,").len(), 1);
+        assert_eq!(Binding::parse_all("^, f1").len(), 2);
+    }
+
+    #[test]
+    fn the_old_key_shortcuts_name_still_binds_help() {
+        let map = Keymap::from_settings(|k| (k == "key_shortcuts").then(|| "^G".to_string()));
+        assert_eq!(map.action(&ev(KeyCode::Char('g'), KeyModifiers::CONTROL)), Some(Action::Help));
+        assert_eq!(map.action(&ev(KeyCode::F(1), KeyModifiers::NONE)), None);
+        // the new name wins when both are present
+        let map = Keymap::from_settings(|k| match k {
+            "key_help" => Some("f2".to_string()),
+            "key_shortcuts" => Some("^G".to_string()),
+            _ => None,
+        });
+        assert_eq!(map.action(&ev(KeyCode::F(2), KeyModifiers::NONE)), Some(Action::Help));
+        assert_eq!(map.action(&ev(KeyCode::Char('g'), KeyModifiers::CONTROL)), None);
+        // and the settings writer emits the new name, never the old
+        assert!(map.settings_rows().iter().any(|(k, _, _)| *k == "key_help"));
+        assert!(!map.settings_rows().iter().any(|(k, _, _)| *k == "key_shortcuts"));
     }
 
     #[test]

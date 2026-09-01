@@ -614,7 +614,7 @@ fn hint_pairs(app: &App) -> Vec<(String, &'static str)> {
     }
     // only the two that get you everywhere else: the card lists every other
     // binding, and a bar that lists them all is a bar you stop reading
-    for (action, what) in [(Action::Shortcuts, "shortcuts"), (Action::Quit, "quit")] {
+    for (action, what) in [(Action::Help, "help"), (Action::Quit, "quit")] {
         let key = keys.label(action);
         if !key.is_empty() {
             pairs.push((key, what));
@@ -970,7 +970,7 @@ fn truncate(text: &str, width: usize) -> String {
     crate::md::truncate(text, width)
 }
 
-/// The ^G card: every binding, in the groups `app::SHORTCUTS` declares. Sized
+/// The help card: every binding, in the groups `app::SHORTCUTS` declares. Sized
 /// to its content and centred, and dismissed by any key at all — it is a
 /// reference to glance at, not a mode to get stuck in.
 fn draw_help(f: &mut Frame, app: &App) {
@@ -1054,7 +1054,7 @@ fn draw_help(f: &mut Frame, app: &App) {
         height,
     );
     f.render_widget(Clear, rect);
-    let block = panel(app).title(Span::styled(" keyboard shortcuts ", theme::state()));
+    let block = panel(app).title(Span::styled(" help ", theme::state()));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     f.render_widget(Paragraph::new(lines), inner);
