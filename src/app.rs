@@ -287,6 +287,8 @@ pub struct Peek {
     /// The link target it was opened for, so a hover over the same link is a
     /// no-op rather than a re-read.
     pub target: String,
+    /// The note the link resolved to, which a click or Enter opens.
+    pub path: PathBuf,
     /// The file's name, which titles the popup.
     pub name: String,
     /// The note's markdown with any front matter already cut off.
@@ -870,6 +872,7 @@ impl App {
             .unwrap_or_else(|| url.to_string());
         Some(Peek {
             target: url.to_string(),
+            path,
             name,
             body: notes::body_after_front_matter(&content).to_string(),
             anchor,
@@ -879,6 +882,14 @@ impl App {
             view_rows: 0,
             rect: Rect::default(),
         })
+    }
+
+    /// Open the peeked note for real, putting the popup away.
+    fn open_peek(&mut self) {
+        if let Some(peek) = self.peek.take() {
+            self.hover = None;
+            self.open_path(&peek.path);
+        }
     }
 
     fn follow_wikilink(&mut self, target: &str) {
@@ -1310,6 +1321,10 @@ impl App {
             };
             if let Some(d) = delta {
                 peek.scroll_by(d);
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.open_peek();
                 return;
             }
         }
@@ -2041,6 +2056,11 @@ impl App {
             MouseEventKind::Moved => self.on_hover(ev.column, ev.row),
             MouseEventKind::Down(MouseButton::Left) => {
                 let (x, y) = (ev.column, ev.row);
+                // a click on the popup opens the note it shows
+                if self.peek.as_ref().is_some_and(|p| p.contains(x, y)) {
+                    self.open_peek();
+                    return;
+                }
                 self.peek = None;
                 self.hover = None;
                 if matches!(self.overlay, Overlay::Palette | Overlay::QuickOpen) {
@@ -2397,6 +2417,7 @@ mod tests {
     #[test]
     fn peek_scroll_clamps_to_content() {
         let mut p = super::Peek {
+            path: PathBuf::new(),
             target: String::new(),
             name: String::new(),
             body: String::new(),
