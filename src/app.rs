@@ -773,11 +773,13 @@ impl App {
         let n = self.open_index.len().max(1) as i64;
         let mut scored: Vec<(i64, usize)> = Vec::new();
         for (i, e) in self.open_index.iter().enumerate() {
-            // the title is what people search by; the folder path is a weaker
-            // second chance, so "applications/log" finds it too
-            let by_title = search::fuzzy(&self.query, &e.title).map(|s| s * 10 + 100);
+            // the filename is what the list shows, so it is what people
+            // search by; the title is a second chance, and the folder path a
+            // weaker third, so "applications/log" finds it too
+            let by_name = search::fuzzy(&self.query, &e.name()).map(|s| s * 10 + 100);
+            let by_title = search::fuzzy(&self.query, &e.title).map(|s| s * 10 + 50);
             let by_path = search::fuzzy(&self.query, &e.rel);
-            let Some(base) = by_title.into_iter().chain(by_path).max() else {
+            let Some(base) = by_name.into_iter().chain(by_title).chain(by_path).max() else {
                 continue;
             };
             // a nudge, not a verdict: recency breaks ties between equally good

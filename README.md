@@ -26,7 +26,7 @@ A bare `tinynote` reopens the note you had open when you closed it, wherever it 
 
 One note on screen at a time. **^K** opens the palette — fuzzy search across every note's title and body, plus commands (new, open, delete, rename file, preview, shortcuts, settings, quit).
 
-**^O** opens a note. It is the palette's twin, and the difference is what it ranks by: notes you opened most recently first, then the most recently edited, and it walks *subfolders* — so pointing tinynote at an Obsidian vault still lets you jump straight to `applications/log.md` from wherever you are. Type to fuzzy-search titles and folder paths.
+**^O** opens a note. It is the palette's twin, and the difference is what it ranks by: notes you opened most recently first, then the most recently edited, and it walks *subfolders* — so pointing tinynote at an Obsidian vault still lets you jump straight to `applications/log.md` from wherever you are. Both the list and the tree show each note by its filename, the name a `[[wikilink]]` reaches it by. Type to fuzzy-search filenames, with titles and folder paths as a second chance.
 
 **Tab** flips **^O** between the ranked list and a folder tree — the same index, the other way of looking at it. The tree opens on the note you have open, with the folders above it unfolded, so the first thing it tells you is where you are; **→** unfolds a folder or opens a note, **←** folds one or steps out to the folder it lives in, and a closed folder says how many notes are beneath it. Whatever you have typed comes along either way, so `log` and then tab shows you *where* the log notes live. `quick_open_mode: browse` in the settings makes the tree what **^O** opens on.
 

@@ -34,7 +34,8 @@ pub enum RowKind {
     /// the tree goes down the same path quick-open already uses.
     Note {
         entry: usize,
-        title: String,
+        /// The filename stem, which is what the row shows.
+        name: String,
         modified: SystemTime,
     },
 }
@@ -92,11 +93,12 @@ fn name_of(key: &str) -> String {
     key.rsplit('/').next().unwrap_or(key).to_string()
 }
 
-/// Whether the query lets this entry through. The two haystacks are the two
+/// Whether the query lets this entry through. The haystacks are the ones
 /// `App::open_items` scores on, so the tree and the ranked list never disagree
 /// about what the word in the prompt matched.
 fn matches(query: &str, entry: &Entry) -> bool {
     query.is_empty()
+        || crate::search::fuzzy(query, &entry.name()).is_some()
         || crate::search::fuzzy(query, &entry.title).is_some()
         || crate::search::fuzzy(query, &entry.rel).is_some()
 }
@@ -237,13 +239,13 @@ fn push_notes(
     parent: Option<&str>,
 ) {
     let mut kids = kids.to_vec();
-    // the path is the tiebreak so the order is total: two notes titled
-    // "Untitled" would otherwise swap places between draws
+    // the path is the tiebreak so the order is total: two notes with the
+    // same name in different cases would otherwise swap places between draws
     kids.sort_by(|&a, &b| {
         entries[a]
-            .title
+            .name()
             .to_lowercase()
-            .cmp(&entries[b].title.to_lowercase())
+            .cmp(&entries[b].name().to_lowercase())
             .then_with(|| entries[a].rel.cmp(&entries[b].rel))
     });
     for i in kids {
@@ -252,7 +254,7 @@ fn push_notes(
             parent: parent.map(str::to_string),
             kind: RowKind::Note {
                 entry: i,
-                title: entries[i].title.clone(),
+                name: entries[i].name(),
                 modified: entries[i].modified,
             },
         });
@@ -366,7 +368,7 @@ mod tests {
     }
 
     /// The drawn shape of the tree: depth, and either `▸key` / `▾key` for a
-    /// folder or the note's title.
+    /// folder or the note's filename.
     fn shape(rows: &[Row]) -> Vec<String> {
         rows.iter()
             .map(|r| {
@@ -374,7 +376,7 @@ mod tests {
                     RowKind::Folder { key, open, .. } => {
                         format!("{}{key}", if *open { '▾' } else { '▸' })
                     }
-                    RowKind::Note { title, .. } => title.clone(),
+                    RowKind::Note { name, .. } => name.clone(),
                 };
                 format!("{}{body}", "  ".repeat(r.depth))
             })
@@ -397,8 +399,8 @@ mod tests {
             vec![
                 "▾interviews",
                 "  ▾interviews/stories",
-                "    Story Matrix",
-                "  Prep",
+                "    matrix",
+                "  prep",
             ]
         );
     }
@@ -412,7 +414,7 @@ mod tests {
             entry("archive/b.md", "B"),
         ];
         let rows = rows(&entries, &open_set(&[]), "");
-        assert_eq!(shape(&rows), vec!["▸archive", "▸work", "Apple", "Zebra"]);
+        assert_eq!(shape(&rows), vec!["▸archive", "▸work", "apple", "zebra"]);
     }
 
     #[test]
@@ -447,7 +449,7 @@ mod tests {
         let entries = vec![far("~/Code/tinycomputer/notes", "/x/log.md", "Log")];
         let rows = rows(&entries, &open_set(&["~/Code/tinycomputer/notes"]), "");
         // one row, not four levels of indent spent getting to it
-        assert_eq!(shape(&rows), vec!["▾~/Code/tinycomputer/notes", "  Log"]);
+        assert_eq!(shape(&rows), vec!["▾~/Code/tinycomputer/notes", "  log"]);
     }
 
     #[test]
@@ -456,7 +458,7 @@ mod tests {
         let mut open = open_set(&[]);
         assert_eq!(shape(&rows(&entries, &open, "")), vec!["▸work"]);
         toggle(&entries, &mut open, "work", "");
-        assert_eq!(shape(&rows(&entries, &open, "")), vec!["▾work", "  A"]);
+        assert_eq!(shape(&rows(&entries, &open, "")), vec!["▾work", "  a"]);
         toggle(&entries, &mut open, "work", "");
         assert_eq!(shape(&rows(&entries, &open, "")), vec!["▸work"]);
     }
@@ -475,7 +477,7 @@ mod tests {
         assert_eq!(toggle(&entries, &mut open, "archive", ""), 0);
         assert_eq!(
             shape(&rows(&entries, &open, "")),
-            vec!["▾archive", "  A", "  B", "▾work", "  C"]
+            vec!["▾archive", "  a", "  b", "▾work", "  c"]
         );
     }
 
@@ -489,7 +491,7 @@ mod tests {
         let rows = rows(&entries, &open_set(&[]), "matrix");
         assert_eq!(
             shape(&rows),
-            vec!["▾interviews", "  ▾interviews/stories", "    Story Matrix"]
+            vec!["▾interviews", "  ▾interviews/stories", "    matrix"]
         );
     }
 
@@ -554,7 +556,7 @@ mod tests {
         let at = reveal(&entries, &mut open, Some(&entries[0].path.clone()), "matrix");
         assert_eq!(
             shape(&rows(&entries, &open, "matrix")),
-            vec!["▾interviews", "  ▾interviews/stories", "    Story Matrix"]
+            vec!["▾interviews", "  ▾interviews/stories", "    matrix"]
         );
         assert_eq!(at, 0);
         // and the note that *is* showing is found at its filtered row, not at
@@ -575,7 +577,7 @@ mod tests {
         let rows = rows(&entries, &open_set(&["/tmp/scratch", "tmp"]), "");
         assert_eq!(
             shape(&rows),
-            vec!["▾/tmp/scratch", "  Outside", "▾tmp", "  Inside"]
+            vec!["▾/tmp/scratch", "  x", "▾tmp", "  y"]
         );
     }
 

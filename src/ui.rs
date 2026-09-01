@@ -885,12 +885,12 @@ fn palette_rows(app: &App) -> Vec<PRow> {
                 },
                 RowKind::Note {
                     entry,
-                    title,
+                    name,
                     modified,
                 } => PRow {
                     // one level further in than its folder's name, so the
                     // fold marker column stays the folder's own
-                    name: format!("{}{title}", "  ".repeat(r.depth + 1)),
+                    name: format!("{}{name}", "  ".repeat(r.depth + 1)),
                     detail: crate::index::age(modified, now),
                     tag: "",
                     item: Item::Entry(entry),
@@ -939,7 +939,9 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
             "path",
         ),
         Item::Entry(idx) => match app.open_index.get(*idx) {
-            Some(e) => (e.title.clone(), e.folder.clone(), "note"),
+            // the filename, not the title: it is the name the note is found
+            // under on disk, and the one a wikilink reaches it by
+            Some(e) => (e.name(), e.folder.clone(), "note"),
             None => (String::new(), String::new(), ""),
         },
         // a folder row writes its own text in `palette_rows`, where the tree

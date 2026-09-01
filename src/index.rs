@@ -28,6 +28,17 @@ pub struct Entry {
     pub modified: SystemTime,
 }
 
+impl Entry {
+    /// The file's own name, without the `.md`: what the open picker and the
+    /// tree show, so a note is found under the name it has on disk.
+    pub fn name(&self) -> String {
+        self.path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+}
+
 /// Stop conditions for the walk. A vault of a few thousand notes is scanned in
 /// milliseconds; past that the list stops being something to eyeball anyway.
 pub(crate) const MAX_FILES: usize = 8000;
