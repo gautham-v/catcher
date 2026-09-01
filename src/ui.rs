@@ -1020,10 +1020,18 @@ fn draw_peek(f: &mut Frame, app: &mut App) {
     f.render_widget(Clear, rect);
     let title = format!(" {} ", truncate(&peek.name, inner_w.saturating_sub(2)));
     let mut block = block.title(Span::styled(title, theme::state()));
-    if peek.rows.len() > peek.view_rows {
+    let pos = (peek.rows.len() > peek.view_rows).then(|| {
         let first = peek.scroll + 1;
         let last = (peek.scroll + peek.view_rows).min(peek.rows.len());
-        let pos = format!(" {first}–{last} of {} ", peek.rows.len());
+        format!(" {first}–{last} of {} ", peek.rows.len())
+    });
+    // the hint on the left only when it fits beside the position on the right
+    let hint = " click to open · ↑↓ scroll ";
+    let used = pos.as_ref().map_or(0, |p| p.chars().count());
+    if hint.chars().count() + used <= inner_w {
+        block = block.title_bottom(Line::from(Span::styled(hint, dim())));
+    }
+    if let Some(pos) = pos {
         block = block.title_bottom(Line::from(Span::styled(pos, dim())).right_aligned());
     }
     let inner = block.inner(rect);
