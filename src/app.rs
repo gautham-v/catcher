@@ -1126,7 +1126,7 @@ impl App {
             }
         }
         for (i, n) in self.notes.iter().enumerate() {
-            if let Some(s) = search::score_note(&self.query, &n.title(), &n.content) {
+            if let Some(s) = search::score_note(&self.query, &n.name(), &n.title(), &n.content) {
                 scored.push((s, Item::Note(i)));
             }
         }

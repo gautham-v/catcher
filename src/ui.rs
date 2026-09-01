@@ -925,13 +925,9 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
         }
         Item::Note(idx) => {
             let n = &app.notes[*idx];
-            // a detached filename is worth seeing here too; the search itself
-            // still runs against the title and the body
-            let name = match n.detached_name() {
-                Some(name) => format!("{} ({name})", n.title()),
-                None => n.title(),
-            };
-            (name, n.snippet(), "note")
+            // the filename, as in the open picker: the search ranks it first,
+            // then the title, then the body
+            (n.name(), n.snippet(), "note")
         }
         // a typed path that exists — labelled so it is clear this is the file
         // on disk and not a search hit

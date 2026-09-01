@@ -20,10 +20,20 @@ impl Note {
         title_of(&self.content)
     }
 
+    /// The file's own name, without the `.md`: what the palette shows, so a
+    /// note is found under the name it has on disk.
+    pub fn name(&self) -> String {
+        self.path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     /// The file's own name, when it is no longer tracking the title — that is,
     /// when the user renamed the file by hand and the two have diverged.
     /// `None` while the filename still follows the title, where showing it
     /// would only repeat the title back in slug form.
+    #[cfg(test)]
     pub fn detached_name(&self) -> Option<String> {
         let name = self.path.file_name()?.to_str()?;
         let stem = self.path.file_stem()?.to_str()?;
