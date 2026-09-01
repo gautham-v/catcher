@@ -262,7 +262,7 @@ pub struct App {
     pub rename_input: String,
     /// The wikilink target the create prompt is asking about.
     pub pending_link: Option<String>,
-    /// Where you have been, for ^⌥← and ^⌥→.
+    /// Where you have been, for ^B and ^F.
     pub history: crate::history::History,
     /// What has been typed into the shortcuts card, which filters its rows.
     pub help_query: String,
@@ -543,7 +543,7 @@ impl App {
     /// quick-open ranks by.
     fn remember_active(&mut self) {
         let path = self.notes[self.active].path.clone();
-        // history is every landing, the settings note included: ^⌥← from it
+        // history is every landing, the settings note included: ^B from it
         // should go back to what you were reading
         self.history.push(&path);
         // the settings note has its own key and its own palette row; putting
@@ -554,7 +554,7 @@ impl App {
         index::push_recent(&mut self.recents, &path);
     }
 
-    /// ^⌥← / ^⌥→: the note before or after this one in the history. Opening
+    /// ^B / ^F: the note before or after this one in the history. Opening
     /// goes through `open_path`, which saves first and pushes the landing —
     /// a push of the entry just made current is a no-op, so the stack stays
     /// where it is.

@@ -77,7 +77,7 @@ Pointing tinynote at a file or folder roots that one session there without touch
 | `^C` `^X` `^V` | Copy / cut / paste |
 | `⌥⏎` | Follow the `[[wikilink]]` under the cursor |
 | `⌥P` | Peek at the `[[wikilink]]` under the cursor; in preview, hovering a link does the same |
-| `^⌥←` / `^⌥→` | Back / forward through the notes you have opened, browser-style |
+| `^B` / `^F` | Back / forward through the notes you have opened, browser-style |
 | `Tab` | In **^O**: flip between the ranked list and the folder tree |
 | `Esc` | Close palette, cancel, leave preview, clear selection |
 | `^Q` | Quit |
@@ -99,7 +99,7 @@ keybind = cmd+down=unbind
 
 ## Settings
 
-Every note you land on — from **^O**, the tree, a `[[wikilink]]`, a linked mention, **^N** — goes on a history, and `^⌥←` / `^⌥→` walk it the way a browser does: going back and then opening something else drops what was ahead, and a note deleted in the meantime is skipped.
+Every note you land on — from **^O**, the tree, a `[[wikilink]]`, a linked mention, **^N** — goes on a history, and `^B` / `^F` walk it the way a browser does: going back and then opening something else drops what was ahead, and a note deleted in the meantime is skipped.
 
 Settings are a note. **^,** opens `~/.config/tinynote/settings.md` in tinynote itself — same editor, same preview, no `$EDITOR` and no TOML — and **^S** applies it at once. Colours, page width and everything else but `notes_dir` change on the next frame.
 

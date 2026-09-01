@@ -106,17 +106,18 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         Some("alt+enter"),
         "open the [[wikilink]] under the cursor",
     ),
-    // ⌥←/⌥→ are by-word motion in the editor, so the browser keys take a ctrl.
+    // every modifier + arrow already moves the cursor (or, with ^⌥, the
+    // window), so the browser keys are letters: back and forward.
     (
         Action::NavBack,
         "key_back",
-        Some("ctrl+alt+left"),
+        Some("^B"),
         "back to the note you came from",
     ),
     (
         Action::NavForward,
         "key_forward",
-        Some("ctrl+alt+right"),
+        Some("^F"),
         "forward again",
     ),
     (
@@ -559,11 +560,11 @@ mod tests {
         assert_eq!(b.label(), "⌥←");
         assert_eq!(Binding::parse(&b.label()), Some(b));
         let map = Keymap::default();
-        let ca = KeyModifiers::CONTROL | KeyModifiers::ALT;
-        assert_eq!(map.action(&ev(KeyCode::Left, ca)), Some(Action::NavBack));
-        assert_eq!(map.action(&ev(KeyCode::Right, ca)), Some(Action::NavForward));
-        // by-word motion in the editor keeps ⌥←
+        assert_eq!(map.action(&ev(KeyCode::Char('b'), KeyModifiers::CONTROL)), Some(Action::NavBack));
+        assert_eq!(map.action(&ev(KeyCode::Char('f'), KeyModifiers::CONTROL)), Some(Action::NavForward));
+        // every modifier + arrow stays with the editor (or the window manager)
         assert_eq!(map.action(&ev(KeyCode::Left, KeyModifiers::ALT)), None);
+        assert_eq!(map.action(&ev(KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::ALT)), None);
     }
 
     #[test]
