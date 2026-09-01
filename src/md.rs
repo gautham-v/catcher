@@ -1631,6 +1631,42 @@ fn align_of(spec: &str) -> Align {
     }
 }
 
+/// One table cell's text with its inline markup styled — code, emphasis,
+/// links — the way any other line gets it. Source columns are relative to
+/// the cell text; the caller offsets them to the row.
+fn styled_cell(text: &str, base: Style) -> Vec<Cell> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut b = Builder {
+        src: &chars,
+        cells: Vec::with_capacity(chars.len()),
+    };
+    inline(&mut b, 0, base);
+    b.cells
+}
+
+fn cells_width(cells: &[Cell]) -> usize {
+    cells.iter().map(|c| char_width(c.ch)).sum()
+}
+
+/// `cells` cut to `width` display columns, with an ellipsis when cut.
+fn truncate_cells(cells: Vec<Cell>, width: usize) -> Vec<Cell> {
+    if cells_width(&cells) <= width {
+        return cells;
+    }
+    let mut out = Vec::new();
+    let mut used = 0;
+    for c in cells {
+        let cw = char_width(c.ch);
+        if used + cw > width.saturating_sub(1) {
+            out.push(Cell { ch: '…', ..c });
+            return out;
+        }
+        used += cw;
+        out.push(c);
+    }
+    out
+}
+
 /// Lay a table's rows out in aligned columns, and draw row `row` of it.
 /// Every source row is exactly one display row, separator included.
 fn table_line(rows: &[String], row: usize, width: usize) -> RLine {
@@ -1644,7 +1680,11 @@ fn table_line(rows: &[String], row: usize, width: usize) -> RLine {
         .iter()
         .enumerate()
         .filter(|(i, _)| Some(*i) != rule_row)
-        .map(|(_, (c, _))| c.iter().map(|c| str_width(&c.text)).collect())
+        .map(|(_, (c, _))| {
+            c.iter()
+                .map(|c| cells_width(&styled_cell(&c.text, theme::PLAIN)))
+                .collect()
+        })
         .collect();
     let widths = fit_widths(&column_widths(&measured, cols), width);
 
@@ -1683,17 +1723,14 @@ fn table_line(rows: &[String], row: usize, width: usize) -> RLine {
         };
         let cell = row_cells.get(ci).unwrap_or(&empty);
         let align = aligns.get(ci).copied().unwrap_or(Align::Left);
-        let text = truncate(&cell.text, *w);
-        let (left, right) = pad_for(str_width(&text), *w, align);
+        let styled = truncate_cells(styled_cell(&cell.text, body), *w);
+        let (left, right) = pad_for(cells_width(&styled), *w, align);
         cells.extend(at(&" ".repeat(left), body, cell.start));
-        for (i, ch) in text.chars().enumerate() {
-            cells.push(Cell {
-                ch,
-                style: body,
-                src: cell.start + i,
-            });
-        }
-        let after = cell.start + text.chars().count();
+        cells.extend(styled.into_iter().map(|c| Cell {
+            src: cell.start + c.src,
+            ..c
+        }));
+        let after = cell.start + cell.text.chars().count();
         cells.extend(at(&" ".repeat(right), body, after));
     }
     done(cells, src)
@@ -1756,6 +1793,33 @@ mod tests {
         assert_eq!(l.one_row().display_to_source(4), 4);
         let sep = style_line("| --- | ---: |");
         assert!(sep.cells.iter().all(|c| c.style == theme::marker()));
+    }
+
+    #[test]
+    fn inline_code_in_a_table_cell_is_styled_and_kept() {
+        let rows: Vec<String> = ["| a | `foo` |", "| --- | --- |", "| 1 | x `bar` y |"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let head = table_line(&rows, 0, 80);
+        let t = text(&head);
+        assert!(t.contains("foo"), "{t}");
+        assert!(!t.contains('`'), "{t}");
+        let f = head.cells.iter().find(|c| c.ch == 'f').unwrap();
+        assert_eq!(f.style.bg, theme::code().bg);
+        // the code text maps back to its own source columns
+        assert_eq!(f.src, rows[0].find('f').unwrap());
+        let body = table_line(&rows, 2, 80);
+        let t = text(&body);
+        assert!(t.contains("x bar y"), "{t}");
+        let x = body.cells.iter().find(|c| c.ch == 'x').unwrap();
+        assert_eq!(x.style, theme::PLAIN);
+        let b = body.cells.iter().find(|c| c.ch == 'b').unwrap();
+        assert_eq!(b.style.bg, theme::code().bg);
+        // and the same construct outside a table still works
+        let l = style_line("say `foo` now");
+        assert_eq!(text(&l), "say foo now");
+        assert_eq!(l.cells[4].style.bg, theme::code().bg);
     }
 
     #[test]
