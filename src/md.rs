@@ -714,6 +714,21 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// Only the inline pass — emphasis, code, links — over a run of markdown that
+/// is already known to be prose rather than a fence, a rule or a table row.
+/// The linked-mentions footer styles its excerpts with this, so `**bold**`
+/// reads as bold there and a `[[link]]` as its label, the same as in the
+/// editor. Each cell keeps the source column it came from.
+pub fn style_inline(src: &str) -> Vec<Cell> {
+    let chars: Vec<char> = src.chars().collect();
+    let mut b = Builder {
+        src: &chars,
+        cells: Vec::with_capacity(chars.len()),
+    };
+    inline(&mut b, 0, theme::PLAIN);
+    b.cells
+}
+
 /// Style one markdown source line for display.
 pub fn style_line(src: &str) -> RLine {
     let chars: Vec<char> = src.chars().collect();
