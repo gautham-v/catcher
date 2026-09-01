@@ -978,26 +978,34 @@ fn truncate(text: &str, width: usize) -> String {
 /// The peek popup: the first rows of the note a hovered (or ⌥P'd) wikilink
 /// points at, floated just under the link — or above it when the link is
 /// near the bottom — and titled with the file's name.
-fn draw_peek(f: &mut Frame, app: &App) {
-    let Some(peek) = &app.peek else {
+fn draw_peek(f: &mut Frame, app: &mut App) {
+    let table_style = app.config.table_style;
+    let block = panel(app);
+    let Some(peek) = app.peek.as_mut() else {
         return;
     };
     let screen = f.area();
     let width = 60.min(screen.width.saturating_sub(2)).max(10);
     let inner_w = width.saturating_sub(2) as usize;
-    let rendered = crate::render::render_page_at(&peek.body, 0, inner_w, app.config.table_style);
-    let mut lines: Vec<Line> = rendered
-        .lines
+    peek.ensure_rendered(inner_w, table_style);
+
+    // as tall as the note needs, up to a share of the screen
+    let cap = (screen.height * crate::app::PEEK_MAX_HEIGHT_PCT / 100).max(5);
+    let total = peek.rows.len().max(1);
+    let height = ((total as u16).saturating_add(2)).min(cap).min(screen.height);
+    peek.view_rows = height.saturating_sub(2) as usize;
+    peek.clamp();
+
+    let mut lines: Vec<Line> = peek
+        .rows
         .iter()
-        .take(crate::app::PEEK_ROWS)
-        .map(|l| crate::render::to_line(&l.cells))
+        .skip(peek.scroll)
+        .take(peek.view_rows)
+        .cloned()
         .collect();
-    if lines.is_empty() {
+    if peek.rows.is_empty() {
         lines.push(Line::from(Span::styled("(empty note)", dim())));
-    } else if rendered.lines.len() > crate::app::PEEK_ROWS {
-        lines.push(Line::from(Span::styled("…", dim())));
     }
-    let height = (lines.len() as u16 + 2).min(screen.height);
 
     // under the link when there is room, over it when there is not, and
     // never off the right edge
@@ -1009,10 +1017,17 @@ fn draw_peek(f: &mut Frame, app: &App) {
     };
     let x = a.x.min(screen.width.saturating_sub(width));
     let rect = Rect::new(x, y, width, height);
+    peek.rect = rect;
 
     f.render_widget(Clear, rect);
     let title = format!(" {} ", truncate(&peek.name, inner_w.saturating_sub(2)));
-    let block = panel(app).title(Span::styled(title, theme::state()));
+    let mut block = block.title(Span::styled(title, theme::state()));
+    if peek.rows.len() > peek.view_rows {
+        let first = peek.scroll + 1;
+        let last = (peek.scroll + peek.view_rows).min(peek.rows.len());
+        let pos = format!(" {first}–{last} of {} ", peek.rows.len());
+        block = block.title_bottom(Line::from(Span::styled(pos, dim())).right_aligned());
+    }
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     f.render_widget(Paragraph::new(lines), inner);
