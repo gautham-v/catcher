@@ -105,18 +105,17 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         Some("alt+enter"),
         "open the [[wikilink]] under the cursor",
     ),
-    // the browser keys, the way Obsidian and Safari spell them. In the
-    // editor these shadow ⌥←/⌥→ by-word motion; `key_back: none` gives it back.
+    // ⌥←/⌥→ are by-word motion in the editor, so the browser keys take a ctrl.
     (
         Action::NavBack,
         "key_back",
-        Some("alt+left"),
+        Some("ctrl+alt+left"),
         "back to the note you came from",
     ),
     (
         Action::NavForward,
         "key_forward",
-        Some("alt+right"),
+        Some("ctrl+alt+right"),
         "forward again",
     ),
 ];
@@ -551,8 +550,11 @@ mod tests {
         assert_eq!(b.label(), "⌥←");
         assert_eq!(Binding::parse(&b.label()), Some(b));
         let map = Keymap::default();
-        assert_eq!(map.action(&ev(KeyCode::Left, KeyModifiers::ALT)), Some(Action::NavBack));
-        assert_eq!(map.action(&ev(KeyCode::Right, KeyModifiers::ALT)), Some(Action::NavForward));
+        let ca = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert_eq!(map.action(&ev(KeyCode::Left, ca)), Some(Action::NavBack));
+        assert_eq!(map.action(&ev(KeyCode::Right, ca)), Some(Action::NavForward));
+        // by-word motion in the editor keeps ⌥←
+        assert_eq!(map.action(&ev(KeyCode::Left, KeyModifiers::ALT)), None);
     }
 
     #[test]
