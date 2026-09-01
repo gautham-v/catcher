@@ -24,7 +24,7 @@ Then run `tinynote`.
 
 A bare `tinynote` reopens the note you had open when you closed it, wherever it lives. Naming something — `tinynote spec.md`, `tinynote ~/vault` — asks for that instead.
 
-One note on screen at a time. **^K** opens the palette — fuzzy search across every note's title and body, plus commands (new, open, delete, rename file, preview, shortcuts, settings, quit).
+One note on screen at a time. **^K** opens the palette — fuzzy search across every note's title and body, plus commands (new, open, delete, rename file, preview, help, settings, quit).
 
 **^O** opens a note. It is the palette's twin, and the difference is what it ranks by: notes you opened most recently first, then the most recently edited, and it walks *subfolders* — so pointing tinynote at an Obsidian vault still lets you jump straight to `applications/log.md` from wherever you are. Type to fuzzy-search titles and folder paths.
 
@@ -68,7 +68,7 @@ Pointing tinynote at a file or folder roots that one session there without touch
 | --- | --- |
 | `^K` | Palette: search notes, run commands |
 | `^O` | Open a note: every folder, recent first |
-| `^G` | Keyboard shortcuts card |
+| `^/` or `F1` | Help card: every key |
 | `^N` | New note |
 | `^,` | Settings |
 | `^P` | Toggle markdown preview |
@@ -80,7 +80,7 @@ Pointing tinynote at a file or folder roots that one session there without touch
 | `Esc` | Close palette, cancel, leave preview, clear selection |
 | `^Q` | Quit |
 
-Every key in that table but `Tab` is settable — tab means “the other view of this” and is not a command. The settings note has a `## Keys` section with one line per action — `key_palette: ^K`, `key_open: ^O` — and takes `^K`, `cmd+k`, `alt+k`, `f5`, or `none` to unbind. `^K` answers to either ctrl or cmd, so the same file works on a Mac and on Linux; spell out `cmd+` or `ctrl+` when you want one exactly. **Delete note** and **Rename file** ship unbound and are yours to claim. The palette shows each command's current key beside it, and so does the **^G** card — which is itself searchable: type `save` on it and only the saving rows stay. Esc closes it. The palette itself is monochrome — it is chrome over the note, and a hue there would compete with the one the note spends on its headings.
+Every key in that table but `Tab` is settable — tab means “the other view of this” and is not a command. The settings note has a `## Keys` section with one line per action — `key_palette: ^K`, `key_open: ^O` — and takes `^K`, `cmd+k`, `alt+k`, `f5`, or `none` to unbind — or several at once, as `^/ f1`. `^K` answers to either ctrl or cmd, so the same file works on a Mac and on Linux; spell out `cmd+` or `ctrl+` when you want one exactly. **Delete note** and **Rename file** ship unbound and are yours to claim. The palette shows each command's current key beside it, and so does the **^/** help card (`F1` opens it too, for terminals that swallow `^/`) — which is itself searchable: type `save` on it and only the saving rows stay. Esc closes it. The palette itself is monochrome — it is chrome over the note, and a hue there would compete with the one the note spends on its headings.
 
 The palette's search box takes the Mac editing keys too: `⌘⌫` clears it, `⌥⌫` deletes a word.
 
@@ -120,7 +120,7 @@ Every setting is a `- key: value` line with a one-line hint after it. The file i
 | `quick_open` | `recursive` or `folder` — how far **^O** looks |
 | `quick_open_mode` | `search` or `browse` — which half of **^O** it opens on |
 | `quick_open_dirs` | extra folders **^O** searches; repeat the line, or separate with commas |
-| `key_palette`, `key_open`, `key_new`, `key_settings`, `key_preview`, `key_save`, `key_shortcuts`, `key_quit`, `key_copy`, `key_cut`, `key_paste`, `key_undo`, `key_redo`, `key_delete`, `key_rename`, `key_follow` | one key each — `^K`, `cmd+k`, `alt+k`, `f5`, or `none` |
+| `key_palette`, `key_open`, `key_new`, `key_settings`, `key_preview`, `key_save`, `key_help` (`key_shortcuts` still read), `key_quit`, `key_copy`, `key_cut`, `key_paste`, `key_undo`, `key_redo`, `key_delete`, `key_rename`, `key_follow` | one key each — `^K`, `cmd+k`, `alt+k`, `f5`, or `none` |
 
 An existing `config.toml` is read once, to seed `settings.md`, and then left alone.
 

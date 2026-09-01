@@ -545,7 +545,7 @@ impl Config {
         }
 
         d.section("Keys");
-        d.note("^K · cmd+k · alt+k · f5 · none");
+        d.note("^K · cmd+k · alt+k · f5 · none — or several, as `^/ f1`");
         for (key, spec, what) in self.keys.settings_rows() {
             d.row(key, spec, what);
         }
