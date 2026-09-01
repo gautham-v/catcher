@@ -56,9 +56,34 @@ pub fn score_note(query: &str, name: &str, title: &str, body: &str) -> Option<i6
     by_name.into_iter().chain(by_title).chain(by_body).max()
 }
 
+/// How well an index entry answers `query`: the filename first, the title
+/// second, and the path relative to its root a weaker third, so
+/// `applications/log` finds it too. Same weights as [`score_note`], minus the
+/// body, which an entry has not read.
+pub fn score_entry(query: &str, name: &str, title: &str, rel: &str) -> Option<i64> {
+    let by_name = fuzzy(query, name).map(|s| s * 10 + 100);
+    let by_title = fuzzy(query, title).map(|s| s * 10 + 50);
+    let by_path = fuzzy(query, rel);
+    by_name.into_iter().chain(by_title).chain(by_path).max()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_entry_scores_like_a_note_without_a_body() {
+        assert!(score_entry("story mat", "story-matrix", "Story matrix", "interviews/stories/story-matrix").is_some());
+        assert!(score_entry("xyz", "story-matrix", "Story matrix", "interviews/stories/story-matrix").is_none());
+        // the path alone is enough, but weaker than a filename hit
+        let by_path = score_entry("interviews", "story-matrix", "Story matrix", "interviews/stories/story-matrix").unwrap();
+        let by_name = score_entry("story", "story-matrix", "Story matrix", "interviews/stories/story-matrix").unwrap();
+        assert!(by_name > by_path);
+        assert_eq!(
+            score_entry("story", "story-matrix", "Story matrix", "x"),
+            score_note("story", "story-matrix", "Story matrix", "")
+        );
+    }
 
     #[test]
     fn matches() {

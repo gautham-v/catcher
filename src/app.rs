@@ -1035,10 +1035,7 @@ impl App {
             // the filename is what the list shows, so it is what people
             // search by; the title is a second chance, and the folder path a
             // weaker third, so "applications/log" finds it too
-            let by_name = search::fuzzy(&self.query, &e.name()).map(|s| s * 10 + 100);
-            let by_title = search::fuzzy(&self.query, &e.title).map(|s| s * 10 + 50);
-            let by_path = search::fuzzy(&self.query, &e.rel);
-            let Some(base) = by_name.into_iter().chain(by_title).chain(by_path).max() else {
+            let Some(base) = search::score_entry(&self.query, &e.name(), &e.title, &e.rel) else {
                 continue;
             };
             // a nudge, not a verdict: recency breaks ties between equally good
@@ -1216,6 +1213,19 @@ impl App {
                 scored.push((s, Item::Note(i)));
             }
         }
+        // everything ^O can reach that is not loaded yet — a note in a
+        // subfolder, or in another root — scored the way ^O scores it; the
+        // sort is stable, so with no query these trail the loaded notes
+        let loaded: std::collections::HashSet<&Path> =
+            self.notes.iter().map(|n| n.path.as_path()).collect();
+        for (i, e) in self.open_index.iter().enumerate() {
+            if loaded.contains(e.path.as_path()) {
+                continue;
+            }
+            if let Some(s) = search::score_entry(&self.query, &e.name(), &e.title, &e.rel) {
+                scored.push((s, Item::Entry(i)));
+            }
+        }
         scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
         scored.into_iter().map(|(_, it)| it).collect()
     }
@@ -1316,6 +1326,8 @@ impl App {
     fn open_palette(&mut self) {
         self.query.clear();
         self.selected = 0;
+        // the palette lists what ^O lists, so it walks what ^O walks
+        self.refresh_index();
         self.overlay = Overlay::Palette;
     }
 
