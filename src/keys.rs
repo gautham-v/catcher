@@ -32,6 +32,7 @@ pub enum Action {
     FollowLink,
     NavBack,
     NavForward,
+    Peek,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -117,6 +118,14 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_forward",
         Some("ctrl+alt+right"),
         "forward again",
+    ),
+    (
+        Action::Peek,
+        "key_peek",
+        // capital, because the label writes it as ⌥P and the settings
+        // document is read back through `parse`, which keeps the letter's case
+        Some("alt+P"),
+        "peek at the [[wikilink]] under the cursor",
     ),
 ];
 
