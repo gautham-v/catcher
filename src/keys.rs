@@ -30,6 +30,8 @@ pub enum Action {
     DeleteNote,
     RenameFile,
     FollowLink,
+    NavBack,
+    NavForward,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -102,6 +104,20 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_follow",
         Some("alt+enter"),
         "open the [[wikilink]] under the cursor",
+    ),
+    // the browser keys, the way Obsidian and Safari spell them. In the
+    // editor these shadow ⌥←/⌥→ by-word motion; `key_back: none` gives it back.
+    (
+        Action::NavBack,
+        "key_back",
+        Some("alt+left"),
+        "back to the note you came from",
+    ),
+    (
+        Action::NavForward,
+        "key_forward",
+        Some("alt+right"),
+        "forward again",
     ),
 ];
 
@@ -230,6 +246,10 @@ impl Binding {
             KeyCode::Esc => s.push_str("esc"),
             KeyCode::Enter => s.push('⏎'),
             KeyCode::Tab => s.push_str("tab"),
+            KeyCode::Left => s.push('←'),
+            KeyCode::Right => s.push('→'),
+            KeyCode::Up => s.push('↑'),
+            KeyCode::Down => s.push('↓'),
             _ => s.push('?'),
         }
         s
@@ -272,6 +292,10 @@ fn key_code(text: &str) -> Option<KeyCode> {
         // could be written but not read would be silently lost on the rewrite
         "enter" | "return" | "⏎" | "↵" => KeyCode::Enter,
         "tab" | "⇥" => KeyCode::Tab,
+        "left" | "←" => KeyCode::Left,
+        "right" | "→" => KeyCode::Right,
+        "up" | "↑" => KeyCode::Up,
+        "down" | "↓" => KeyCode::Down,
         "space" => KeyCode::Char(' '),
         _ => {
             let mut chars = t.chars();
@@ -517,6 +541,18 @@ mod tests {
         // and the settings writer emits the new name, never the old
         assert!(map.settings_rows().iter().any(|(k, _, _)| *k == "key_help"));
         assert!(!map.settings_rows().iter().any(|(k, _, _)| *k == "key_shortcuts"));
+    }
+
+    #[test]
+    fn arrow_keys_bind_and_round_trip_through_their_labels() {
+        let b = Binding::parse("alt+left").unwrap();
+        assert!(b.matches(&ev(KeyCode::Left, KeyModifiers::ALT)));
+        assert!(!b.matches(&ev(KeyCode::Left, KeyModifiers::NONE)));
+        assert_eq!(b.label(), "⌥←");
+        assert_eq!(Binding::parse(&b.label()), Some(b));
+        let map = Keymap::default();
+        assert_eq!(map.action(&ev(KeyCode::Left, KeyModifiers::ALT)), Some(Action::NavBack));
+        assert_eq!(map.action(&ev(KeyCode::Right, KeyModifiers::ALT)), Some(Action::NavForward));
     }
 
     #[test]
