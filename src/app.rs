@@ -293,13 +293,60 @@ pub struct Peek {
     pub body: String,
     /// The screen band of the link it belongs to, which the popup sits beside.
     pub anchor: Rect,
+    /// The whole note rendered at the popup's inner width, cached by the
+    /// first draw and reused until the width changes.
+    pub rows: Vec<ratatui::text::Line<'static>>,
+    /// The width `rows` were rendered at; zero until the first draw.
+    pub rows_width: usize,
+    /// The first row on show.
+    pub scroll: usize,
+    /// How many rows the last draw had room for, which bounds the scroll.
+    pub view_rows: usize,
+    /// Where the last draw put the popup, for pointer hit-testing.
+    pub rect: Rect,
+}
+
+impl Peek {
+    /// Render the body for `width`, unless the cache already is.
+    pub fn ensure_rendered(&mut self, width: usize, tables: crate::config::TableStyle) {
+        if self.rows_width == width {
+            return;
+        }
+        let rendered = crate::render::render_page_at(&self.body, 0, width, tables);
+        self.rows = rendered
+            .lines
+            .iter()
+            .map(|l| crate::render::to_line(&l.cells))
+            .collect();
+        self.rows_width = width;
+        self.clamp();
+    }
+
+    /// The furthest `scroll` may go: the last row lands on the last line.
+    pub fn max_scroll(&self) -> usize {
+        self.rows.len().saturating_sub(self.view_rows.max(1))
+    }
+
+    pub fn clamp(&mut self) {
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+
+    pub fn scroll_by(&mut self, delta: isize) {
+        let max = self.max_scroll() as isize;
+        self.scroll = (self.scroll as isize + delta).clamp(0, max) as usize;
+    }
+
+    /// Whether the pointer is inside the popup as last drawn.
+    pub fn contains(&self, x: u16, y: u16) -> bool {
+        self.rect.contains(ratatui::layout::Position { x, y })
+    }
 }
 
 /// How long the pointer rests on a link before it is taken as a request to
 /// peek, rather than as a path across the page.
 const PEEK_DWELL: Duration = Duration::from_millis(300);
-/// How many rendered rows the peek shows.
-pub const PEEK_ROWS: usize = 12;
+/// The most of the screen the peek may take, in percent of its height.
+pub const PEEK_MAX_HEIGHT_PCT: u16 = 40;
 
 impl App {
     /// Build the app for one of the CLI's launch shapes.
@@ -712,6 +759,10 @@ impl App {
         if self.view != View::Preview || self.overlay != Overlay::None {
             return;
         }
+        // moving about inside the popup is reading it, not leaving the link
+        if self.peek.as_ref().is_some_and(|p| p.contains(x, y)) {
+            return;
+        }
         let at = ratatui::layout::Position { x, y };
         let hit = self
             .preview_links
@@ -817,6 +868,11 @@ impl App {
             name,
             body: notes::body_after_front_matter(&content).to_string(),
             anchor,
+            rows: Vec::new(),
+            rows_width: 0,
+            scroll: 0,
+            view_rows: 0,
+            rect: Rect::default(),
         })
     }
 
@@ -1234,7 +1290,22 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
-        // any key puts the peek away; the peek action itself opens a new one
+        // the arrows and page keys read the peek; any other key puts it away
+        // (the peek action itself opens a new one)
+        if let Some(peek) = self.peek.as_mut() {
+            let page = peek.view_rows.max(1) as isize;
+            let delta = match key.code {
+                KeyCode::Up => Some(-1),
+                KeyCode::Down => Some(1),
+                KeyCode::PageUp => Some(-page),
+                KeyCode::PageDown => Some(page),
+                _ => None,
+            };
+            if let Some(d) = delta {
+                peek.scroll_by(d);
+                return;
+            }
+        }
         self.peek = None;
         self.hover = None;
         let cmd = key.modifiers.contains(KeyModifiers::SUPER);
@@ -1930,6 +2001,16 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
+        // the wheel over an open peek turns its pages, not the one beneath
+        if let (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown, Some(peek)) =
+            (ev.kind, self.peek.as_mut())
+        {
+            if peek.contains(ev.column, ev.row) {
+                let d = if ev.kind == MouseEventKind::ScrollUp { -2 } else { 2 };
+                peek.scroll_by(d);
+                return;
+            }
+        }
         match ev.kind {
             MouseEventKind::ScrollUp => match (self.overlay, self.view) {
                 (Overlay::Palette | Overlay::QuickOpen, _) => {
@@ -2306,6 +2387,33 @@ fn screen_to_cell(area: Rect, scroll: usize, x: u16, y: u16) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn peek_scroll_clamps_to_content() {
+        let mut p = super::Peek {
+            target: String::new(),
+            name: String::new(),
+            body: String::new(),
+            anchor: super::Rect::default(),
+            rows: (0..20).map(|i| ratatui::text::Line::from(i.to_string())).collect(),
+            rows_width: 10,
+            scroll: 0,
+            view_rows: 5,
+            rect: super::Rect::default(),
+        };
+        assert_eq!(p.max_scroll(), 15);
+        p.scroll_by(-3);
+        assert_eq!(p.scroll, 0);
+        p.scroll_by(7);
+        assert_eq!(p.scroll, 7);
+        p.scroll_by(100);
+        assert_eq!(p.scroll, 15);
+        // a shorter window than the content, and content shorter than the window
+        p.view_rows = 30;
+        p.clamp();
+        assert_eq!(p.scroll, 0);
+        assert_eq!(p.max_scroll(), 0);
+    }
+
     use super::*;
     use crate::md;
 
