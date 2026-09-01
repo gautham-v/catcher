@@ -68,9 +68,18 @@ pub mod theme {
         pub link: Color,
         /// Behind code, inline and fenced alike.
         pub code_bg: Color,
+        /// The text on that background. Code is the one construct that paints
+        /// its own ground, so it is also the one that cannot leave its
+        /// foreground to the terminal: prose inherits whatever colour the
+        /// terminal is already using and looks right either way, but a dark
+        /// chip under a light terminal's ink is black on black. Both halves
+        /// are set together or neither is legible.
+        pub code_fg: Color,
         /// Panel borders at rest.
         pub border: Color,
-        /// Destructive confirmation, and nothing else.
+        /// Destructive confirmation, and a `[[link]]` that names no note —
+        /// the two things the eye must not slide past. Recolour it and both
+        /// move together.
         pub danger: Color,
         /// The ground a highlight or an inverted heading sits its text on.
         pub ground: Color,
@@ -79,8 +88,9 @@ pub mod theme {
     /// The colour field names the settings file accepts, in the order the
     /// settings document lists them. The single source of truth: a name that
     /// isn't here can't be set and isn't documented.
-    pub const COLOR_KEYS: [&str; 9] = [
-        "accent", "bright", "grey", "dim", "link", "code_bg", "border", "danger", "ground",
+    pub const COLOR_KEYS: [&str; 10] = [
+        "accent", "bright", "grey", "dim", "link", "code_bg", "code_fg", "border", "danger",
+        "ground",
     ];
 
     impl Palette {
@@ -94,6 +104,7 @@ pub mod theme {
                 "dim" => self.dim = color,
                 "link" => self.link = color,
                 "code_bg" => self.code_bg = color,
+                "code_fg" => self.code_fg = color,
                 "border" => self.border = color,
                 "danger" => self.danger = color,
                 "ground" => self.ground = color,
@@ -110,6 +121,7 @@ pub mod theme {
                 "dim" => self.dim,
                 "link" => self.link,
                 "code_bg" => self.code_bg,
+                "code_fg" => self.code_fg,
                 "border" => self.border,
                 "danger" => self.danger,
                 "ground" => self.ground,
@@ -125,6 +137,7 @@ pub mod theme {
         dim: Color::Rgb(0x6c, 0x6c, 0x6c),
         link: Color::Rgb(0x9a, 0x9a, 0x9a),
         code_bg: Color::Rgb(0x1c, 0x1c, 0x1c),
+        code_fg: Color::Rgb(0xe1, 0xe1, 0xe1),
         border: Color::Rgb(0x32, 0x32, 0x37),
         danger: Color::Rgb(0xf7, 0x76, 0x8e),
         ground: Color::Rgb(0x14, 0x14, 0x14),
@@ -137,6 +150,7 @@ pub mod theme {
         dim: Color::Rgb(0x8d, 0x8d, 0x8d),
         link: Color::Rgb(0x5a, 0x58, 0x52),
         code_bg: Color::Rgb(0xe2, 0xe2, 0xe2),
+        code_fg: Color::Rgb(0x26, 0x26, 0x26),
         border: Color::Rgb(0xc8, 0xc8, 0xcd),
         danger: Color::Rgb(0xcd, 0x30, 0x48),
         ground: Color::Rgb(0xee, 0xee, 0xee),
@@ -213,8 +227,9 @@ pub mod theme {
         Style::new().fg(palette().dim)
     }
     /// Code carries no hue of its own — the raised background is the signal.
+    /// It states its foreground anyway: see `code_fg`.
     pub fn code() -> Style {
-        Style::new().bg(palette().code_bg)
+        Style::new().fg(palette().code_fg).bg(palette().code_bg)
     }
     pub fn link() -> Style {
         Style::new()
@@ -855,6 +870,22 @@ fn inline(b: &mut Builder, mut i: usize, base: Style) {
 fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
     let c = b.src[i];
 
+    // [[wikilink]] — checked before `[text](url)`, which falls straight
+    // through on a double bracket and would leave it as literal text
+    if c == '[' && b.src.get(i + 1) == Some(&'[') && links::enabled() {
+        if let Some(w) = wikilink_at(b.src, i) {
+            let style = wiki_style(base, &w.target);
+            return Some(delimited(
+                b,
+                w.start,
+                w.label_start,
+                w.label_end,
+                w.end,
+                style,
+            ));
+        }
+    }
+
     // `code`
     if c == '`' {
         let end = find(b.src, i + 1, '`')?;
@@ -946,13 +977,29 @@ fn delimited(
     close_end
 }
 
-/// The URL of the markdown link or bare URL covering source column `col` of
-/// `line`, if any. Used by modifier-click in the editor: the whole `[text](url)`
-/// span counts, target included, so clicking anywhere on it follows the link.
-pub fn link_at(line: &str, col: usize) -> Option<String> {
+/// The link covering source column `col` of `line`, if any. Used by
+/// modifier-click and by ⌥⏎ in the editor: the whole span counts — target,
+/// pipe and brackets included — so clicking anywhere on it follows the link.
+///
+/// A [`LinkTarget::Url`] is for the desktop to open; a [`LinkTarget::Wiki`] is
+/// a note in the vault, and its string is the raw target, still to be resolved
+/// by `index::resolve`. The caller has to tell them apart, which is why this
+/// returns an enum rather than the string it used to.
+pub fn link_at(line: &str, col: usize) -> Option<LinkTarget> {
     let src: Vec<char> = line.chars().collect();
     let mut i = 0;
     while i < src.len() {
+        // [[wikilink]] first: the `[text](url)` scan below does not recognise
+        // one, and would walk into the middle of it looking for a `(`
+        if src[i] == '[' && src.get(i + 1) == Some(&'[') && links::enabled() {
+            if let Some(w) = wikilink_at(&src, i) {
+                if (w.start..w.end).contains(&col) {
+                    return Some(LinkTarget::Wiki(w.target));
+                }
+                i = w.end;
+                continue;
+            }
+        }
         // [text](url)
         // an image (`![alt](path)`) is not something to open in a browser
         if src[i] == '[' && (i == 0 || src[i - 1] != '!') {
@@ -961,7 +1008,8 @@ pub fn link_at(line: &str, col: usize) -> Option<String> {
                     if let Some(paren) = find(&src, close + 2, ')') {
                         if (i..=paren).contains(&col) {
                             let url: String = src[close + 2..paren].iter().collect();
-                            return (!url.trim().is_empty()).then(|| url.trim().to_string());
+                            return (!url.trim().is_empty())
+                                .then(|| LinkTarget::Url(url.trim().to_string()));
                         }
                         i = paren + 1;
                         continue;
@@ -978,7 +1026,7 @@ pub fn link_at(line: &str, col: usize) -> Option<String> {
                 end -= 1;
             }
             if (i..end).contains(&col) {
-                return Some(src[i..end].iter().collect());
+                return Some(LinkTarget::Url(src[i..end].iter().collect()));
             }
             i = end.max(i + 1);
             continue;
@@ -1004,6 +1052,286 @@ fn find_pair(src: &[char], from: usize, ch: char) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// Wikilinks
+//
+// `[[note]]` is how an Obsidian vault spells a link from one of its own notes
+// to another, and a vault migrated into tinynote is full of them. The syntax
+// lives here, next to the rest of the inline grammar, because md.rs is the
+// leaf: it owns what the characters mean, index.rs owns which file they name,
+// and app.rs owns what happens when you press enter on one. Keeping the
+// normalisation in one function ([`link_key`]) is what stops the colour a link
+// is drawn in from disagreeing with the note a click on it opens.
+
+/// A `[[wikilink]]` found in a source line. `start`/`end` and the label range
+/// are source *columns* in chars, with `end` exclusive — one past the final
+/// `]`.
+///
+/// The label is a range and never a synthesised string, so the display cells
+/// it becomes keep honest source columns exactly the way `[text](url)` does.
+/// Hiding characters is only safe while every character that survives still
+/// knows which column of the file it came from; that mapping is what turns a
+/// click back into a cursor position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wikilink {
+    pub start: usize,
+    pub end: usize,
+    /// What the link names: trimmed, with any `#heading` suffix dropped. The
+    /// heading is a place *inside* a note and the note is what opens, so it is
+    /// shown but never resolved against.
+    pub target: String,
+    pub label_start: usize,
+    pub label_end: usize,
+}
+
+/// The one rule set for what counts as a wikilink at source column `i`, called
+/// from styling, from `link_at` and from the full-page renderer, so all three
+/// answer the same way.
+pub fn wikilink_at(src: &[char], i: usize) -> Option<Wikilink> {
+    if src.get(i) != Some(&'[') || src.get(i + 1) != Some(&'[') {
+        return None;
+    }
+    // `\[[x]]` is someone showing the syntax rather than using it, and
+    // `![[x.png]]` is an Obsidian embed — a picture, not somewhere to go — so
+    // neither of them becomes a link
+    if i > 0 && matches!(src[i - 1], '\\' | '!') {
+        return None;
+    }
+    // a wikilink never spans a line, and a stray bracket inside one means the
+    // pair was never a pair: `[[a] b]]` and `[[unclosed` stay literal text
+    let body_start = i + 2;
+    let mut k = body_start;
+    let close = loop {
+        match src.get(k) {
+            Some(']') if src.get(k + 1) == Some(&']') => break k,
+            Some('[') | Some(']') | Some('\n') | None => return None,
+            Some(_) => k += 1,
+        }
+    };
+    if src[body_start..close].iter().all(|c| c.is_whitespace()) {
+        return None;
+    }
+    // `[[#heading]]` names a place in the note you are already reading: there
+    // is nothing to resolve and nothing to create, so leave it as it was typed
+    if src[body_start] == '#' {
+        return None;
+    }
+    // the FIRST pipe splits target from label, so a label may contain one
+    let pipe = (body_start..close).find(|&k| src[k] == '|');
+    let (target_end, label) = match pipe {
+        // `[[note|]]` has no label to show, so the target is what is drawn —
+        // up to the pipe, and not the pipe itself or the blank after it
+        Some(p) if src[p + 1..close].iter().all(|c| c.is_whitespace()) => (p, (body_start, p)),
+        Some(p) => (p, (p + 1, close)),
+        None => (close, (body_start, close)),
+    };
+    let raw: String = src[body_start..target_end].iter().collect();
+    let target = raw.split('#').next().unwrap_or("").trim().to_string();
+    if target.is_empty() {
+        return None;
+    }
+    Some(Wikilink {
+        start: i,
+        end: close + 2,
+        target,
+        label_start: label.0,
+        label_end: label.1,
+    })
+}
+
+/// Every wikilink on one source line, left to right.
+///
+/// [`wikilink_at`] answers about a single column, because that is the question
+/// styling and `link_at` ask. The linked-mentions scan asks about a whole line
+/// instead, and it must get the same answer: a mention is exactly a link the
+/// reader could have clicked, so both questions go through the one rule set
+/// rather than a second scanner that would drift away from it.
+pub fn wikilinks(line: &str) -> Vec<Wikilink> {
+    let src: Vec<char> = line.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < src.len() {
+        match wikilink_at(&src, i) {
+            // past the whole span, so `[[a]] [[b]]` is two links and the
+            // brackets of the first can never start a third
+            Some(w) => {
+                i = w.end;
+                out.push(w);
+            }
+            None => i += 1,
+        }
+    }
+    out
+}
+
+/// The one normalisation a link target and a note's own names are both put
+/// through before they are compared: trimmed, `#heading` dropped, backslashes
+/// turned into slashes, a trailing `.md` removed, lowercased.
+///
+/// Styling asks "does this resolve?" and resolution asks "which note is it?".
+/// They are answered in different modules and must never disagree, which is
+/// why both of them come through here rather than each rolling its own.
+pub fn link_key(target: &str) -> String {
+    let t = target.split('#').next().unwrap_or("").trim().to_lowercase();
+    let t = t.replace('\\', "/");
+    t.strip_suffix(".md").unwrap_or(&t).trim().to_string()
+}
+
+/// How a link travels through the parts of the app that only speak in strings.
+pub const WIKI_SCHEME: &str = "wikilink:";
+
+/// The same trick for a link the app built itself and already knows the file
+/// behind — the rows of the linked-mentions footer. A name would have to be
+/// resolved all over again, and two notes called `spec` would send the click
+/// to whichever one the resolver prefers rather than the one whose row was
+/// clicked.
+pub const NOTE_SCHEME: &str = "note:";
+
+/// The escape that keeps [`NOTE_SCHEME`] the app's own. A note body can write
+/// `[report](note:/etc/passwd)` as easily as the footer can name a file it
+/// found, and the two must not arrive as the same string: one opens a file the
+/// app already had in hand, the other is a stranger's text. A body href that
+/// would claim either scheme is prefixed on its way in and unwrapped on its
+/// way out, so it reaches the desktop opener spelled exactly as it was typed.
+pub const URL_SCHEME: &str = "url:";
+
+/// What a click or ⌥click landed on: a URL for the desktop, or a wikilink for
+/// the vault. The distinction has to survive, because handing `wikilink:spec`
+/// to `open`/`xdg-open` would be nonsense.
+///
+/// This enum is what [`link_at`] returns in the editor. The reading view cannot
+/// carry it — `render::Rendered::urls` is a `Vec<String>` and
+/// `App::preview_links` a `Vec<(Rect, String)>`, and typing those would mean a
+/// far wider refactor for one bit of information — so the same distinction
+/// travels through them as the [`WIKI_SCHEME`] prefix on the front of the
+/// string. A hand-written `[x](wikilink:y)` therefore opens a note by name;
+/// that is the sane reading of what someone typing it meant, and it can only
+/// name a note the way any other `[[link]]` does. [`NOTE_SCHEME`] is not like
+/// that — it names a file by path, with nothing left to check — so a href out
+/// of a note body is never allowed to claim it; see [`URL_SCHEME`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    Url(String),
+    Wiki(String),
+    /// An exact file, by path. Nothing a reader types produces one of these —
+    /// only the app, for a row it drew from a file it had already found.
+    Note(String),
+}
+
+impl LinkTarget {
+    pub fn href(&self) -> String {
+        match self {
+            // a URL that reads as one of the app's own schemes is wrapped in
+            // `url:` so it comes back out of `parse` as the URL it is, rather
+            // than as an instruction to open a file by path
+            LinkTarget::Url(u) if u.starts_with(NOTE_SCHEME) || u.starts_with(URL_SCHEME) => {
+                format!("{URL_SCHEME}{u}")
+            }
+            LinkTarget::Url(u) => u.clone(),
+            LinkTarget::Wiki(t) => format!("{WIKI_SCHEME}{t}"),
+            LinkTarget::Note(p) => format!("{NOTE_SCHEME}{p}"),
+        }
+    }
+
+    pub fn parse(href: &str) -> LinkTarget {
+        // first, and without looking at what is left: one `url:` was put there
+        // by `href` and unwrapping it is the whole of the job
+        if let Some(u) = href.strip_prefix(URL_SCHEME) {
+            return LinkTarget::Url(u.to_string());
+        }
+        if let Some(t) = href.strip_prefix(WIKI_SCHEME) {
+            return LinkTarget::Wiki(t.to_string());
+        }
+        match href.strip_prefix(NOTE_SCHEME) {
+            Some(p) => LinkTarget::Note(p.to_string()),
+            None => LinkTarget::Url(href.to_string()),
+        }
+    }
+}
+
+/// Which wikilink targets this vault actually has, and whether wikilinks are
+/// on at all.
+///
+/// Process-wide state, the sibling of [`theme`] and here for the same reason:
+/// styling happens deep inside line layout, and threading a vault index down
+/// through `style_line`, `style_block_line`, `view_line` and every one of
+/// their call sites would put a parameter on functions that have no other
+/// reason to know a vault exists at all.
+pub mod links {
+    use std::collections::HashSet;
+    use std::sync::RwLock;
+
+    /// Every name a note in this vault answers to, or `None` when nothing has
+    /// been walked yet. That distinction is the whole point of the `Option`: a
+    /// session that has not scanned must draw links in link colour, not open
+    /// on a page of red.
+    static KNOWN: RwLock<Option<HashSet<String>>> = RwLock::new(None);
+    /// The `wikilinks` setting. Off leaves `[[x]]` as the literal text a
+    /// reader without Obsidian sees.
+    static ON: RwLock<bool> = RwLock::new(true);
+
+    /// Install the set of names the vault answers to. Called after each index
+    /// walk, never per frame.
+    pub fn set_known(keys: HashSet<String>) {
+        if let Ok(mut w) = KNOWN.write() {
+            *w = Some(keys);
+        }
+    }
+
+    pub fn set_enabled(on: bool) {
+        if let Ok(mut w) = ON.write() {
+            *w = on;
+        }
+    }
+
+    pub fn enabled() -> bool {
+        ON.read().map(|b| *b).unwrap_or(true)
+    }
+
+    /// Does `target` name a note we know about? True when nothing has been
+    /// scanned yet, so an un-walked vault is not one long broken link.
+    pub fn resolves(target: &str) -> bool {
+        let key = super::link_key(target);
+        match KNOWN.read() {
+            Ok(k) => match &*k {
+                Some(set) => set.contains(&key),
+                None => true,
+            },
+            Err(_) => true,
+        }
+    }
+
+    /// Put the state back to "nothing walked yet". Only the tests want this —
+    /// the app scans and rescans, it never unscans.
+    #[cfg(test)]
+    pub fn forget() {
+        if let Ok(mut w) = KNOWN.write() {
+            *w = None;
+        }
+    }
+}
+
+/// How a wikilink is drawn: like any other link when it names a note that
+/// exists, and in the danger colour when it does not.
+///
+/// That is the only use of danger outside the delete confirmation, and it
+/// earns its place — a vault carried over from somewhere else is full of links
+/// that used to resolve, and a broken one you cannot see is one you never fix.
+/// Both views call this, so they can never disagree about what is broken.
+///
+/// A broken link is still a link, so it keeps the underline `theme::link()`
+/// carries and only its colour changes. On a page full of dead links out of
+/// another vault, that is the difference between a page of red text and a page
+/// of links, some of which are red.
+pub fn wiki_style(base: Style, target: &str) -> Style {
+    let base = base.patch(theme::link());
+    if links::resolves(target) {
+        base
+    } else {
+        base.patch(theme::danger())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Block awareness
 //
 // The live preview is line-based, but some markdown only means anything across
@@ -1024,6 +1352,10 @@ pub enum BlockKind {
     Table,
     /// A line holding nothing but `![alt](url)`.
     Image,
+    /// The leading `---` … `---` block, fences included. A block rather than a
+    /// run of lines so the whole thing reveals together the way a fence does,
+    /// and so nothing inside it is ever read as markdown.
+    FrontMatter,
 }
 
 /// One block, as an inclusive range of source lines.
@@ -1080,8 +1412,18 @@ pub fn image_line(line: &str) -> Option<(String, String)> {
 
 /// Every block in the buffer, in order and never overlapping.
 pub fn blocks(lines: &[String]) -> Vec<Block> {
+    blocks_from(lines, 0)
+}
+
+/// The same scan, started at line `from`. Front matter is the one construct
+/// markdown itself knows nothing about, so the caller that recognises it hands
+/// us the first line *below* it — which is what stops its closing `---` being
+/// read as a rule and its `tags:` picking up emphasis. Filtering afterwards
+/// would not do: a stray ``` inside the block would still swallow the note.
+/// Line numbers stay absolute, since the loop indexes `lines` directly.
+pub fn blocks_from(lines: &[String], from: usize) -> Vec<Block> {
     let mut out = Vec::new();
-    let mut i = 0;
+    let mut i = from;
     while i < lines.len() {
         // a fence swallows everything up to its close, so a `---` or a table
         // drawn inside a code sample is never mistaken for one
@@ -1142,6 +1484,7 @@ pub fn style_block_line(lines: &[String], block: &Block, row: usize, width: usiz
         BlockKind::Fence => fence_line(src, row == block.start || row == block.end),
         BlockKind::Rule => rule_line(src, width),
         BlockKind::Image => image_fallback_line(src),
+        BlockKind::FrontMatter => front_matter_line(src),
         BlockKind::Table => table_line(&lines[block.start..=block.end], row - block.start, width),
     }
 }
@@ -1182,6 +1525,24 @@ fn fence_line(src: &str, cap: bool) -> RLine {
         .chars()
         .enumerate()
         .skip_while(|(_, ch)| *ch == '`' || *ch == '~' || ch.is_whitespace())
+        .map(|(i, ch)| Cell {
+            ch,
+            style: theme::marker(),
+            src: i,
+        })
+        .collect();
+    done(cells, src)
+}
+
+/// A line of front matter: exactly what was typed, only quiet. Deliberately
+/// not what `rule_line` does — the `---` that opens the block is a fence and
+/// not a thematic break, and stretching it across the page would announce the
+/// metadata rather than get it out of the way. Every char keeps its own source
+/// column, so the block stays as clickable and as editable as any prose.
+fn front_matter_line(src: &str) -> RLine {
+    let cells = src
+        .chars()
+        .enumerate()
         .map(|(i, ch)| Cell {
             ch,
             style: theme::marker(),
@@ -1418,25 +1779,26 @@ mod tests {
     #[test]
     fn link_at_finds_the_url_under_a_source_column() {
         // "see [docs](http://x.y) now" — the whole span, target included
+        let url = |u: &str| Some(LinkTarget::Url(u.to_string()));
         let line = "see [docs](http://x.y) now";
         assert_eq!(link_at(line, 3), None);
-        assert_eq!(link_at(line, 4).as_deref(), Some("http://x.y"));
-        assert_eq!(link_at(line, 6).as_deref(), Some("http://x.y"));
-        assert_eq!(link_at(line, 21).as_deref(), Some("http://x.y"));
+        assert_eq!(link_at(line, 4), url("http://x.y"));
+        assert_eq!(link_at(line, 6), url("http://x.y"));
+        assert_eq!(link_at(line, 21), url("http://x.y"));
         assert_eq!(link_at(line, 22), None);
 
         // a bare URL, without its trailing punctuation
         let bare = "see https://x.y/z. ok";
-        assert_eq!(link_at(bare, 4).as_deref(), Some("https://x.y/z"));
-        assert_eq!(link_at(bare, 16).as_deref(), Some("https://x.y/z"));
+        assert_eq!(link_at(bare, 4), url("https://x.y/z"));
+        assert_eq!(link_at(bare, 16), url("https://x.y/z"));
         assert_eq!(link_at(bare, 17), None);
 
         // images are not links to open
         assert_eq!(link_at("![alt](attachments/a.png)", 8), None);
         // the second of two links on a line
         assert_eq!(
-            link_at("[a](http://a) and [b](http://b)", 20).as_deref(),
-            Some("http://b")
+            link_at("[a](http://a) and [b](http://b)", 20),
+            url("http://b")
         );
         assert_eq!(link_at("plain text", 2), None);
         assert_eq!(link_at("[empty]()", 2), None);
@@ -1551,6 +1913,51 @@ mod tests {
     }
 
     #[test]
+    fn front_matter_is_one_block_and_the_markdown_scan_starts_below_it() {
+        // the caller that recognised the block hands us the line under it, so
+        // the closing `---` never gets a chance to be a rule
+        let lines = buf("---\ntags: a\n---\n\n# Title\n\n---\n");
+        let bs = blocks_from(&lines, 3);
+        assert_eq!(
+            bs,
+            vec![Block {
+                kind: BlockKind::Rule,
+                start: 6,
+                end: 6,
+            }]
+        );
+    }
+
+    #[test]
+    fn blocks_from_reports_absolute_line_numbers() {
+        let lines = buf("---\na: b\n---\n```\ncode\n```\n");
+        let bs = blocks_from(&lines, 3);
+        assert_eq!(bs.len(), 1);
+        assert_eq!((bs[0].start, bs[0].end), (3, 5));
+        // and starting at zero is exactly what `blocks` does
+        assert_eq!(blocks_from(&lines, 0), blocks(&lines));
+    }
+
+    #[test]
+    fn a_front_matter_fence_is_drawn_as_typed_not_as_a_horizontal_rule() {
+        let lines = buf("---\ntags: work\n---\n");
+        let block = Block {
+            kind: BlockKind::FrontMatter,
+            start: 0,
+            end: 2,
+        };
+        // the fence keeps its three dashes rather than being stretched over
+        // the page the way `rule_line` would stretch a thematic break
+        let l = style_block_line(&lines, &block, 0, 80);
+        assert_eq!(text(&l), "---");
+        // and `tags:` is shown verbatim, never picked up as markdown
+        let l = style_block_line(&lines, &block, 1, 80);
+        assert_eq!(text(&l), "tags: work");
+        assert_eq!(l.one_row().display_to_source(5), 5);
+        assert!(l.cells.iter().all(|c| c.style == theme::marker()));
+    }
+
+    #[test]
     fn rules_take_any_of_the_three_markers() {
         assert!(is_rule("---"));
         assert!(is_rule("  ***  "));
@@ -1660,5 +2067,188 @@ mod tests {
             .map(|s| s.content.to_string())
             .collect();
         assert_eq!(rev, "el");
+    }
+
+    /// The known-target set is process-wide and `cargo test` runs its tests in
+    /// parallel, so the ones that care what colour a wikilink is drawn in take
+    /// turns here. Without it, the test that installs a set of known names
+    /// races the ones that assume nothing has been scanned, and a plain link
+    /// comes out in the broken colour for whichever of them lost.
+    fn colours() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // a failed assertion poisons the lock; the next test still wants its turn
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn a_wikilink_shows_its_target_as_the_text() {
+        let _turn = colours();
+        // "see [[note]] now" — the brackets go, the target stays, and every
+        // drawn character still knows the column it came from
+        let l = style_line("see [[note]] now");
+        assert_eq!(text(&l), "see note now");
+        let row = l.one_row();
+        assert_eq!(row.display_to_source(4), 6); // the "n" of note
+        assert_eq!(l.cells[4].style.fg, theme::link().fg);
+    }
+
+    #[test]
+    fn a_piped_wikilink_shows_only_its_label() {
+        let src = "[[stories/story-matrix|the matrix]]";
+        let l = style_line(src);
+        assert_eq!(text(&l), "the matrix");
+        // the first drawn cell is the label's own column, not column 0: a
+        // click there has to land inside the label, not on the target
+        assert_eq!(l.one_row().display_to_source(0), src.find("the").unwrap());
+        let w = wikilink_at(&src.chars().collect::<Vec<_>>(), 0).unwrap();
+        assert_eq!(w.target, "stories/story-matrix");
+    }
+
+    #[test]
+    fn a_pipe_with_no_label_after_it_draws_the_target_and_not_the_pipe() {
+        // `[[note|]]` is a label someone deleted, or one they have not typed
+        // yet; the target is what is drawn, and a trailing `|` is punctuation
+        // from the syntax rather than something the note says
+        assert_eq!(text(&style_line("[[note|]]")), "note");
+        assert_eq!(text(&style_line("[[note| ]]")), "note");
+        let chars: Vec<char> = "[[note|]]".chars().collect();
+        let w = wikilink_at(&chars, 0).unwrap();
+        assert_eq!((w.label_start, w.label_end), (2, 6));
+    }
+
+    #[test]
+    fn a_heading_suffix_is_shown_but_is_not_part_of_the_target() {
+        let l = style_line("[[note#Method]]");
+        // Obsidian shows the whole thing; only the target drops the heading
+        assert_eq!(text(&l), "note#Method");
+        let chars: Vec<char> = "[[note#Method]]".chars().collect();
+        assert_eq!(wikilink_at(&chars, 0).unwrap().target, "note");
+    }
+
+    #[test]
+    fn unmatched_or_escaped_brackets_stay_literal_text() {
+        for src in [
+            "[[unclosed",
+            "[[a] b]]",
+            "\\[[escaped]]",
+            "![[embed.png]]",
+            "[[ ]]",
+            "[[#heading]]",
+            "[x]",
+        ] {
+            assert_eq!(text(&style_line(src)), src, "{src}");
+        }
+    }
+
+    #[test]
+    fn two_wikilinks_on_one_line_are_both_links() {
+        let _turn = colours();
+        let l = style_line("[[a]] and [[b|bee]]");
+        assert_eq!(text(&l), "a and bee");
+        assert_eq!(l.cells[0].style.fg, theme::link().fg);
+        assert_eq!(l.cells[6].style.fg, theme::link().fg);
+        // the space between them is plain
+        assert_eq!(l.cells[1].style.fg, None);
+    }
+
+    #[test]
+    fn a_broken_wikilink_is_drawn_in_the_danger_colour() {
+        // both halves live in one test on purpose: the known-target set is
+        // process-wide, and `cargo test` runs these in parallel, so splitting
+        // the assertions would let one of them race the other's set-up
+        let _turn = colours();
+        let mut known = std::collections::HashSet::new();
+        known.insert("real".to_string());
+        links::set_known(known);
+
+        let ok = style_line("[[real]]");
+        assert_eq!(ok.cells[0].style.fg, theme::link().fg);
+        let broken = style_line("[[gone]]");
+        assert_eq!(broken.cells[0].style.fg, theme::danger().fg);
+        // a name is matched without its case or its extension
+        assert_eq!(
+            style_line("[[Real.md]]").cells[0].style.fg,
+            theme::link().fg
+        );
+
+        links::forget();
+        // nothing scanned means nothing is broken yet
+        assert_eq!(style_line("[[gone]]").cells[0].style.fg, theme::link().fg);
+    }
+
+    #[test]
+    fn link_at_tells_a_wikilink_from_a_url() {
+        let line = "see [[note|label]] and [d](http://x.y)";
+        let wiki = Some(LinkTarget::Wiki("note".to_string()));
+        assert_eq!(link_at(line, 3), None);
+        assert_eq!(link_at(line, 4), wiki); // the opening bracket
+        assert_eq!(link_at(line, 12), wiki); // inside the label
+        assert_eq!(link_at(line, 17), wiki); // the last `]`
+        assert_eq!(link_at(line, 18), None);
+        assert_eq!(
+            link_at(line, 24),
+            Some(LinkTarget::Url("http://x.y".to_string()))
+        );
+        assert_eq!(link_at(line, 99), None);
+    }
+
+    #[test]
+    fn every_wikilink_on_a_line_is_found_once_and_in_order() {
+        let found = wikilinks("see [[a]] and [[b|bee]] and [[unclosed");
+        let targets: Vec<&str> = found.iter().map(|w| w.target.as_str()).collect();
+        assert_eq!(targets, vec!["a", "b"]);
+        // and the spans are the whole `[[…]]`, so nothing is scanned twice
+        assert_eq!(&"see [[a]] and [[b|bee]] and [[unclosed"[found[0].start..found[0].end], "[[a]]");
+        assert!(wikilinks("nothing here at all").is_empty());
+    }
+
+    #[test]
+    fn a_wikilink_href_round_trips_through_the_scheme() {
+        let w = LinkTarget::Wiki("a/b".to_string());
+        assert_eq!(w.href(), "wikilink:a/b");
+        assert_eq!(LinkTarget::parse(&w.href()), w);
+        // and a row the app drew itself names its file outright, so nothing
+        // has to be resolved a second time when it is clicked
+        let n = LinkTarget::Note("/vault/meta.md".to_string());
+        assert_eq!(n.href(), "note:/vault/meta.md");
+        assert_eq!(LinkTarget::parse(&n.href()), n);
+        assert_eq!(
+            LinkTarget::parse("https://x.y"),
+            LinkTarget::Url("https://x.y".to_string())
+        );
+    }
+
+    #[test]
+    fn a_url_that_spells_out_the_apps_own_scheme_stays_a_url() {
+        // `[report](note:/etc/passwd)` is a note body, not the app naming a
+        // file it found: it must come back out as the URL it is, spelled
+        // exactly as it was typed, and go to the desktop opener like any other
+        for u in ["note:/etc/passwd", "url:note:/etc/passwd", "url:x"] {
+            let url = LinkTarget::Url(u.to_string());
+            assert_eq!(LinkTarget::parse(&url.href()), url, "{u}");
+        }
+        // and the app's own row is still a file, by path
+        assert_eq!(
+            LinkTarget::parse("note:/vault/meta.md"),
+            LinkTarget::Note("/vault/meta.md".to_string())
+        );
+    }
+
+    #[test]
+    fn link_key_drops_the_heading_the_extension_and_the_case() {
+        assert_eq!(
+            link_key("Stories/Story-Matrix.md#Method"),
+            link_key("stories/story-matrix")
+        );
+        assert_eq!(link_key(" A\\B "), "a/b");
+    }
+
+    #[test]
+    fn code_states_both_halves_so_a_light_terminal_is_not_black_on_black() {
+        // prose leaves its foreground to the terminal on purpose; code paints
+        // its own ground and so cannot
+        let c = theme::code();
+        assert!(c.bg.is_some());
+        assert!(c.fg.is_some(), "code without a foreground is unreadable on a terminal whose ink matches code_bg");
     }
 }

@@ -48,6 +48,20 @@ pub enum PreviewClick {
     Edit,
 }
 
+/// What the editor does with a note's YAML front matter. The reading view
+/// drops the block in all three: it is metadata, and reading is for the prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FrontMatter {
+    /// Visible and editable, drawn quiet, and never read as markdown.
+    #[default]
+    Dim,
+    /// Styled like any other markdown — `---` rules and all.
+    Show,
+    /// Not drawn at all until the cursor moves into it. The text is still in
+    /// the file; this is only about what the page spends rows on.
+    Hide,
+}
+
 /// Panel and overlay border treatment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BorderStyle {
@@ -71,6 +85,10 @@ pub enum StatusItem {
     Keys,
     /// Transient messages — saves, failures, confirmations.
     Message,
+    /// How many top-level keys the note's front matter declares. Shown only
+    /// when there is front matter at all, so it costs nothing on a note
+    /// without any.
+    Properties,
 }
 
 impl StatusItem {
@@ -81,6 +99,7 @@ impl StatusItem {
             "mode" => StatusItem::Mode,
             "keys" | "hints" => StatusItem::Keys,
             "message" | "status" => StatusItem::Message,
+            "properties" | "props" => StatusItem::Properties,
             _ => return None,
         })
     }
@@ -92,6 +111,7 @@ impl StatusItem {
             StatusItem::Mode => "mode",
             StatusItem::Keys => "keys",
             StatusItem::Message => "message",
+            StatusItem::Properties => "properties",
         }
     }
 }
@@ -119,8 +139,21 @@ pub struct Config {
     pub rename_files: bool,
     pub table_style: TableStyle,
     pub preview_click: PreviewClick,
+    /// What the editor does with a note's front matter.
+    pub front_matter: FrontMatter,
+    /// Whether `[[wikilinks]]` are links. Off leaves them as the literal text
+    /// a reader without Obsidian sees.
+    pub wikilinks: bool,
+    /// Whether the reading view lists the notes that link to this one. It
+    /// costs a pass over every note body, so it is a setting and not simply
+    /// how the app behaves.
+    pub linked_mentions: bool,
     /// Whether quick-open walks subfolders or offers only the current folder.
     pub quick_open_recursive: bool,
+    /// Whether ^O opens on the folder tree rather than the ranked list. Which
+    /// folders are unfolded is deliberately not settable and never persisted:
+    /// that is where you are in a session, not something to configure.
+    pub quick_open_browse: bool,
     /// Folders quick-open searches besides the notes dir — another vault, a
     /// work folder. Empty by default.
     pub quick_open_dirs: Vec<PathBuf>,
@@ -148,7 +181,11 @@ impl Default for Config {
             rename_files: true,
             table_style: TableStyle::Auto,
             preview_click: PreviewClick::Select,
+            front_matter: FrontMatter::Dim,
+            wikilinks: true,
+            linked_mentions: true,
             quick_open_recursive: true,
+            quick_open_browse: false,
             quick_open_dirs: Vec::new(),
             keys: Keymap::default(),
         }
@@ -205,6 +242,7 @@ impl Config {
     pub fn apply(&self) {
         theme::set_palette(self.palette);
         theme::set_bold_headings(self.bold_headings);
+        crate::md::links::set_enabled(self.wikilinks);
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -271,10 +309,16 @@ impl Config {
             c.status_bar_items = items;
         }
         c.rename_files = flag(text, "rename_files", c.rename_files);
+        c.wikilinks = flag(text, "wikilinks", c.wikilinks);
         c.quick_open_recursive = match value(text, "quick_open").as_deref() {
             Some("folder") => false,
             Some("recursive") => true,
             _ => c.quick_open_recursive,
+        };
+        c.quick_open_browse = match value(text, "quick_open_mode").as_deref() {
+            Some("browse") | Some("tree") => true,
+            Some("search") | Some("list") => false,
+            _ => c.quick_open_browse,
         };
 
         if let Some(v) = value(text, "autosave_ms").and_then(|v| v.parse::<u64>().ok()) {
@@ -305,6 +349,13 @@ impl Config {
             Some("edit") => PreviewClick::Edit,
             Some("select") => PreviewClick::Select,
             _ => c.preview_click,
+        };
+        c.linked_mentions = flag(text, "linked_mentions", c.linked_mentions);
+        c.front_matter = match value(text, "front_matter").as_deref() {
+            Some("show") => FrontMatter::Show,
+            Some("hide") => FrontMatter::Hide,
+            Some("dim") => FrontMatter::Dim,
+            _ => c.front_matter,
         };
         c
     }
@@ -391,14 +442,25 @@ impl Config {
                 .map(|i| i.word())
                 .collect::<Vec<_>>()
                 .join(", "),
-            "path · name · mode · keys · message, in order",
+            "path · name · mode · properties · keys · message, in order",
         );
 
         d.section("Colours");
-        d.note("#rrggbb · #rgb · red, brightblue · default");
+        d.note("#rrggbb · #rgb · red, brightblue · default · theme");
+        // a colour the user has not touched is written as the word `theme`,
+        // not as the hex the theme happens to give it today. Spelling out all
+        // ten pinned the dark palette into every settings file ever written,
+        // and `theme: light` then changed nothing — the overrides underneath
+        // put every colour back. The key stays in the document so it is still
+        // discoverable; only the value defers.
+        let base = theme::base(self.theme);
         for (key, hint) in COLOUR_HINTS {
-            let c = self.palette.get(key).unwrap_or(theme::DARK.accent);
-            d.row(key, theme::color_to_string(c), hint);
+            let mine = self.palette.get(key);
+            let value = match (mine, base.get(key)) {
+                (Some(c), Some(b)) if c != b => theme::color_to_string(c),
+                _ => "theme".to_string(),
+            };
+            d.row(key, value, hint);
         }
 
         d.section("Editing");
@@ -408,6 +470,17 @@ impl Config {
             "rename_files",
             yn(self.rename_files),
             "filename follows title",
+        );
+        // an editor setting: the reading view has no choice to make, it never
+        // shows front matter whatever this says
+        d.row(
+            "front_matter",
+            match self.front_matter {
+                FrontMatter::Dim => "dim",
+                FrontMatter::Show => "show",
+                FrontMatter::Hide => "hide",
+            },
+            "dim · show · hide",
         );
 
         d.section("Reading");
@@ -430,6 +503,12 @@ impl Config {
             },
             "select · edit",
         );
+        d.row("wikilinks", yn(self.wikilinks), "[[links]] open notes");
+        d.row(
+            "linked_mentions",
+            yn(self.linked_mentions),
+            "notes that link here, at the foot",
+        );
         d.row(
             "quick_open",
             if self.quick_open_recursive {
@@ -438,6 +517,15 @@ impl Config {
                 "folder"
             },
             "recursive · folder",
+        );
+        d.row(
+            "quick_open_mode",
+            if self.quick_open_browse {
+                "browse"
+            } else {
+                "search"
+            },
+            "search · browse",
         );
         if self.quick_open_dirs.is_empty() {
             d.row(
@@ -500,15 +588,16 @@ fn setting_keys(text: &str) -> std::collections::BTreeSet<String> {
 }
 
 /// The one-line hint beside each colour, in the order the file lists them.
-const COLOUR_HINTS: [(&str, &str); 9] = [
+const COLOUR_HINTS: [(&str, &str); 10] = [
     ("accent", "h1, ticked boxes, the status bar"),
     ("bright", "the step that leads"),
     ("grey", "h2 and other structure"),
     ("dim", "markers, rules, quotes"),
     ("link", "links, which also underline"),
     ("code_bg", "behind code"),
+    ("code_fg", "and the code on it"),
     ("border", "panel borders"),
-    ("danger", "the delete confirmation"),
+    ("danger", "the delete prompt, and a broken [[link]]"),
     ("ground", "under a highlight"),
 ];
 
@@ -712,7 +801,15 @@ mod tests {
             rename_files: false,
             table_style: TableStyle::Cards,
             preview_click: PreviewClick::Edit,
+            front_matter: FrontMatter::Hide,
+            status_bar_items: vec![
+                StatusItem::Name,
+                StatusItem::Properties,
+                StatusItem::Message,
+            ],
+            wikilinks: false,
             quick_open_recursive: false,
+            quick_open_browse: true,
             quick_open_dirs: vec![PathBuf::from("/vault"), PathBuf::from("/work")],
             ..Default::default()
         };
@@ -720,6 +817,81 @@ mod tests {
         if std::env::var_os("TINYNOTE_DIR").is_none() {
             assert_eq!(back, c);
         }
+    }
+
+    #[test]
+    fn quick_open_can_be_told_to_open_on_the_tree_instead_of_the_list() {
+        assert!(!Config::default().quick_open_browse);
+        assert!(Config::from_str("- quick_open_mode: browse\n").quick_open_browse);
+        assert!(Config::from_str("- quick_open_mode: tree\n").quick_open_browse);
+        assert!(!Config::from_str("- quick_open_mode: search\n").quick_open_browse);
+        // and the choice survives being written out and read back, which is
+        // what `covers_every_setting` leans on
+        let c = Config {
+            quick_open_browse: true,
+            ..Default::default()
+        };
+        assert!(Config::from_str(&c.to_document()).quick_open_browse);
+    }
+
+    #[test]
+    fn linked_mentions_is_on_by_default_and_can_be_turned_off() {
+        assert!(Config::default().linked_mentions);
+        assert!(!Config::from_str("- linked_mentions: no\n").linked_mentions);
+        // and off survives being written out and read back, which is what
+        // `covers_every_setting` leans on
+        let c = Config {
+            linked_mentions: false,
+            ..Default::default()
+        };
+        assert!(!Config::from_str(&c.to_document()).linked_mentions);
+    }
+
+    #[test]
+    fn wikilinks_can_be_turned_off() {
+        assert!(Config::default().wikilinks);
+        assert!(!Config::from_str("- wikilinks: no\n").wikilinks);
+        // and the setting survives being written out and read back, which is
+        // what `covers_every_setting` leans on
+        let c = Config {
+            wikilinks: false,
+            ..Default::default()
+        };
+        assert!(!Config::from_str(&c.to_document()).wikilinks);
+    }
+
+    #[test]
+    fn front_matter_takes_dim_show_or_hide_and_defaults_to_dim() {
+        assert_eq!(Config::default().front_matter, FrontMatter::Dim);
+        let read = |v: &str| Config::from_str(&format!("- front_matter: {v}\n")).front_matter;
+        assert_eq!(read("show"), FrontMatter::Show);
+        assert_eq!(read("hide"), FrontMatter::Hide);
+        assert_eq!(read("dim"), FrontMatter::Dim);
+        // a value nobody recognises leaves the default standing rather than
+        // picking one of the three at random
+        assert_eq!(read("sometimes"), FrontMatter::Dim);
+        assert_eq!(
+            Config::from_str("nothing set\n").front_matter,
+            FrontMatter::Dim
+        );
+    }
+
+    #[test]
+    fn properties_is_a_status_item_a_user_has_to_ask_for() {
+        assert!(!Config::default()
+            .status_bar_items
+            .contains(&StatusItem::Properties));
+        let c = Config::from_str("- status_bar_items: path, properties, keys\n");
+        assert_eq!(
+            c.status_bar_items,
+            vec![StatusItem::Path, StatusItem::Properties, StatusItem::Keys]
+        );
+        // and it survives being written back out
+        assert!(c.to_document().contains("properties"));
+        assert_eq!(
+            Config::from_str(&c.to_document()).status_bar_items,
+            c.status_bar_items
+        );
     }
 
     #[test]
@@ -894,5 +1066,36 @@ mod tests {
             "attachments/a.png"
         );
         assert_eq!(c.link_for(Path::new("/other/a.png")), "/other/a.png");
+    }
+
+    #[test]
+    fn an_untouched_colour_is_written_as_the_word_theme() {
+        let c = Config::default();
+        let doc = c.to_document();
+        assert!(doc.contains("- code_bg: theme"));
+        // and the word survives the round trip as the theme's own value
+        assert_eq!(Config::from_str(&doc).palette.code_bg, theme::DARK.code_bg);
+    }
+
+    #[test]
+    fn a_pinned_colour_is_written_as_its_hex_and_only_that_one_is() {
+        let mut c = Config::default();
+        c.palette.accent = theme::parse_color("#00ff88").unwrap();
+        let doc = c.to_document();
+        assert!(doc.contains("- accent: #00ff88"));
+        assert!(doc.contains("- dim: theme"));
+    }
+
+    #[test]
+    fn switching_the_theme_moves_every_colour_the_user_has_not_pinned() {
+        // the bug this guards: a settings file that spelled out all ten
+        // colours made `theme: light` inert, because the dark hexes below it
+        // put the dark palette straight back
+        let doc = Config::default().to_document();
+        let light = doc.replace("- theme: dark", "- theme: light");
+        let c = Config::from_str(&light);
+        assert_eq!(c.theme, Mode::Light);
+        assert_eq!(c.palette.code_bg, theme::LIGHT.code_bg);
+        assert_eq!(c.palette.accent, theme::LIGHT.accent);
     }
 }

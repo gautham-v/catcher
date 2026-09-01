@@ -29,6 +29,7 @@ pub enum Action {
     Redo,
     DeleteNote,
     RenameFile,
+    FollowLink,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -89,6 +90,15 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_rename",
         None,
         "rename the file on disk",
+    ),
+    // alt+enter and not plain enter, because enter has to keep inserting a
+    // newline; and not ctrl+enter, because plenty of terminals do not report
+    // that as anything distinct from enter. `key_follow:` overrides it.
+    (
+        Action::FollowLink,
+        "key_follow",
+        Some("alt+enter"),
+        "open the [[wikilink]] under the cursor",
     ),
 ];
 
@@ -227,8 +237,11 @@ fn key_code(text: &str) -> Option<KeyCode> {
     }
     Some(match lower.as_str() {
         "esc" | "escape" => KeyCode::Esc,
-        "enter" | "return" => KeyCode::Enter,
-        "tab" => KeyCode::Tab,
+        // the glyphs are here so `label` round-trips back through `parse`:
+        // the settings document is generated from the labels, and a key that
+        // could be written but not read would be silently lost on the rewrite
+        "enter" | "return" | "⏎" | "↵" => KeyCode::Enter,
+        "tab" | "⇥" => KeyCode::Tab,
         "space" => KeyCode::Char(' '),
         _ => {
             let mut chars = t.chars();

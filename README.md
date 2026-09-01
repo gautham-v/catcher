@@ -28,9 +28,17 @@ One note on screen at a time. **^K** opens the palette — fuzzy search across e
 
 **^O** opens a note. It is the palette's twin, and the difference is what it ranks by: notes you opened most recently first, then the most recently edited, and it walks *subfolders* — so pointing tinynote at an Obsidian vault still lets you jump straight to `applications/log.md` from wherever you are. Type to fuzzy-search titles and folder paths.
 
+**Tab** flips **^O** between the ranked list and a folder tree — the same index, the other way of looking at it. The tree opens on the note you have open, with the folders above it unfolded, so the first thing it tells you is where you are; **→** unfolds a folder or opens a note, **←** folds one or steps out to the folder it lives in, and a closed folder says how many notes are beneath it. Whatever you have typed comes along either way, so `log` and then tab shows you *where* the log notes live. `quick_open_mode: browse` in the settings makes the tree what **^O** opens on.
+
 It reaches past your notes dir three ways. A note **you have opened before** is always offered, wherever it lives — that is what the recents list is for, and it survives restarts. Folders listed in `quick_open_dirs` are searched every time. And typing a **path** — `~/vault/spec.md`, or `~/vault/spec` — opens that file directly, which is the escape hatch for a note tinynote has never been shown. Opening a note from another folder pulls it into the session; it saves back where it lives, and is never renamed.
 
 The editor is a **live preview**, Obsidian-style: headings, emphasis, `==highlight==`, code, links, quotes, bullets and `☐`/`✓` checkboxes are styled as you type, and the line the cursor is on shows its raw markdown so it's always editable. Code fences, tables, rules and images are drawn whole and flip back to source when the cursor lands inside. Long lines soft-wrap; nothing scrolls sideways. **^P** flips to the full rendered page, with images drawn inline in terminals that support graphics (Ghostty, kitty, iTerm2).
+
+`[[wikilinks]]` work the way an Obsidian vault expects. `[[spec]]` finds the note by filename, title, or the tail of its path — `[[stories/story-matrix]]` — and `[[spec|the spec]]` draws the label instead. `⌥⏎` on one follows it, and so does `^`-click or `⌥`-click; a link that names no note is drawn in the danger colour, and following it offers to create the note, in the folder the target named. `[[#heading]]`, `![[image.png]]` and `\[[escaped]]` are left alone, and so is a link inside a code fence. `wikilinks: no` leaves them all as the literal text a reader without Obsidian sees.
+
+A `---` front matter block is metadata rather than prose: the reading view never shows it, and `front_matter` in the settings says what the editor does with it — `dim` it, `show` it styled like any other markdown, or `hide` it until the cursor moves in. Adding `properties` to `status_bar_items` puts a count of the keys it declares in the bottom line, on the notes that have any.
+
+At the foot of the reading view is **linked mentions**: the notes that link to the one you are reading, each with the sentence the link sits in, most recently edited first. A note that links here several times is one row with a `×3` beside it, and every row is itself a link — follow it to go there. A note nothing points at gets no footer at all, not even a rule. It is a scan and not a stored graph — nothing is kept beside your notes — so it runs on a thread and the footer appears a moment after the page does. `linked_mentions: no` turns it off, and so does turning `wikilinks` off, since there would be nothing to count.
 
 In the reading view a wide table is not squeezed into columns two characters across. Its columns keep a readable width and wrap inside it, and the table itself pans sideways — **←** and **→**, or a sideways scroll — with a `›` on the header row where it carries on. Nothing is cut. `table_style` in the settings picks the rule: `auto` (leave a table that fits alone, scroll one that doesn't), `scroll`, `fit`, `wrap`, or `cards` for one labelled block per row.
 
@@ -67,10 +75,12 @@ Pointing tinynote at a file or folder roots that one session there without touch
 | `^S` | Save now |
 | `^Z` / `^Y` | Undo / redo |
 | `^C` `^X` `^V` | Copy / cut / paste |
+| `⌥⏎` | Follow the `[[wikilink]]` under the cursor |
+| `Tab` | In **^O**: flip between the ranked list and the folder tree |
 | `Esc` | Close palette, cancel, leave preview, clear selection |
 | `^Q` | Quit |
 
-Every key in that table is settable. The settings note has a `## Keys` section with one line per action — `key_palette: ^K`, `key_open: ^O` — and takes `^K`, `cmd+k`, `alt+k`, `f5`, or `none` to unbind. `^K` answers to either ctrl or cmd, so the same file works on a Mac and on Linux; spell out `cmd+` or `ctrl+` when you want one exactly. **Delete note** and **Rename file** ship unbound and are yours to claim. The palette shows each command's current key beside it, and so does the **^G** card — which is itself searchable: type `save` on it and only the saving rows stay. Esc closes it. The palette itself is monochrome — it is chrome over the note, and a hue there would compete with the one the note spends on its headings.
+Every key in that table but `Tab` is settable — tab means “the other view of this” and is not a command. The settings note has a `## Keys` section with one line per action — `key_palette: ^K`, `key_open: ^O` — and takes `^K`, `cmd+k`, `alt+k`, `f5`, or `none` to unbind. `^K` answers to either ctrl or cmd, so the same file works on a Mac and on Linux; spell out `cmd+` or `ctrl+` when you want one exactly. **Delete note** and **Rename file** ship unbound and are yours to claim. The palette shows each command's current key beside it, and so does the **^G** card — which is itself searchable: type `save` on it and only the saving rows stay. Esc closes it. The palette itself is monochrome — it is chrome over the note, and a hue there would compete with the one the note spends on its headings.
 
 The palette's search box takes the Mac editing keys too: `⌘⌫` clears it, `⌥⌫` deletes a word.
 
@@ -95,18 +105,22 @@ Every setting is a `- key: value` line with a one-line hint after it. The file i
 | --- | --- |
 | `notes_dir`, `attachments_dir` | where notes and pasted images live (`~/` expands; `TINYNOTE_DIR` overrides the first) |
 | `theme` | `dark` or `light` — which way your terminal's own background runs |
-| `accent`, `bright`, `grey`, `dim`, `link`, `code_bg`, `border`, `danger`, `ground` | the nine colours, as `#rrggbb`, `#rgb`, an ANSI name, or `default` |
+| `accent`, `bright`, `grey`, `dim`, `link`, `code_bg`, `code_fg`, `border`, `danger`, `ground` | the ten colours, as `#rrggbb`, `#rgb`, an ANSI name, `default`, or `theme` to leave it to the theme |
 | `page_width` | widest the note column is drawn, in columns, or `full` |
 | `borders` | `rounded`, `square`, `none` |
 | `bold_headings`, `status_bar`, `key_hints` | chrome, on or off |
-| `status_bar_items` | what the bottom line shows, in order: `path`, `name`, `mode`, `keys`, `message` |
+| `status_bar_items` | what the bottom line shows, in order: `path`, `name`, `mode`, `properties`, `keys`, `message` |
 | `autosave_ms`, `tab_width` | how soon a note saves, how far `tab` goes |
 | `rename_files` | whether a filename follows its note's title |
+| `front_matter` | `dim`, `show`, `hide` — what the editor does with a `---` block (the reading view never shows one) |
 | `table_style` | `auto`, `scroll`, `fit`, `wrap`, `cards` — what happens to a table wider than the page |
 | `preview_click` | `select` or `edit` — what a click in the reading view does |
+| `wikilinks` | whether `[[links]]` open notes, or stay the literal text |
+| `linked_mentions` | the notes that link here, at the foot of the reading view |
 | `quick_open` | `recursive` or `folder` — how far **^O** looks |
+| `quick_open_mode` | `search` or `browse` — which half of **^O** it opens on |
 | `quick_open_dirs` | extra folders **^O** searches; repeat the line, or separate with commas |
-| `key_palette`, `key_open`, `key_new`, `key_settings`, `key_preview`, `key_save`, `key_shortcuts`, `key_quit`, `key_copy`, `key_cut`, `key_paste`, `key_undo`, `key_redo`, `key_delete`, `key_rename` | one key each — `^K`, `cmd+k`, `alt+k`, `f5`, or `none` |
+| `key_palette`, `key_open`, `key_new`, `key_settings`, `key_preview`, `key_save`, `key_shortcuts`, `key_quit`, `key_copy`, `key_cut`, `key_paste`, `key_undo`, `key_redo`, `key_delete`, `key_rename`, `key_follow` | one key each — `^K`, `cmd+k`, `alt+k`, `f5`, or `none` |
 
 An existing `config.toml` is read once, to seed `settings.md`, and then left alone.
 
@@ -118,7 +132,7 @@ cargo test
 cargo clippy
 ```
 
-Rust, ratatui + crossterm. `src/editor.rs` is the text buffer, `src/md.rs` the live-preview styling and click mapping, `src/render.rs` the full-page preview, `src/images.rs` inline images, `src/cli.rs` argument parsing, `src/config.rs` the settings note, `src/keys.rs` the bindings, `src/index.rs` the quick-open index and recents, `src/clipboard.rs` copy and paste. Every colour in the app lives in one place: the `theme` module at the top of `src/md.rs`.
+Rust, ratatui + crossterm. `src/editor.rs` is the text buffer, `src/md.rs` the live-preview styling and click mapping, `src/render.rs` the full-page preview, `src/images.rs` inline images, `src/cli.rs` argument parsing, `src/config.rs` the settings note, `src/keys.rs` the bindings, `src/index.rs` the quick-open index and recents, `src/tree.rs` the folder tree behind **^O**'s browse mode, `src/mentions.rs` the linked-mentions scan, `src/clipboard.rs` copy and paste. Every colour in the app lives in one place: the `theme` module at the top of `src/md.rs`.
 
 ## License
 

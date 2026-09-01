@@ -64,31 +64,69 @@ fn is_rule(line: &str) -> bool {
     t.len() >= 3 && t.chars().all(|c| matches!(c, '-' | '*' | '_' | '='))
 }
 
+/// The index of the line that *closes* a leading `---` … `---` block, both
+/// fences counted as part of it. `None` when the note doesn't open with a
+/// fence, or opens with one that never closes — an unterminated fence was
+/// never front matter, it was a rule and then some prose.
+///
+/// It takes an iterator of lines rather than a `&str` so the editor, which
+/// already holds the buffer split into a `Vec<String>`, can ask without
+/// joining it back up; and so `content.lines()` deals with CRLF for free,
+/// since `str::lines` drops the `\r` on its own.
+///
+/// The close is `starts_with("---")` and not `== "---"` because that is what
+/// the older scan did: a `----` closes a block, and tightening it now would
+/// silently retitle notes people already have on disk.
+pub fn front_matter_end<'a>(mut lines: impl Iterator<Item = &'a str>) -> Option<usize> {
+    if lines.next()? != "---" {
+        return None;
+    }
+    lines.position(|l| l.starts_with("---")).map(|i| i + 1)
+}
+
+/// The byte range a leading front matter block occupies, fences included, so
+/// a caller can slice it off and know exactly how much it cut.
+pub fn front_matter_range(content: &str) -> Option<std::ops::Range<usize>> {
+    let last = front_matter_end(content.lines())?;
+    // split_inclusive, not lines(): each line's own ending has to be counted
+    // as it is in the file, `\r\n` included, or the body starts a byte early
+    // on every line of a CRLF note
+    let end = content
+        .split_inclusive('\n')
+        .take(last + 1)
+        .map(str::len)
+        .sum();
+    Some(0..end)
+}
+
+/// How many top-level keys the front matter declares — `2 properties`, the
+/// thing the status bar can be asked to show. Zero when there is no block.
+///
+/// An indented line belongs to the value above it (a list item, a nested map)
+/// and a line with no colon is not a key at all, so neither is counted; a
+/// comment line isn't a key either.
+pub fn property_count(content: &str) -> usize {
+    let Some(last) = front_matter_end(content.lines()) else {
+        return 0;
+    };
+    content
+        .lines()
+        .take(last)
+        .skip(1)
+        .filter(|l| !l.starts_with([' ', '\t', '-', '#']))
+        .filter_map(|l| l.split_once(':'))
+        .filter(|(k, _)| !k.trim().is_empty())
+        .count()
+}
+
 /// Everything after a leading `---` … `---` block, or the whole thing when
 /// there isn't one. Only a `---` on the very first line opens front matter; a
 /// horizontal rule further down is just a rule.
 pub fn body_after_front_matter(content: &str) -> &str {
-    let rest = match content.strip_prefix("---\n") {
-        Some(rest) => rest,
-        None => match content.strip_prefix("---\r\n") {
-            Some(rest) => rest,
-            None => return content,
-        },
-    };
-    // the closing fence, as its own line
-    for (i, line) in rest.match_indices('\n') {
-        let _ = line;
-        let after = &rest[i + 1..];
-        if after.starts_with("---") {
-            let end = after
-                .find('\n')
-                .map(|n| i + 1 + n + 1)
-                .unwrap_or(rest.len());
-            return &rest[end..];
-        }
+    match front_matter_range(content) {
+        Some(r) => &content[r.end..],
+        None => content,
     }
-    // unterminated: it was not front matter after all
-    content
 }
 
 pub fn slug(title: &str) -> String {
@@ -184,9 +222,9 @@ pub fn load_one(path: &Path) -> Result<Note> {
     })
 }
 
-/// A fresh path for a new note, never clobbering an existing file.
-pub fn unique_path(dir: &Path, title: &str, keep: Option<&Path>) -> PathBuf {
-    let base = slug(title);
+/// The first `base.md`, `base-2.md`, `base-3.md` … that is free, treating
+/// `keep` as free so a note can be "renamed" to the name it already has.
+fn free_path(dir: &Path, base: &str, keep: Option<&Path>) -> PathBuf {
     let mut n = 1;
     loop {
         let name = if n == 1 {
@@ -200,6 +238,11 @@ pub fn unique_path(dir: &Path, title: &str, keep: Option<&Path>) -> PathBuf {
         }
         n += 1;
     }
+}
+
+/// A fresh path for a new note, never clobbering an existing file.
+pub fn unique_path(dir: &Path, title: &str, keep: Option<&Path>) -> PathBuf {
+    free_path(dir, &slug(title), keep)
 }
 
 /// Write the note's content, and rename the file to follow its title *only*
@@ -236,19 +279,7 @@ pub fn rename_file(note: &mut Note, stem: &str) -> Result<PathBuf> {
     let stem = stem.trim();
     let stem = if stem.is_empty() { "untitled" } else { stem };
     let stem = stem.trim_end_matches(".md");
-    let mut n = 1;
-    let target = loop {
-        let name = if n == 1 {
-            format!("{stem}.md")
-        } else {
-            format!("{stem}-{n}.md")
-        };
-        let candidate = dir.join(name);
-        if !candidate.exists() || candidate == note.path {
-            break candidate;
-        }
-        n += 1;
-    };
+    let target = free_path(&dir, stem, Some(&note.path));
     if target != note.path {
         fs::rename(&note.path, &target)
             .with_context(|| format!("renaming to {}", target.display()))?;
@@ -264,6 +295,26 @@ pub fn delete(note: &Note) -> Result<()> {
 
 pub fn create(dir: &Path) -> Result<Note> {
     create_with(dir, String::new())
+}
+
+/// A new note at an exact filename, never clobbering. A `[[wikilink]]` creates
+/// a note this way because the link target *is* the filename: slugging
+/// `[[Story Matrix]]` down to `story-matrix.md` would leave the very link that
+/// made the note pointing at nothing. `save` then leaves the name alone too —
+/// `tracks` compares the stem against `slug(title)`, so a filename that is not
+/// a slug reads as one the user chose and the automatic rename stays off.
+pub fn create_named(dir: &Path, stem: &str, content: String) -> Result<Note> {
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let stem = stem.trim().trim_end_matches(".md").trim();
+    let stem = if stem.is_empty() { "untitled" } else { stem };
+    let path = free_path(dir, stem, None);
+    fs::write(&path, &content).with_context(|| format!("writing {}", path.display()))?;
+    Ok(Note {
+        disk_title: title_of(&content),
+        path,
+        content,
+        modified: SystemTime::now(),
+    })
 }
 
 /// A new note holding `content`, named after its first line.
@@ -302,6 +353,75 @@ mod tests {
         // still not a title, so the first real line wins
         assert_eq!(title_of("---\nnot closed\n"), "not closed");
         assert_eq!(title_of("***\n\n# Real\n"), "Real");
+    }
+
+    #[test]
+    fn front_matter_is_found_only_when_it_opens_the_note_and_closes() {
+        let md = "---\ntype: log\n---\n# Title\n";
+        assert_eq!(front_matter_end(md.lines()), Some(2));
+        assert_eq!(front_matter_range(md), Some(0..18));
+        assert_eq!(&md[18..], "# Title\n");
+        // a blank line before the fence means the note did not open with one
+        assert_eq!(front_matter_end("\n---\na: b\n---\n".lines()), None);
+        assert_eq!(front_matter_range("# Title\nbody\n"), None);
+    }
+
+    #[test]
+    fn an_unterminated_front_matter_fence_is_not_front_matter_at_all() {
+        assert_eq!(front_matter_end("---\ntype: log\nbody\n".lines()), None);
+        assert_eq!(front_matter_range("---\ntype: log\n"), None);
+        // and the whole thing is still the body, as it always was
+        assert_eq!(
+            body_after_front_matter("---\nnot closed\n"),
+            "---\nnot closed\n"
+        );
+    }
+
+    #[test]
+    fn a_rule_further_down_the_note_is_never_front_matter() {
+        let md = "# Title\n\nsome prose\n\n---\n\nmore\n";
+        assert_eq!(front_matter_range(md), None);
+        assert_eq!(body_after_front_matter(md), md);
+    }
+
+    #[test]
+    fn an_empty_front_matter_block_is_still_a_block() {
+        // the older scan never looked at the first line after the opening
+        // fence, so it could not close this; the line scan can, and `title_of`
+        // answers "body" either way
+        let md = "---\n---\nbody\n";
+        assert_eq!(front_matter_end(md.lines()), Some(1));
+        assert_eq!(body_after_front_matter(md), "body\n");
+        assert_eq!(title_of(md), "body");
+        assert_eq!(property_count(md), 0);
+    }
+
+    #[test]
+    fn the_front_matter_byte_range_counts_crlf_endings_as_the_file_has_them() {
+        let md = "---\r\ntype: log\r\n---\r\nbody\r\n";
+        assert_eq!(front_matter_end(md.lines()), Some(2));
+        let r = front_matter_range(md).unwrap();
+        assert_eq!(&md[r.end..], "body\r\n");
+        // one byte per `\r` more than the same note with unix endings
+        assert_eq!(r.end, "---\ntype: log\n---\n".len() + 3);
+    }
+
+    #[test]
+    fn properties_are_the_top_level_keys_and_nothing_indented_under_them() {
+        let md = "---\ntype: log\ntags:\n  - work\n  - notes\nnested:\n  key: value\n# a comment\n---\nbody\n";
+        // type, tags and nested; the list items, the nested key and the
+        // comment all belong to something above them
+        assert_eq!(property_count(md), 3);
+        assert_eq!(property_count("---\na: 1\nb: 2\n---\n"), 2);
+        // a line with no colon is not a key
+        assert_eq!(property_count("---\njust prose\na: 1\n---\n"), 1);
+    }
+
+    #[test]
+    fn a_note_without_front_matter_has_no_properties_to_count() {
+        assert_eq!(property_count("# Title\n\na: not a property\n"), 0);
+        assert_eq!(property_count("---\nunterminated: yes\n"), 0);
+        assert_eq!(property_count(""), 0);
     }
 
     #[test]
@@ -434,6 +554,30 @@ mod tests {
             disk_title: "Groceries".into(),
         };
         assert_eq!(n.detached_name(), None);
+    }
+
+    #[test]
+    fn a_note_created_from_a_wikilink_keeps_the_links_filename() {
+        let dir = tmpdir("named");
+        let mut n = create_named(&dir, "Story Matrix", "# Story Matrix\n".into()).unwrap();
+        assert_eq!(n.path, dir.join("Story Matrix.md"));
+        // and a save that is allowed to rename leaves it alone: the name is
+        // not the slug of the title, so it reads as one the user chose — which
+        // is what keeps the `[[Story Matrix]]` that made it pointing at it
+        save(&dir, &mut n, true).unwrap();
+        assert_eq!(n.path, dir.join("Story Matrix.md"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_notes_created_from_the_same_link_name_do_not_clobber() {
+        let dir = tmpdir("named-twice");
+        let a = create_named(&dir, "Story Matrix", "# One\n".into()).unwrap();
+        let b = create_named(&dir, "Story Matrix.md", "# Two\n".into()).unwrap();
+        assert_eq!(a.path, dir.join("Story Matrix.md"));
+        assert_eq!(b.path, dir.join("Story Matrix-2.md"));
+        assert_eq!(fs::read_to_string(&a.path).unwrap(), "# One\n");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -111,11 +111,116 @@ pub fn render_wide(markdown: &str, width: usize) -> Rendered {
 
 /// Render for a page `width` columns wide, drawing wide tables the way the
 /// settings ask for.
+/// Test-only since the reading view started slicing the front matter off: the
+/// app always knows what line its markdown began on, so it always has an
+/// offset to pass. This is that call with the offset zero.
+#[cfg(test)]
 pub fn render_page(markdown: &str, width: usize, tables: TableStyle) -> Rendered {
-    let mut r = Ren::new(markdown, width, tables);
+    render_page_at(markdown, 0, width, tables)
+}
+
+/// The same, when `markdown` is a slice of a longer file that begins at source
+/// line `first_line` — the reading view hands us a body with its front matter
+/// already cut off. Every line number a cell reports is file-absolute, because
+/// `PCell::src` and `PLine::src_line` are what a click in the preview turns
+/// back into a position in the buffer.
+pub fn render_page_at(
+    markdown: &str,
+    first_line: usize,
+    width: usize,
+    tables: TableStyle,
+) -> Rendered {
+    let mut r = Ren::new(markdown, first_line, width, tables);
     r.run(markdown);
     r.finish()
 }
+
+/// Add the linked-mentions footer to an already-rendered page: a rule, a count,
+/// and one row per note that links here.
+///
+/// It is appended rather than rendered because it is not part of the note — the
+/// file on disk says nothing about who points at it, and nothing the footer
+/// draws should ever map back into the buffer. Every cell it makes carries no
+/// source position and every line no source line, so a click in the footer can
+/// open the note it names but can never land the cursor in the note you are
+/// reading.
+///
+/// With no mentions there is no footer at all, not even a rule: a note nothing
+/// links to should look like a note, not like a note with an empty drawer at
+/// the bottom.
+pub fn append_mentions(r: &mut Rendered, mentions: &[crate::mentions::Mention], width: usize) {
+    if mentions.is_empty() {
+        return;
+    }
+    let dim = theme::marker();
+    r.lines.push(PLine::default());
+    r.lines.push(PLine {
+        // the same rule the document itself draws for `---`, so the footer is
+        // separated the way a section of the note would be
+        cells: str_cells(&"─".repeat(width.min(40)), dim),
+        ..Default::default()
+    });
+    let count = match mentions.len() {
+        1 => "1 note links here".to_string(),
+        n => format!("{n} notes link here"),
+    };
+    r.lines.push(PLine {
+        cells: str_cells(&count, dim),
+        ..Default::default()
+    });
+
+    // one title column for the whole footer, so the excerpts line up and read
+    // as a column rather than as ragged sentences
+    let titlew = mentions
+        .iter()
+        .map(|m| crate::md::str_width(&m.title))
+        .max()
+        .unwrap_or(0)
+        .min(24)
+        .min(width.saturating_sub(2));
+    for m in mentions {
+        let idx = r.urls.len();
+        // an exact file, not a name to resolve again: two notes called `spec`
+        // must not send the click to whichever one the resolver prefers
+        r.urls
+            .push(crate::md::LinkTarget::Note(m.path.to_string_lossy().into_owned()).href());
+        let mut cells = str_cells("  ", dim);
+        let mut title = truncate_cells(&str_cells(&m.title, theme::link()), titlew);
+        for c in &mut title {
+            c.link = Some(idx);
+        }
+        let pad = titlew.saturating_sub(cells_width(&title));
+        cells.extend(title);
+        cells.extend(str_cells(&" ".repeat(pad), dim));
+        // ×3 is the whole reason the row collapsed, so its room is taken
+        // before the excerpt's and it is never the thing that gets cut away
+        let tail = if m.count > 1 {
+            format!(" ×{}", m.count)
+        } else {
+            String::new()
+        };
+        let room = width
+            .saturating_sub(cells_width(&cells) + 2 + crate::md::str_width(&tail))
+            .min(MAX_EXCERPT_COLS);
+        // a narrow page should show fewer things rather than shredded ones: an
+        // excerpt with a dozen columns to live in says nothing worth the space
+        if room >= 12 && !m.excerpt.is_empty() {
+            cells.extend(str_cells("  ", dim));
+            cells.extend(truncate_cells(&str_cells(&m.excerpt, dim), room));
+        }
+        cells.extend(str_cells(&tail, dim));
+        r.lines.push(PLine {
+            // never wider than the page: the footer must not be the thing that
+            // makes a page of prose pan sideways
+            cells: truncate_cells(&cells, width),
+            ..Default::default()
+        });
+    }
+}
+
+/// The widest an excerpt is ever drawn, however wide the window is. Past this
+/// the eye stops reading the column and starts reading the page twice.
+const MAX_EXCERPT_COLS: usize = 80;
 
 /// Where cells are currently going: the page, or a table cell being measured.
 enum Sink {
@@ -150,15 +255,23 @@ struct Ren {
     width: usize,
     /// Byte offset of the start of each source line.
     line_starts: Vec<usize>,
+    /// Source line the slice being rendered starts at in the file.
+    first_line: usize,
     /// Source line for the line currently being built.
     src_line: Option<usize>,
     pending_checkbox: Option<usize>,
     done_item: bool,
     image_alt: Option<(String, String)>,
+    /// Byte offset the renderer has already drawn past. pulldown-cmark has
+    /// never heard of a wikilink and hands `[[a|b]]` back as a run of separate
+    /// text events, one per bracket: the first of them is where the whole span
+    /// is recognised and drawn from the source, and the rest have to be
+    /// swallowed rather than drawn a second time.
+    wiki_until: usize,
 }
 
 impl Ren {
-    fn new(markdown: &str, width: usize, tables: TableStyle) -> Ren {
+    fn new(markdown: &str, first_line: usize, width: usize, tables: TableStyle) -> Ren {
         let mut line_starts = vec![0usize];
         for (i, b) in markdown.bytes().enumerate() {
             if b == b'\n' {
@@ -180,10 +293,12 @@ impl Ren {
             tables,
             width,
             line_starts,
+            first_line,
             src_line: None,
             pending_checkbox: None,
             done_item: false,
             image_alt: None,
+            wiki_until: 0,
         }
     }
 
@@ -229,13 +344,15 @@ impl Ren {
         }
     }
 
-    /// Source byte offset → (line, column in chars).
+    /// Source byte offset → (line, column in chars), the line counted from the
+    /// top of the *file*. `line_of` stays slice-relative on purpose: its
+    /// result indexes `line_starts` and `src`, both of which are the slice's.
     fn pos_of(&self, offset: usize) -> (usize, usize) {
         let line = self.line_of(offset);
         let start = self.line_starts.get(line).copied().unwrap_or(0);
         let offset = offset.min(self.src.len());
         let col = self.src.get(start..offset).map_or(0, |s| s.chars().count());
-        (line, col)
+        (self.first_line + line, col)
     }
 
     fn flush(&mut self) {
@@ -283,6 +400,49 @@ impl Ren {
         )
     }
 
+    /// The `[[wikilink]]` starting at byte offset `off` of the source, as
+    /// (byte offset just past it, target, label start, label end).
+    ///
+    /// It reads the source rather than the event's text because pulldown hands
+    /// the brackets back one at a time — there is no single event to split
+    /// around. The escape and embed guards are repeated here rather than left
+    /// to `md::wikilink_at` because the char slice below starts at `off` and
+    /// cannot see the character before it.
+    ///
+    /// One limitation worth knowing: inside a GFM table cell an unescaped `|`
+    /// is the cell delimiter, so `[[note|label]]` is cut into two cells before
+    /// the renderer ever sees it. Obsidian has the same problem and the same
+    /// answer (`\|`), and escaping it splits the events so the whole thing
+    /// stays literal. Plain and `#heading` wikilinks in a cell are fine.
+    fn wikilink_here(&self, off: usize) -> Option<(usize, String, usize, usize)> {
+        if !crate::md::links::enabled() || !self.src[off..].starts_with("[[") {
+            return None;
+        }
+        let before = &self.src[..off];
+        if before.ends_with('\\') || before.ends_with('!') {
+            return None;
+        }
+        // bounded by the line, and only paid for when a `[[` is really there
+        let line_end = self.src[off..]
+            .find('\n')
+            .map_or(self.src.len(), |n| off + n);
+        let chars: Vec<char> = self.src[off..line_end].chars().collect();
+        let w = crate::md::wikilink_at(&chars, 0)?;
+        let mut byte_at: Vec<usize> = Vec::with_capacity(chars.len() + 1);
+        let mut b = off;
+        for ch in &chars {
+            byte_at.push(b);
+            b += ch.len_utf8();
+        }
+        byte_at.push(b);
+        Some((
+            byte_at[w.end],
+            w.target,
+            byte_at[w.label_start],
+            byte_at[w.label_end],
+        ))
+    }
+
     /// Text from the document: scan for `==highlight==` and bare URLs.
     /// `off` is the source byte offset of `text`, when it is a verbatim slice.
     fn emit_text(&mut self, text: &str, off: Option<usize>) {
@@ -326,7 +486,7 @@ impl Ren {
                 let url: String = chars[i..end].iter().collect();
                 self.push_at(&std::mem::take(&mut run), base, None, at(run_start));
                 let idx = self.out.urls.len();
-                self.out.urls.push(url.clone());
+                self.out.urls.push(crate::md::LinkTarget::Url(url.clone()).href());
                 self.push_at(&url, base.patch(theme::link()), Some(idx), at(i));
                 i = end;
                 run_start = i;
@@ -343,7 +503,9 @@ impl Ren {
 
     fn run(&mut self, markdown: &str) {
         for (event, range) in Parser::new_ext(markdown, options()).into_offset_iter() {
-            let src_line = self.line_of(range.start);
+            // file-absolute, like `pos_of`: this is the number a preview click
+            // and a checkbox toggle both index the buffer with
+            let src_line = self.first_line + self.line_of(range.start);
             if self.cells.is_empty() && matches!(self.sink, Sink::Page) {
                 self.src_line = Some(src_line);
             }
@@ -353,6 +515,16 @@ impl Ren {
     }
 
     fn event(&mut self, event: Event<'_>, src_line: usize, range: std::ops::Range<usize>) {
+        // a `[[wikilink]]` is drawn whole, from its own source, the moment the
+        // first event inside it arrives; pulldown then goes on walking what is
+        // left of the span one event at a time. Every one of those would draw
+        // a second time — the leftover `]]` as text, but also an inline `` `x` ``
+        // between the brackets as code, which `md::wikilink_at` allows inside a
+        // target and which the live editor draws as part of the label. So the
+        // whole span is skipped, not just its text.
+        if range.start < self.wiki_until && emits_cells(&event) {
+            return;
+        }
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 self.blank();
@@ -448,7 +620,13 @@ impl Ren {
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 let idx = self.out.urls.len();
-                self.out.urls.push(dest_url.into_string());
+                // through `LinkTarget`, not straight in: a href written in the
+                // note is a stranger's text, and `[x](note:/etc/passwd)` must
+                // not arrive at the other end looking like a file the app
+                // found for itself
+                self.out
+                    .urls
+                    .push(crate::md::LinkTarget::Url(dest_url.into_string()).href());
                 self.link = Some(idx);
                 self.styles.push(self.style().patch(theme::link()));
             }
@@ -556,6 +734,18 @@ impl Ren {
                             wide: false,
                         });
                     }
+                } else if let Some((end, target, ls, le)) = self.wikilink_here(range.start) {
+                    // the label keeps its own source bytes, so `push_at` gives
+                    // every cell its true (line, column) and a preview click
+                    // lands inside the link rather than at the start of it
+                    let label = self.src[ls..le].to_string();
+                    let idx = self.out.urls.len();
+                    self.out
+                        .urls
+                        .push(crate::md::LinkTarget::Wiki(target.clone()).href());
+                    let style = crate::md::wiki_style(self.style(), &target);
+                    self.push_at(&label, style, Some(idx), Some(ls));
+                    self.wiki_until = end;
                 } else {
                     self.emit_text(&text, Some(range.start));
                 }
@@ -867,6 +1057,25 @@ pub fn cells_width(cells: &[PCell]) -> usize {
     cells.iter().map(|c| crate::md::char_width(c.ch)).sum()
 }
 
+/// Does this event put something on the page at a source offset of its own?
+///
+/// Only these can be dropped inside a span that has already been drawn.
+/// Structural events are deliberately not in the list: their ranges cover the
+/// whole construct they open, so skipping one that happens to start inside a
+/// wikilink would leave the style stack unbalanced for the rest of the page.
+fn emits_cells(event: &Event<'_>) -> bool {
+    matches!(
+        event,
+        Event::Text(_)
+            | Event::Code(_)
+            | Event::Html(_)
+            | Event::InlineHtml(_)
+            | Event::InlineMath(_)
+            | Event::DisplayMath(_)
+            | Event::FootnoteReference(_)
+    )
+}
+
 fn starts_url(chars: &[char], i: usize) -> bool {
     let rest: String = chars[i..].iter().take(8).collect();
     (rest.starts_with("http://") || rest.starts_with("https://"))
@@ -1109,6 +1318,57 @@ mod tests {
         assert!(done.cells[0].style.fg == theme::done().fg);
     }
 
+    /// What the reading view hands the renderer: the body, and the line it
+    /// starts on, with the front matter already cut away.
+    fn body_of(content: &str) -> Rendered {
+        let (skip, first) = crate::notes::front_matter_range(content)
+            .map_or((0, 0), |r| (r.end, content[..r.end].lines().count()));
+        render_page_at(&content[skip..], first, usize::MAX, TableStyle::default())
+    }
+
+    #[test]
+    fn a_page_rendered_from_a_slice_still_reports_file_line_numbers() {
+        let r = render_page_at("# Title\n\nprose\n", 4, usize::MAX, TableStyle::default());
+        let title = r.lines.iter().find(|l| l.text().contains("Title")).unwrap();
+        assert_eq!(title.src_line, Some(4));
+        assert_eq!(title.cells[0].src, Some((4, 2)));
+        let prose = r.lines.iter().find(|l| l.text().contains("prose")).unwrap();
+        assert_eq!(prose.src_line, Some(6));
+        assert_eq!(prose.cells[0].src, Some((6, 0)));
+    }
+
+    #[test]
+    fn the_reading_view_renders_the_body_and_never_the_front_matter() {
+        let r = body_of("---\ntype: log\ntags: work\n---\n\n# Title\n\nprose\n");
+        let page: String = r
+            .lines
+            .iter()
+            .map(|l| l.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!page.contains("type: log"));
+        assert!(!page.contains("tags"));
+        assert!(!page.contains("---"));
+        assert!(page.contains("Title"));
+        assert!(page.contains("prose"));
+        // a note without front matter is unchanged, offset and all
+        let plain = body_of("# Title\n");
+        assert_eq!(plain.lines[0].src_line, Some(0));
+    }
+
+    #[test]
+    fn a_checkbox_under_front_matter_still_maps_to_its_own_source_line() {
+        // the number the toggle indexes the buffer with, so an off-by-N here
+        // would silently tick the wrong box
+        let r = body_of("---\ntype: log\n---\n\n- [ ] todo\n- [x] done\n");
+        let todo = r.lines.iter().find(|l| l.text().contains("todo")).unwrap();
+        assert_eq!(todo.checkbox, Some(4));
+        let done = r.lines.iter().find(|l| l.text().contains("done")).unwrap();
+        assert_eq!(done.checkbox, Some(5));
+        // and a click on the word lands inside it, not at the line's start
+        assert_eq!(done.cells[2].src, Some((5, 6)));
+    }
+
     #[test]
     fn links_and_bare_urls_are_recorded() {
         let r = render("see [docs](http://x.y) and https://z.example/p now");
@@ -1125,6 +1385,106 @@ mod tests {
     }
 
     #[test]
+    fn a_wikilink_renders_as_its_text_and_records_a_wikilink_target() {
+        let r = render("see [[note]] now\n");
+        assert_eq!(flat(&r).trim(), "see note now");
+        let cell = r.lines[0].cells.iter().find(|c| c.link.is_some()).unwrap();
+        assert_eq!(r.url(cell.link.unwrap()), Some("wikilink:note"));
+        // a piped one shows only its label, and the target loses the heading
+        let r = render("[[stories/story-matrix#Method|the matrix]]\n");
+        assert_eq!(flat(&r).trim(), "the matrix");
+        assert_eq!(r.url(0), Some("wikilink:stories/story-matrix"));
+    }
+
+    #[test]
+    fn brackets_pulldown_hands_back_one_at_a_time_are_not_drawn_twice() {
+        // pulldown gives `[`, `[`, `note`, `]`, `]` as five separate text
+        // events; without the watermark the closing pair is drawn after the
+        // label and the line reads "note]]"
+        let r = render("see [[note]] and [[a|b]] here\n");
+        let text = flat(&r);
+        assert_eq!(text.trim(), "see note and b here");
+        assert!(!text.contains(']'), "{text}");
+        assert_eq!(text.matches("here").count(), 1);
+    }
+
+    #[test]
+    fn nothing_else_pulldown_finds_inside_a_wikilink_is_drawn_after_it_either() {
+        // `md::wikilink_at` lets a backtick sit inside a target — it bails on
+        // `[`, `]` and a newline, and on nothing else — so the live editor
+        // draws this whole label. pulldown, which knows nothing of wikilinks,
+        // sees inline code in the middle of it and hands back a `Code` event
+        // for the `b`; drawn, it would be a second `b` after the label and the
+        // two views would disagree about one line
+        let r = render("[[a `b` c]] tail\n");
+        assert_eq!(flat(&r).trim(), "a `b` c tail");
+    }
+
+    #[test]
+    fn a_href_in_the_note_can_never_claim_the_scheme_the_app_uses_for_a_file() {
+        // the footer's own rows name a file by path; a note body saying the
+        // same words is a stranger's text and must reach the desktop opener
+        // instead of `App::open_path`
+        let r = render("[report](note:/etc/passwd)\n");
+        assert_eq!(
+            crate::md::LinkTarget::parse(r.url(0).unwrap()),
+            crate::md::LinkTarget::Url("note:/etc/passwd".to_string())
+        );
+        let r = render("<https://x.y/a>\n");
+        assert_eq!(
+            crate::md::LinkTarget::parse(r.url(0).unwrap()),
+            crate::md::LinkTarget::Url("https://x.y/a".to_string())
+        );
+    }
+
+    #[test]
+    fn a_wikilink_in_a_table_cell_is_still_a_link() {
+        let r = render_wide("| a | b |\n| - | - |\n| [[note]] | x |\n", 40);
+        let row = r
+            .lines
+            .iter()
+            .find(|l| l.text().contains("note"))
+            .expect("the cell is drawn");
+        assert!(row.cells.iter().any(|c| c.link.is_some()));
+        // the column is measured from the label, not from the source: the
+        // brackets are gone, so nothing pads out to their width
+        assert!(!row.text().contains("[["), "{}", row.text());
+        assert_eq!(r.urls.iter().filter(|u| *u == "wikilink:note").count(), 1);
+    }
+
+    #[test]
+    fn a_wikilink_in_a_list_item_is_still_a_link() {
+        let r = render("- see [[note]]\n- and [[other]]\n");
+        let linked: Vec<String> = r
+            .lines
+            .iter()
+            .filter(|l| l.cells.iter().any(|c| c.link.is_some()))
+            .map(|l| l.text())
+            .collect();
+        assert_eq!(linked.len(), 2, "{linked:?}");
+        assert_eq!(r.urls, vec!["wikilink:note", "wikilink:other"]);
+    }
+
+    #[test]
+    fn an_escaped_or_embedded_wikilink_is_left_as_text() {
+        let r = render("\\[[x]] and ![[y.png]]\n");
+        let text = flat(&r);
+        assert!(text.contains("[[x]]"), "{text}");
+        assert!(text.contains("[[y.png]]"), "{text}");
+        assert!(r.urls.is_empty(), "{:?}", r.urls);
+    }
+
+    #[test]
+    fn a_wikilink_cell_remembers_the_source_column_of_its_label() {
+        // preview click → edit indexes the buffer with this, so the first
+        // label cell has to be the label's own column, not the bracket's
+        let r = render("see [[note|label]] now\n");
+        let cell = r.lines[0].cells.iter().find(|c| c.link.is_some()).unwrap();
+        assert_eq!(cell.ch, 'l');
+        assert_eq!(cell.src, Some((0, "see [[note|".len())));
+    }
+
+    #[test]
     fn images_become_their_own_line() {
         let r = render("![a cat](cat.png)\n");
         let line = r.lines.iter().find(|l| l.image.is_some()).unwrap();
@@ -1136,5 +1496,106 @@ mod tests {
                 url: "cat.png".into()
             }
         );
+    }
+
+    fn mention(title: &str, excerpt: &str, count: usize) -> crate::mentions::Mention {
+        crate::mentions::Mention {
+            path: std::path::PathBuf::from(format!("/vault/{title}.md")),
+            title: title.to_string(),
+            excerpt: excerpt.to_string(),
+            count,
+        }
+    }
+
+    #[test]
+    fn no_mentions_means_no_footer_line_at_all() {
+        let mut r = render("# Spec\n\nbody\n");
+        let before = r.lines.len();
+        append_mentions(&mut r, &[], 60);
+        // not even a rule, and certainly not "0 notes link here"
+        assert_eq!(r.lines.len(), before);
+        assert!(!r.lines.iter().any(|l| l.text().contains("link here")));
+    }
+
+    #[test]
+    fn the_footer_names_each_note_once_and_counts_the_rest() {
+        let mut r = render("# Spec\n");
+        append_mentions(
+            &mut r,
+            &[
+                mention("meta-os-control", "…see [[spec]] for the", 3),
+                mention("ford-mvp", "…pulled from [[spec]]", 1),
+            ],
+            60,
+        );
+        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(text.iter().any(|t| t == "2 notes link here"));
+        let first = text.iter().find(|t| t.contains("meta-os-control")).unwrap();
+        assert!(first.contains("…see [[spec]] for the"));
+        // several mentions in one note are one row, with the count beside it
+        assert!(first.ends_with(" ×3"));
+        let second = text.iter().find(|t| t.contains("ford-mvp")).unwrap();
+        assert!(!second.contains('×'));
+        // one note reads as one note
+        let mut one = render("# Spec\n");
+        append_mentions(&mut one, &[mention("meta", "x", 1)], 60);
+        assert!(one.lines.iter().any(|l| l.text() == "1 note links here"));
+    }
+
+    #[test]
+    fn every_footer_row_is_a_link_to_the_note_that_mentions_this_one() {
+        let mut r = render("# Spec\n");
+        append_mentions(&mut r, &[mention("meta", "about [[spec]]", 1)], 60);
+        let row = r.lines.iter().find(|l| l.text().contains("meta")).unwrap();
+        let link = row.cells.iter().find(|c| c.ch == 'm').unwrap().link.unwrap();
+        // an exact file, so the click cannot land on another note of the same
+        // name, and never a url the desktop would be handed
+        assert_eq!(r.url(link), Some("note:/vault/meta.md"));
+        assert_eq!(
+            crate::md::LinkTarget::parse(r.url(link).unwrap()),
+            crate::md::LinkTarget::Note("/vault/meta.md".to_string())
+        );
+        // the excerpt is not part of the link
+        assert!(row
+            .cells
+            .iter()
+            .filter(|c| c.link.is_some())
+            .all(|c| "meta".contains(c.ch)));
+    }
+
+    #[test]
+    fn a_footer_row_carries_no_source_position_so_a_click_cannot_land_in_the_note() {
+        let mut r = render("# Spec\n");
+        let before = r.lines.len();
+        append_mentions(&mut r, &[mention("meta", "about [[spec]]", 1)], 60);
+        for line in &r.lines[before..] {
+            assert_eq!(line.src_line, None);
+            assert_eq!(line.checkbox, None);
+            assert!(!line.wide);
+            assert!(line.cells.iter().all(|c| c.src.is_none()));
+        }
+    }
+
+    #[test]
+    fn the_footer_never_makes_a_page_wider_than_the_page() {
+        let mut r = render_wide("# Spec\n", 30);
+        append_mentions(
+            &mut r,
+            &[mention(
+                "a-note-with-a-very-long-name-indeed",
+                "a sentence far longer than the page could ever hold, on and on",
+                12,
+            )],
+            30,
+        );
+        assert!(r.lines.iter().all(|l| cells_width(&l.cells) <= 30));
+    }
+
+    #[test]
+    fn a_narrow_page_keeps_the_titles_and_drops_the_excerpts() {
+        let mut r = render_wide("# Spec\n", 18);
+        append_mentions(&mut r, &[mention("meta", "about the spec", 1)], 18);
+        let row = r.lines.iter().find(|l| l.text().contains("meta")).unwrap();
+        assert!(!row.text().contains("about"));
     }
 }

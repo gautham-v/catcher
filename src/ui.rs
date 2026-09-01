@@ -2,12 +2,14 @@ use crate::app::{App, EditRow, Item, Overlay, View};
 use crate::config::BorderStyle;
 use crate::md::theme;
 use crate::render::PCell;
+use crate::tree::RowKind;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use ratatui_image::{CropOptions, Resize, StatefulImage};
+use std::time::SystemTime;
 
 /// Chrome that should read as present but never first. Not `DarkGray`: many
 /// terminal profiles set that slot almost to the background, which is where
@@ -64,6 +66,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match app.overlay {
         Overlay::Palette | Overlay::QuickOpen => draw_palette(f, app),
         Overlay::ConfirmDelete => draw_confirm(f, app),
+        Overlay::ConfirmCreate => draw_create(f, app),
         Overlay::RenameFile => draw_rename(f, app),
         Overlay::Help => draw_help(f, app),
         Overlay::None => {}
@@ -121,7 +124,13 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
             Some(_) => crate::images::band_rows(natural, area.height),
             None => natural,
         };
-        let h = natural.min(area.height - used).max(1);
+        // every drawn line gets at least one row; a hidden one gets none at
+        // all, which is the only way a source line takes no space on screen
+        let h = if natural == 0 {
+            0
+        } else {
+            natural.min(area.height - used).max(1)
+        };
         plan.push((row, h, url));
         used += h;
         row += 1;
@@ -194,6 +203,12 @@ fn row_height(
     dir: &std::path::Path,
     width: u16,
 ) -> (u16, Option<String>) {
+    // front matter set to `hide` takes no rows at all, the way a picture takes
+    // more than one: what the buffer's shape on screen is, is the draw's
+    // business rather than the buffer's
+    if app.hidden_row(blocks, row) {
+        return (0, None);
+    }
     let url = crate::md::block_at(blocks, row)
         .filter(|b| b.kind == crate::md::BlockKind::Image && !app.revealed(b))
         .and_then(|b| app.editor.lines().get(b.start))
@@ -222,8 +237,25 @@ struct Row {
 /// which is what makes link and checkbox hit-testing exact.
 fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let width = area.width.max(1) as usize;
-    let rendered =
-        crate::render::render_page(&app.active_note().content, width, app.config.table_style);
+    // front matter is metadata, not prose: the reading view never shows it,
+    // whatever the editor has been told to do with it. The body's lines are
+    // still counted from the top of the file, so a click on a checkbox or a
+    // word still lands on the source line it came from.
+    let content = &app.active_note().content;
+    let (skip, first) = crate::notes::front_matter_range(content)
+        .map_or((0, 0), |r| (r.end, content[..r.end].lines().count()));
+    let mut rendered =
+        crate::render::render_page_at(&content[skip..], first, width, app.config.table_style);
+    // the footer arrives a frame or two late by design: the scan behind it
+    // reads every note body under the roots, and a page that waited for that
+    // would be a page that stuttered on every open
+    // and only where there are links to count: with `wikilinks` off `[[x]]` is
+    // literal text the reading view draws as typed, and a footer listing notes
+    // that "link here" would be counting something the page does not show
+    if app.config.linked_mentions && app.config.wikilinks {
+        let rows = app.linked_mentions();
+        crate::render::append_mentions(&mut rendered, &rows, width);
+    }
     let dir = app.note_dir();
 
     // wrap, then give drawable images the rows they need
@@ -338,9 +370,13 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
         lines.push(crate::render::to_line(&selected(
             &shown, page_row, offset, span,
         )));
-        if let Some(src) = row.src_line {
-            app.preview_rows.push((rect, src, shown.clone()));
-            if row.checkbox.is_some() {
+        // every drawn row is recorded, source line or not: a row the renderer
+        // invented — a blank line, a footer row — is still a row a selection
+        // can be dragged across, and one that is missing here silently kills
+        // the copy of everything around it
+        app.preview_rows.push((rect, row.src_line, shown.clone()));
+        if row.checkbox.is_some() {
+            if let Some(src) = row.src_line {
                 app.preview_checkboxes.push((rect, src));
             }
         }
@@ -492,6 +528,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             StatusItem::Path => path.clone(),
             StatusItem::Name => name.clone(),
             StatusItem::Mode => mode.to_string(),
+            StatusItem::Properties => match properties_label(&note.content) {
+                Some(s) => s,
+                None => continue,
+            },
             _ => continue,
         };
         if piece.is_empty() {
@@ -547,6 +587,18 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(right_spans)).right_aligned(),
         area,
     );
+}
+
+/// "2 properties", or nothing at all when the note has no front matter — a
+/// note with no metadata should not have to say so. The count comes from the
+/// note's content rather than the buffer because `sync_editor_to_note`
+/// refreshes that on every edit, so the number moves as the block is typed.
+fn properties_label(content: &str) -> Option<String> {
+    crate::notes::front_matter_range(content)?;
+    Some(match crate::notes::property_count(content) {
+        1 => "1 property".to_string(),
+        n => format!("{n} properties"),
+    })
 }
 
 /// (key, what it does) for the status bar, in the order they are worth
@@ -607,26 +659,41 @@ fn overlay_rect_wide(f: &Frame, height: u16, max: u16) -> Rect {
     let area = f.area();
     let width = area.width.saturating_sub(4).min(max);
     let x = (area.width - width) / 2;
-    let y = (area.height / 5).max(1);
-    Rect::new(x, y, width, height.min(area.height.saturating_sub(y + 1)))
+    Rect::new(x, overlay_top(f), width, height.min(overlay_budget(f)))
+}
+
+fn overlay_top(f: &Frame) -> u16 {
+    (f.area().height / 5).max(1)
+}
+
+/// How many rows an overlay can actually occupy, given where `overlay_rect_wide`
+/// puts it. Worth asking before laying anything out: `Layout` handed more
+/// constraints than the box has rows gives the last ones a height of zero, and
+/// a footer hint that is silently not there is worse than no hint at all.
+fn overlay_budget(f: &Frame) -> u16 {
+    f.area().height.saturating_sub(overlay_top(f) + 1)
 }
 
 fn draw_palette(f: &mut Frame, app: &mut App) {
-    let items = app.overlay_items();
     let quick = app.overlay == Overlay::QuickOpen;
+    let browse = quick && app.browse;
+    let items = palette_rows(app);
+    // two border rows, the prompt, the rule under it, and the footer hint ^O
+    // carries. Derived from the box's own budget rather than guessed at, so
+    // the tree scrolls inside the rows it actually has on an 80x24 terminal.
+    let chrome = if quick { 5 } else { 4 };
     // more rows on a taller window, since there is nothing else to use the
     // space for while the palette is open
-    let room = f.area().height.saturating_sub(8).max(6) as usize;
-    let shown = items.len().min(room.min(16)) as u16;
-    // the prompt, a rule under it, and the rows
-    let rect = overlay_rect_wide(f, shown + 4, 100);
+    let room = overlay_budget(f).saturating_sub(chrome).clamp(1, 16) as usize;
+    let shown = items.len().min(room) as u16;
+    let rect = overlay_rect_wide(f, shown + chrome, 100);
+    app.overlay_rect = rect;
     f.render_widget(Clear, rect);
     let block = panel(app);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let mut rows = vec![Constraint::Length(1); shown as usize + 2];
-    rows[1] = Constraint::Length(1);
+    let rows = vec![Constraint::Length(1); shown as usize + 2 + usize::from(quick)];
     let chunks = Layout::vertical(rows).split(inner);
 
     // ❯ marks where you type, so the prompt reads as an input and not as the
@@ -635,7 +702,9 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     // note itself uses for headings.
     let caret = Span::styled(" ❯ ", theme::bright());
     let prompt = if app.query.is_empty() {
-        let hint = if quick {
+        let hint = if browse {
+            "browse folders — tab returns to search"
+        } else if quick {
             "open a note — any folder, most recent first"
         } else {
             "search notes or run a command"
@@ -675,7 +744,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     // the widest key on screen, so the key column lines up down the list
     let keyw = items
         .iter()
-        .filter_map(|it| match it {
+        .filter_map(|r| match &r.item {
             Item::Command(c) => c.action().map(|a| app.config.keys.label(a)),
             _ => None,
         })
@@ -683,7 +752,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
         .max()
         .unwrap_or(0);
 
-    for (row_i, (i, item)) in items
+    for (row_i, (i, row)) in items
         .iter()
         .enumerate()
         .skip(start)
@@ -692,7 +761,8 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     {
         let area = chunks[row_i + 2];
         let selected = i == app.selected;
-        let (name, detail, tag) = row_text(app, item);
+        let (name, detail, tag) = (&row.name, &row.detail, row.tag);
+        let item = &row.item;
         // quick-open is all notes, so the tag would say the same thing on
         // every row; in the palette it is what tells a command from a note
         let tag = if quick && tag == "note" { "" } else { tag };
@@ -717,10 +787,12 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
         };
         // a narrower name column leaves the description room to finish its
         // sentence, which is what a first-time reader is actually reading
+        // …except in the tree, where the indent lives inside the name column:
+        // a note three folders down would be all indent and an ellipsis at 22
         let namew = (area.width as usize)
             .saturating_sub(6 + keyw + 3 + tag_width(tag))
-            .clamp(8, 22);
-        let padded = pad_to(&name, namew);
+            .clamp(8, if browse { 40 } else { 22 });
+        let padded = pad_to(name, namew);
         // three columns of air before the key, so the description never runs
         // into it however long it is
         let detailw =
@@ -730,7 +802,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             Span::styled("  ", row_bg),
             Span::styled(padded, title),
             Span::styled("  ", row_bg),
-            Span::styled(truncate(&detail, detailw), row_bg.patch(dim())),
+            Span::styled(truncate(detail, detailw), row_bg.patch(dim())),
         ];
         if !tag.is_empty() {
             spans.push(Span::styled(format!(" · {tag}"), row_bg.patch(dim())));
@@ -753,6 +825,91 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
         }
         app.palette_rows.push((area, item.clone()));
     }
+
+    // what tab does from here. Never pushed into `palette_rows`: a hint line
+    // that opened a note when clicked would be a bug, not a shortcut.
+    if quick {
+        let hint = if browse {
+            "←→ fold  ↵ open  tab: search"
+        } else {
+            "tab: browse"
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(format!("  {hint}"), dim())),
+            chunks[chunks.len() - 1],
+        );
+    }
+}
+
+/// One drawn palette row: what choosing it runs, and the strings it shows.
+struct PRow {
+    item: Item,
+    name: String,
+    detail: String,
+    tag: &'static str,
+}
+
+/// The rows to draw, from whichever list the overlay is showing. Browse mode
+/// builds its text here rather than in `row_text` because a tree row is not
+/// one item looked up in isolation: its indent, its fold marker and its note
+/// count all come from where it sits in the tree, and the tree is walked once
+/// here rather than once per row.
+fn palette_rows(app: &App) -> Vec<PRow> {
+    if app.overlay == Overlay::QuickOpen && app.browse {
+        let now = SystemTime::now();
+        return app
+            .browse_rows()
+            .into_iter()
+            .map(|r| match r.kind {
+                RowKind::Folder {
+                    key,
+                    name,
+                    notes,
+                    open,
+                } => PRow {
+                    // ▾ and ▸ are one column wide and take no colour of their
+                    // own, in keeping with the ‹ › ❯ the app already draws
+                    name: format!(
+                        "{}{} {name}",
+                        "  ".repeat(r.depth),
+                        if open { '▾' } else { '▸' }
+                    ),
+                    detail: match (open, notes) {
+                        // an open folder's contents are right there to count
+                        (true, _) => String::new(),
+                        (false, 1) => "1 note".to_string(),
+                        (false, n) => format!("{n} notes"),
+                    },
+                    tag: "",
+                    item: Item::Folder(key),
+                },
+                RowKind::Note {
+                    entry,
+                    title,
+                    modified,
+                } => PRow {
+                    // one level further in than its folder's name, so the
+                    // fold marker column stays the folder's own
+                    name: format!("{}{title}", "  ".repeat(r.depth + 1)),
+                    detail: crate::index::age(modified, now),
+                    tag: "",
+                    item: Item::Entry(entry),
+                },
+            })
+            .collect();
+    }
+    app.overlay_items()
+        .into_iter()
+        .map(|item| {
+            let (name, detail, tag) = row_text(app, &item);
+            PRow {
+                item,
+                name,
+                detail,
+                tag,
+            }
+        })
+        .collect()
 }
 
 /// Title, description and type tag for one palette row.
@@ -785,6 +942,9 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
             Some(e) => (e.title.clone(), e.folder.clone(), "note"),
             None => (String::new(), String::new(), ""),
         },
+        // a folder row writes its own text in `palette_rows`, where the tree
+        // around it is still in hand; it never reaches here
+        Item::Folder(_) => (String::new(), String::new(), ""),
     }
 }
 
@@ -841,9 +1001,7 @@ fn draw_help(f: &mut Frame, app: &App) {
         .map(|(group, rows)| {
             let rows = rows
                 .into_iter()
-                .filter(|(k, w)| {
-                    crate::search::fuzzy(q, &format!("{group} {k} {w}")).is_some()
-                })
+                .filter(|(k, w)| crate::search::fuzzy(q, &format!("{group} {k} {w}")).is_some())
                 .collect::<Vec<_>>();
             (group, rows)
         })
@@ -897,6 +1055,37 @@ fn draw_help(f: &mut Frame, app: &App) {
     let block = panel(app).title(Span::styled(" keyboard shortcuts ", theme::state()));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The prompt a `[[wikilink]]` that resolves to nothing puts up. No danger
+/// border: making a note is not a destructive thing, and borrowing the delete
+/// prompt's colour for it would teach the eye the wrong lesson.
+fn draw_create(f: &mut Frame, app: &mut App) {
+    let rect = overlay_rect(f, 4);
+    f.render_widget(Clear, rect);
+    let block = panel(app);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    // what will be made and where it will land, so the prompt is never a
+    // surprise: the filename the target ends in, in the note's own folder plus
+    // whatever folder part the target carried
+    let (name, dir) = app.pending_create().unwrap_or_else(|| {
+        (
+            app.pending_link.clone().unwrap_or_default(),
+            crate::index::short(&app.note_dir()),
+        )
+    });
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" create \u{201c}{name}\u{201d}?"),
+            theme::state().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!(" this makes a new note in {dir}. enter to confirm, esc to cancel."),
+            dim(),
+        )),
+    ];
     f.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -988,6 +1177,27 @@ mod tests {
         let rows = wrap_cells(&cells("漢字漢字漢字漢字"), 10);
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| crate::render::cells_width(r) <= 10));
+    }
+
+    #[test]
+    fn the_status_bar_counts_properties_only_when_there_are_some_to_count() {
+        assert_eq!(
+            properties_label("---\ntype: log\ntags: work\n---\n# t\n").as_deref(),
+            Some("2 properties")
+        );
+        assert_eq!(
+            properties_label("---\ntype: log\n---\n").as_deref(),
+            Some("1 property")
+        );
+        // an empty block still says so: it is front matter, it just has
+        // nothing in it yet
+        assert_eq!(
+            properties_label("---\n---\nbody\n").as_deref(),
+            Some("0 properties")
+        );
+        // no block at all leaves the item out of the bar entirely
+        assert_eq!(properties_label("# Title\n\nbody\n"), None);
+        assert_eq!(properties_label("---\nunterminated: yes\n"), None);
     }
 
     #[test]

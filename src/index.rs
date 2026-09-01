@@ -14,6 +14,7 @@ use std::time::SystemTime;
 /// A file the quick-open list can offer. Titles are read from the first few
 /// hundred bytes of the file, never the whole thing: a vault is walked on
 /// every open and must stay instant.
+#[derive(Clone)]
 pub struct Entry {
     pub path: PathBuf,
     pub title: String,
@@ -29,18 +30,23 @@ pub struct Entry {
 
 /// Stop conditions for the walk. A vault of a few thousand notes is scanned in
 /// milliseconds; past that the list stops being something to eyeball anyway.
-const MAX_FILES: usize = 8000;
-const MAX_DEPTH: usize = 10;
+pub(crate) const MAX_FILES: usize = 8000;
+pub(crate) const MAX_DEPTH: usize = 10;
 /// Enough for a title line under any reasonable front matter.
 const TITLE_BYTES: usize = 4096;
 
-/// Directories never worth walking into.
-fn skip_dir(name: &str) -> bool {
+/// Directories never worth walking into. The linked-mentions scan walks with
+/// this too: a directory not worth offering in quick-open is not worth reading
+/// bodies out of either, and the two walks disagreeing about that would be a
+/// footer citing a note you cannot open.
+pub(crate) fn skip_dir(name: &str) -> bool {
     name.starts_with('.') || matches!(name, "node_modules" | "target" | "attachments")
 }
 
-/// The title of the note at `path`, without reading the whole file.
-fn title_at(path: &Path) -> String {
+/// The title of the note at `path`, without reading the whole file. Shared
+/// with the linked-mentions walk, which needs the same title for a file it
+/// decided not to read whole — a note both walks must rank the same way.
+pub(crate) fn title_at(path: &Path) -> String {
     let mut buf = vec![0u8; TITLE_BYTES];
     let read = fs::File::open(path)
         .and_then(|mut f| f.read(&mut buf))
@@ -67,6 +73,30 @@ pub fn short(path: &Path) -> String {
     match path.strip_prefix(&home) {
         Ok(rel) => format!("~/{}", rel.display()),
         Err(_) => path.display().to_string(),
+    }
+}
+
+/// How long ago, in the fewest characters that still say it: `today`, `3d`,
+/// `2w`, `5mo`, `2y`. `now` is passed in rather than read here, so a whole
+/// list can be dated against one clock and a test is not a race with the
+/// second hand.
+///
+/// There is no date library behind this on purpose. A calendar date would be
+/// UTC-only without one, and how long ago is what the eye is actually asking
+/// when it scans a folder of notes.
+pub fn age(modified: SystemTime, now: SystemTime) -> String {
+    // a file dated in the future is what clock skew and rsync both produce,
+    // and it is not worth a panic or a negative number
+    let Ok(since) = now.duration_since(modified) else {
+        return "today".to_string();
+    };
+    let days = since.as_secs() / 86_400;
+    match days {
+        0 => "today".to_string(),
+        1..=6 => format!("{days}d"),
+        7..=29 => format!("{}w", days / 7),
+        30..=364 => format!("{}mo", days / 30),
+        _ => format!("{}y", days / 365),
     }
 }
 
@@ -178,6 +208,74 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
     entries
 }
 
+/// Every name a `[[wikilink]]` could reach this entry by: its filename stem,
+/// its title, and every `/`-boundary suffix of its path relative to the root
+/// it was found under. All of them go through [`crate::md::link_key`], so what
+/// the styling calls resolvable and what [`resolve`] actually finds are the
+/// same set by construction.
+///
+/// An entry reached through the recents list carries a `~/`-shortened absolute
+/// path in `rel`, so its suffixes still work as names and its stem still
+/// matches — a note in another vault is linkable by name like any other.
+pub fn link_keys(entry: &Entry) -> Vec<String> {
+    let mut keys = vec![crate::md::link_key(&entry.title)];
+    if let Some(stem) = entry.path.file_stem().and_then(|s| s.to_str()) {
+        keys.push(crate::md::link_key(stem));
+    }
+    let rel = crate::md::link_key(&entry.rel);
+    keys.push(rel.clone());
+    // "interviews/stories/story-matrix" also answers to "stories/story-matrix"
+    for (i, _) in rel.match_indices('/') {
+        keys.push(rel[i + 1..].to_string());
+    }
+    keys.retain(|k| !k.is_empty());
+    keys
+}
+
+/// The note a `[[wikilink]]` target names, or `None` when the vault has no
+/// such note. Tried in order — filename stem, title, then a path suffix — and
+/// ties broken by the shortest path, because a link that could mean two notes
+/// most likely means the one nearer the top of the vault.
+pub fn resolve<'a>(entries: &'a [Entry], target: &str) -> Option<&'a Entry> {
+    let want = crate::md::link_key(target);
+    if want.is_empty() {
+        return None;
+    }
+    entries
+        .iter()
+        .filter_map(|e| rank(e, &want).map(|r| (r, e)))
+        // `scan` returns entries in filesystem order, which is not stable
+        // between runs, so the path is the last word rather than the order
+        // they happened to arrive in
+        .min_by_key(|(r, e)| (*r, e.rel.chars().count(), e.rel.clone()))
+        .map(|(_, e)| e)
+}
+
+/// How well `entry` answers to `want`, lower being better, `None` for not at
+/// all. Free-standing and taking a plain `&Entry` so the ordering can be
+/// tested against hand-built entries with no filesystem behind them.
+fn rank(entry: &Entry, want: &str) -> Option<u8> {
+    // the filename is what an Obsidian link names first and foremost
+    if entry
+        .path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| crate::md::link_key(s) == want)
+    {
+        return Some(0);
+    }
+    if crate::md::link_key(&entry.title) == want {
+        return Some(1);
+    }
+    // a path suffix, but only at a folder boundary: without that check
+    // `matrix` would match `story-matrix.md`, which is a different note
+    let rel = crate::md::link_key(&entry.rel);
+    if rel == want || rel.ends_with(&format!("/{want}")) {
+        return Some(2);
+    }
+    None
+}
+
 /// How many paths the recents file keeps. Long enough to cover a week of
 /// hopping about, short enough to stay a file you could read yourself.
 const MAX_RECENT: usize = 100;
@@ -229,6 +327,7 @@ pub fn push_recent(recent: &mut Vec<PathBuf>, path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn tmpdir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("tinynote-index-{name}"));
@@ -329,6 +428,104 @@ mod tests {
         let found = scan(std::slice::from_ref(&dir), &recent);
         assert_eq!(found.len(), 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A hand-built entry: `Entry`'s fields are all public, so the ranking can
+    /// be tested without writing a single file.
+    fn entry(rel: &str, title: &str) -> Entry {
+        Entry {
+            path: PathBuf::from("/vault").join(rel),
+            title: title.to_string(),
+            rel: rel.to_string(),
+            folder: String::new(),
+            modified: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn a_wikilink_resolves_by_filename_stem_before_title() {
+        // one note is *called* "spec"; another is *filed* as spec.md
+        let entries = vec![
+            entry("notes/spec.md", "The Deploy Spec"),
+            entry("a.md", "Spec"),
+        ];
+        assert_eq!(resolve(&entries, "spec").unwrap().rel, "notes/spec.md");
+    }
+
+    #[test]
+    fn a_wikilink_resolves_a_path_suffix_at_a_folder_boundary() {
+        let entries = vec![entry("interviews/stories/story-matrix.md", "Story Matrix")];
+        assert_eq!(
+            resolve(&entries, "stories/story-matrix").unwrap().rel,
+            "interviews/stories/story-matrix.md"
+        );
+        // "matrix" is not a suffix of "story-matrix" at a boundary, so it
+        // names nothing rather than the note that merely ends in it
+        assert!(resolve(&entries, "matrix").is_none());
+    }
+
+    #[test]
+    fn an_ambiguous_wikilink_resolves_to_the_shortest_path() {
+        let entries = vec![
+            entry("archive/2024/old/spec.md", "Old Spec"),
+            entry("spec.md", "Spec"),
+            entry("work/spec.md", "Work Spec"),
+        ];
+        assert_eq!(resolve(&entries, "spec").unwrap().rel, "spec.md");
+    }
+
+    #[test]
+    fn a_wikilink_target_is_matched_without_its_case_or_its_md_suffix() {
+        let entries = vec![entry("Story-Matrix.md", "Story Matrix")];
+        for target in ["story-matrix", "Story-Matrix.md", "story-matrix#Method"] {
+            assert!(resolve(&entries, target).is_some(), "{target}");
+        }
+    }
+
+    #[test]
+    fn a_wikilink_with_no_note_behind_it_resolves_to_nothing() {
+        let entries = vec![entry("a.md", "A")];
+        assert!(resolve(&entries, "nowhere").is_none());
+        assert!(resolve(&entries, "  ").is_none());
+    }
+
+    #[test]
+    fn every_name_a_note_answers_to_is_in_its_link_keys() {
+        let keys = link_keys(&entry("interviews/stories/story-matrix.md", "Story Matrix"));
+        for want in [
+            "story-matrix",
+            "story matrix",
+            "stories/story-matrix",
+            "interviews/stories/story-matrix",
+        ] {
+            assert!(
+                keys.contains(&want.to_string()),
+                "{want} missing from {keys:?}"
+            );
+        }
+        // whatever the key set says is resolvable, `resolve` has to find —
+        // otherwise a link is drawn as a link and opens nothing
+        let entries = vec![entry("interviews/stories/story-matrix.md", "Story Matrix")];
+        for k in &keys {
+            assert!(resolve(&entries, k).is_some(), "{k}");
+        }
+    }
+
+    #[test]
+    fn an_age_reads_as_the_fewest_characters_that_still_say_it() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(400 * 86_400);
+        let ago = |days: u64| age(now - Duration::from_secs(days * 86_400), now);
+        assert_eq!(ago(0), "today");
+        assert_eq!(ago(3), "3d");
+        assert_eq!(ago(14), "2w");
+        assert_eq!(ago(60), "2mo");
+        assert_eq!(ago(400), "1y");
+    }
+
+    #[test]
+    fn a_file_dated_in_the_future_reads_as_today_rather_than_panicking() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(86_400);
+        assert_eq!(age(now + Duration::from_secs(3600), now), "today");
     }
 
     #[test]

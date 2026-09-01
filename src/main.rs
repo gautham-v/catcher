@@ -7,9 +7,11 @@ mod images;
 mod index;
 mod keys;
 mod md;
+mod mentions;
 mod notes;
 mod render;
 mod search;
+mod tree;
 mod ui;
 
 use anyhow::Result;

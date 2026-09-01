@@ -1,4 +1,4 @@
-use crate::config::{Config, PreviewClick};
+use crate::config::{Config, FrontMatter, PreviewClick};
 use crate::editor::{Editor, Pos};
 use crate::images::Images;
 use crate::index;
@@ -9,6 +9,7 @@ use crate::search;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -59,6 +60,8 @@ pub enum Overlay {
     /// ^O: every note in the vault, recently opened first.
     QuickOpen,
     ConfirmDelete,
+    /// A wikilink that resolves to nothing: enter makes the note it names.
+    ConfirmCreate,
     RenameFile,
     Help,
 }
@@ -137,7 +140,10 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⌘↑ ⌘↓", "start / end of note"),
             ("⇧ + any motion", "extend the selection"),
             ("click, drag", "place the cursor, select (drag copies)"),
-            ("⌥click  ^click", "open the link under the pointer"),
+            (
+                "⌥click  ^click",
+                "open the link or [[wikilink]] under the pointer",
+            ),
             ("wheel", "scroll without moving the cursor"),
         ],
     ),
@@ -146,6 +152,8 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("type", "fuzzy-search titles and bodies"),
             ("↑ ↓", "move  ·  ⏎ open or run  ·  esc close"),
+            ("tab", "in ^O, swap the ranked list for the folder tree"),
+            ("← →", "in the tree, fold and unfold a folder"),
         ],
     ),
     (
@@ -168,6 +176,10 @@ pub enum Item {
     Entry(usize),
     /// A path typed into quick-open that turned out to exist.
     Path(PathBuf),
+    /// A folder row in the ^O tree, by the key `tree` gave it. Choosing one
+    /// folds or unfolds it — a folder is not somewhere to go, so the overlay
+    /// stays exactly where it was.
+    Folder(String),
     Command(Command),
 }
 
@@ -205,11 +217,31 @@ pub struct App {
     /// every row's source line (for click → edit at the same place).
     pub preview_links: Vec<(Rect, String)>,
     pub preview_checkboxes: Vec<(Rect, usize)>,
-    pub preview_rows: Vec<(Rect, usize, Vec<crate::render::PCell>)>,
+    /// Every drawn row, its source line, and the cells it drew. The source
+    /// line is `None` for a row the renderer invented — a blank line between
+    /// paragraphs, a linked-mentions row — which can be selected and copied
+    /// but is nowhere in the buffer to click into.
+    pub preview_rows: Vec<(Rect, Option<usize>, Vec<crate::render::PCell>)>,
     pub images: Images,
     dragging: bool,
     /// Every `.md` file quick-open can reach, rebuilt each time ^O opens.
     pub open_index: Vec<index::Entry>,
+    /// A walk started on a thread and not yet collected — the launch one,
+    /// which must not hold up the first frame.
+    index_rx: Option<std::sync::mpsc::Receiver<Vec<index::Entry>>>,
+    /// True while ^O is showing the folder tree instead of the ranked list.
+    pub browse: bool,
+    /// Which folders the tree has unfolded. Session only, and deliberately not
+    /// in the settings note: which folders are open is where you are in a
+    /// session, not something you configure. A `BTreeSet` rather than a hash
+    /// so the tests see one order and not whichever one they got.
+    pub tree_open: BTreeSet<String>,
+    /// Where the last draw put the overlay box, so a click on its own footer
+    /// hint is not read as a click outside it.
+    pub overlay_rect: Rect,
+    /// Who links to the note on screen: scanned on a worker thread the first
+    /// time the reading view asks, and kept until a save says look again.
+    pub mentions: crate::mentions::Backlinks,
     /// Recently opened notes, most recent first; persisted between runs.
     pub recents: Vec<PathBuf>,
     /// A preview selection, as (page row, display column) pairs into the rows
@@ -224,6 +256,8 @@ pub struct App {
     pub preview_page_rows: Vec<(usize, Rect, usize)>,
     /// Buffer for the inline rename prompt.
     pub rename_input: String,
+    /// The wikilink target the create prompt is asking about.
+    pub pending_link: Option<String>,
     /// What has been typed into the shortcuts card, which filters its rows.
     pub help_query: String,
     /// True when the session is rooted outside the configured notes dir (a
@@ -297,6 +331,7 @@ impl App {
 
         let mut app = App {
             rename_input: String::new(),
+            pending_link: None,
             help_query: String::new(),
             foreign_root,
             images: Images::new(config.attachments_dir.clone()),
@@ -324,6 +359,11 @@ impl App {
             preview_rows: Vec::new(),
             dragging: false,
             open_index: Vec::new(),
+            index_rx: None,
+            browse: false,
+            tree_open: BTreeSet::new(),
+            overlay_rect: Rect::default(),
+            mentions: crate::mentions::Backlinks::default(),
             recents,
             preview_sel: None,
             preview_dragging: false,
@@ -338,6 +378,16 @@ impl App {
                 app.open_path(&path);
             }
         }
+        // one vault walk at startup, so a broken `[[link]]` is red soon after
+        // the first frame rather than only after the first ^O. Without it
+        // every link in the vault draws as though it resolved, which makes the
+        // whole point of the broken colour invisible for as long as it lasts.
+        // On a thread, because a big vault is tens of megabytes of reading and
+        // none of it is owed to the first frame: links draw as resolvable
+        // until it lands, which is exactly what an un-walked session does.
+        if app.config.wikilinks {
+            app.start_index_scan();
+        }
         Ok(app)
     }
 
@@ -348,6 +398,10 @@ impl App {
     fn load_active_into_editor(&mut self) {
         self.editor = Editor::new(&self.notes[self.active].content);
         self.editor.tab_width = self.config.tab_width;
+        let row = opening_row(self.editor.lines(), self.config.front_matter);
+        if row > 0 {
+            self.editor.move_cursor((row, 0), false);
+        }
         self.preview_scroll = 0;
         self.preview_hscroll = 0;
         self.preview_sel = None;
@@ -402,7 +456,13 @@ impl App {
             .unwrap_or_else(|| self.dir.clone());
         let was_settings = self.editing_settings();
         match notes::save(&dir, &mut self.notes[self.active], allow_rename) {
-            Ok(_) => self.dirty = false,
+            Ok(_) => {
+                self.dirty = false;
+                // a save is the only way a body under the roots changes from
+                // inside tinynote, and it is what makes a mention you have
+                // just typed turn up in the footer of the note it names
+                self.mentions.invalidate();
+            }
             Err(e) => {
                 self.flash(format!("save failed: {e}"));
                 return;
@@ -426,6 +486,7 @@ impl App {
 
     pub fn tick(&mut self) {
         self.maybe_autosave();
+        self.poll_index_scan();
         if let Some((_, at)) = self.status {
             if at.elapsed() > Duration::from_secs(3) {
                 self.status = None;
@@ -500,9 +561,68 @@ impl App {
     /// Build the quick-open index. Rebuilt on every open rather than cached:
     /// notes are files, and anything could have written one since.
     fn refresh_index(&mut self) {
-        if !self.config.quick_open_recursive {
-            self.open_index = index::scan(std::slice::from_ref(&self.dir), &self.recents);
+        self.open_index = index::scan(&self.index_roots(), &self.recents);
+        // a walk started earlier answers with an older vault than the one just
+        // read, so whatever it says is no longer wanted
+        self.index_rx = None;
+        self.refresh_links();
+    }
+
+    /// The same walk, on a thread, for the one caller that must not wait for
+    /// it: launch. Nothing on the first frame needs the index — it colours
+    /// `[[wikilinks]]`, and an un-walked vault draws them as resolvable — so
+    /// the walk is started and [`App::tick`] takes the answer whenever it
+    /// lands. This is what mentions.rs does for the same reason, and for the
+    /// same reason it is not joined: quitting mid-walk drops the receiver.
+    fn start_index_scan(&mut self) {
+        let roots = self.index_roots();
+        let recents = self.recents.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(index::scan(&roots, &recents));
+        });
+        self.index_rx = Some(rx);
+    }
+
+    /// Take a walk started by [`App::start_index_scan`] if it has finished.
+    fn poll_index_scan(&mut self) {
+        let Some(rx) = self.index_rx.as_ref() else {
             return;
+        };
+        match rx.try_recv() {
+            Ok(entries) => {
+                self.open_index = entries;
+                self.index_rx = None;
+                self.refresh_links();
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            // only a panic in the walk can do this; there is nothing to wait
+            // for any more, and ^O will walk again itself
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.index_rx = None,
+        }
+    }
+
+    /// The vault changed under the session in a way a walk has to see: a note
+    /// renamed, or one deleted. Without it the index keeps an entry for a path
+    /// that is not there any more, and `follow_wikilink` resolves against that
+    /// entry, opens nothing, and never reaches the rescan-and-offer-to-create
+    /// fallback that exists for exactly this; the link also goes on drawing as
+    /// resolvable, and the footer goes on listing a note that has moved.
+    fn reindex(&mut self) {
+        self.refresh_index();
+        self.mentions.invalidate();
+    }
+
+    /// The folders a walk covers. Pulled out of `refresh_index` because the
+    /// linked-mentions scan has to walk exactly what quick-open walks — a note
+    /// that links here from a folder the index cannot see would be a mention
+    /// of a note you could never open from the footer.
+    ///
+    /// The recents list is deliberately not in it: those are scattered single
+    /// files, not folders to walk.
+    fn index_roots(&self) -> Vec<PathBuf> {
+        if !self.config.quick_open_recursive {
+            return vec![self.dir.clone()];
         }
         let mut roots = vec![self.config.notes_dir.clone()];
         if !self.quick_open_root_is_notes_dir() {
@@ -510,7 +630,84 @@ impl App {
         }
         // vaults and work folders the user has named in the settings
         roots.extend(self.config.quick_open_dirs.iter().cloned());
-        self.open_index = index::scan(&roots, &self.recents);
+        roots
+    }
+
+    /// Tell the styling which `[[wikilink]]` targets this vault actually has,
+    /// so a link to a note that is not there is drawn as broken. Done once per
+    /// index walk and never per frame: it is a set of a few thousand strings,
+    /// and the styling only ever reads it.
+    fn refresh_links(&mut self) {
+        crate::md::links::set_known(self.open_index.iter().flat_map(index::link_keys).collect());
+    }
+
+    /// Follow a `[[wikilink]]`, or offer to make the note it names.
+    ///
+    /// Opening goes through `open_path`, which already saves the note on
+    /// screen, switches to an already-loaded one, and remembers the new one in
+    /// the recents list — so the save-back rules for a note outside the notes
+    /// dir are inherited rather than written a second time here.
+    fn follow_wikilink(&mut self, target: &str) {
+        if let Some(path) = index::resolve(&self.open_index, target).map(|e| e.path.clone()) {
+            self.open_path(&path);
+            return;
+        }
+        // a note written since the last walk is the ordinary miss, and one
+        // vault walk to be sure is cheap next to telling someone their link is
+        // broken when it is not
+        self.refresh_index();
+        if let Some(path) = index::resolve(&self.open_index, target).map(|e| e.path.clone()) {
+            self.open_path(&path);
+            return;
+        }
+        self.pending_link = Some(target.to_string());
+        self.overlay = Overlay::ConfirmCreate;
+    }
+
+    /// The folder and filename a link target names, relative to the note the
+    /// link was written in. `None` for a target that would write outside the
+    /// vault: a link target is note text, and note text must never be able to
+    /// name `/etc/passwd` or climb out with `..`.
+    fn link_note_path(target: &str) -> Option<(PathBuf, String)> {
+        let t = target.trim().trim_end_matches(".md");
+        if t.is_empty() || t.starts_with('/') || t.starts_with('~') {
+            return None;
+        }
+        let t = t.replace('\\', "/");
+        if t.split('/')
+            .any(|seg| seg == ".." || seg == "." || seg.is_empty())
+        {
+            return None;
+        }
+        let (folder, name) = match t.rsplit_once('/') {
+            Some((f, n)) => (PathBuf::from(f), n.to_string()),
+            None => (PathBuf::new(), t.clone()),
+        };
+        Some((folder, name))
+    }
+
+    /// Make the note an unresolved wikilink named, and open it. Confirmed
+    /// first through [`Overlay::ConfirmCreate`] — a mistyped link should not
+    /// quietly leave a file behind.
+    fn create_from_link(&mut self) {
+        let Some(target) = self.pending_link.take() else {
+            return;
+        };
+        let Some((folder, name)) = Self::link_note_path(&target) else {
+            self.flash(format!("“{target}” is not a name a note can have"));
+            return;
+        };
+        let dir = self.note_dir().join(folder);
+        match notes::create_named(&dir, &name, format!("# {name}\n\n")) {
+            Ok(note) => {
+                let path = note.path.clone();
+                self.open_path(&path);
+                // the link that made this note stops being red at once
+                self.refresh_index();
+                self.flash(format!("created \u{201c}{name}\u{201d}"));
+            }
+            Err(e) => self.flash(format!("create failed: {e}")),
+        }
     }
 
     /// A typed path — `~/vault/spec.md`, `/tmp/x.md` — as an openable file.
@@ -544,8 +741,13 @@ impl App {
     fn open_quick_open(&mut self) {
         self.query.clear();
         self.selected = 0;
+        // before `enter_browse`, which reads the index it builds
         self.refresh_index();
         self.overlay = Overlay::QuickOpen;
+        self.browse = self.config.quick_open_browse;
+        if self.browse {
+            self.enter_browse();
+        }
     }
 
     /// Quick-open rows for the current query. With no query this is simply the
@@ -587,10 +789,109 @@ impl App {
         scored.into_iter().map(|(_, i)| Item::Entry(i)).collect()
     }
 
+    /// The tree rows for the current query and fold state. Rebuilt on each
+    /// call rather than cached, which is the same bargain `open_items` already
+    /// makes: nothing at all is built while ^O is shut, and an index of a few
+    /// thousand notes is a handful of string compares and one sort.
+    pub fn browse_rows(&self) -> Vec<crate::tree::Row> {
+        crate::tree::rows(&self.open_index, &self.tree_open, &self.query)
+    }
+
+    /// tab: the same overlay, the other way of looking at it. The query
+    /// survives the swap both ways — typing `log` and then wanting to see
+    /// *where* the log notes live is the whole reason to have this.
+    fn toggle_browse(&mut self) {
+        self.browse = !self.browse;
+        if self.browse {
+            self.enter_browse();
+        } else {
+            self.selected = 0;
+        }
+    }
+
+    /// Entering browse mode unfolds the folder you are already in and selects
+    /// the note you have open, so the first thing the tree tells you is where
+    /// you are rather than where the vault starts.
+    fn enter_browse(&mut self) {
+        let active = std::fs::canonicalize(&self.active_note().path).ok();
+        // the query comes along, because the tree about to be drawn is the
+        // filtered one: a row counted against the whole vault would put the
+        // selection on some unrelated folder, or past the end of the rows
+        let query = self.query.clone();
+        self.selected = crate::tree::reveal(
+            &self.open_index,
+            &mut self.tree_open,
+            active.as_deref(),
+            &query,
+        );
+    }
+
+    fn toggle_folder(&mut self, key: &str) {
+        let query = self.query.clone();
+        self.selected = crate::tree::toggle(&self.open_index, &mut self.tree_open, key, &query);
+    }
+
+    /// →: unfold a folder, step into one already unfolded, open a note.
+    fn browse_right(&mut self) {
+        let rows = self.browse_rows();
+        let Some(row) = rows.get(self.selected) else {
+            return;
+        };
+        match &row.kind {
+            crate::tree::RowKind::Folder { key, open, .. } => {
+                if !*open {
+                    let key = key.clone();
+                    self.toggle_folder(&key);
+                } else if rows
+                    .get(self.selected + 1)
+                    .is_some_and(|next| next.depth > row.depth)
+                {
+                    self.selected += 1;
+                }
+            }
+            crate::tree::RowKind::Note { entry, .. } => {
+                let entry = *entry;
+                self.run_item(Item::Entry(entry));
+            }
+        }
+    }
+
+    /// ←: fold a folder, or leave for the folder this row lives in.
+    fn browse_left(&mut self) {
+        let rows = self.browse_rows();
+        let Some(row) = rows.get(self.selected) else {
+            return;
+        };
+        if let crate::tree::RowKind::Folder { key, open, .. } = &row.kind {
+            // a filtered tree is unfolded whatever the fold set says, so
+            // folding there would move nothing on screen; go up instead of
+            // appearing to do nothing at all
+            if *open && self.query.is_empty() {
+                let key = key.clone();
+                self.toggle_folder(&key);
+                return;
+            }
+        }
+        if let Some(up) = crate::tree::parent_of(&rows, self.selected) {
+            self.selected = up;
+        }
+    }
+
     /// The rows the open overlay is showing, whichever overlay that is.
     pub fn overlay_items(&self) -> Vec<Item> {
         match self.overlay {
             Overlay::Palette => self.palette_items(),
+            // the tree's notes reuse `Item::Entry`, so opening one from here
+            // goes down the exact path quick-open already uses; only a folder
+            // needed a variant of its own
+            Overlay::QuickOpen if self.browse => self
+                .browse_rows()
+                .iter()
+                .map(|r| match &r.kind {
+                    crate::tree::RowKind::Folder { key, .. } => Item::Folder(key.clone()),
+                    crate::tree::RowKind::Note { entry, .. } => Item::Entry(*entry),
+                })
+                .collect(),
             Overlay::QuickOpen => self.open_items(),
             _ => Vec::new(),
         }
@@ -631,6 +932,10 @@ impl App {
         self.active = 0;
         self.load_active_into_editor();
         self.view = View::Edit;
+        // the file is gone, and an index that still lists it is worse than no
+        // index at all: `follow_wikilink` would resolve a `[[link]]` against
+        // the entry, open nothing, and never reach the offer to create it
+        self.reindex();
         self.flash(format!("deleted “{title}”"));
     }
 
@@ -654,6 +959,13 @@ impl App {
     }
 
     fn run_item(&mut self, item: Item) {
+        // a folder is not somewhere to go: folding it leaves the overlay open
+        // and the tree exactly where it was, which is also what makes clicking
+        // a folder row work, since a click routes through here too
+        if let Item::Folder(key) = item {
+            self.toggle_folder(&key);
+            return;
+        }
         self.overlay = Overlay::None;
         match item {
             Item::Note(i) => self.switch_to(i),
@@ -663,6 +975,8 @@ impl App {
                 }
             }
             Item::Path(path) => self.open_path(&path),
+            // handled above, before the overlay was closed
+            Item::Folder(_) => {}
             Item::Command(Command::NewNote) => self.new_note(),
             Item::Command(Command::QuickOpen) => self.open_quick_open(),
             Item::Command(Command::TogglePreview) => self.toggle_preview(),
@@ -708,6 +1022,9 @@ impl App {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
+                // the filename is one of the names a `[[wikilink]]` reaches a
+                // note by, so a rename changes what resolves and what does not
+                self.reindex();
                 self.flash(format!("renamed → {name}"));
             }
             Err(e) => self.flash(format!("rename failed: {e}")),
@@ -778,6 +1095,17 @@ impl App {
                     self.delete_active();
                 }
                 KeyCode::Esc => self.overlay = Overlay::None,
+                _ => {}
+            },
+            Overlay::ConfirmCreate => match key.code {
+                KeyCode::Enter => {
+                    self.overlay = Overlay::None;
+                    self.create_from_link();
+                }
+                KeyCode::Esc => {
+                    self.overlay = Overlay::None;
+                    self.pending_link = None;
+                }
                 _ => {}
             },
             Overlay::RenameFile => {
@@ -903,11 +1231,17 @@ impl App {
                 self.overlay = Overlay::ConfirmDelete;
             }
             Action::RenameFile => self.open_rename(),
+            Action::FollowLink => self.follow_link_at_cursor(),
         }
     }
 
     fn on_palette_key(&mut self, key: KeyEvent) {
-        let count = self.overlay_items().len();
+        // tab flips ^O between the ranked list and the tree, both ways. The
+        // command palette has no second view of itself, so it never sees this.
+        if key.code == KeyCode::Tab && self.overlay == Overlay::QuickOpen {
+            self.toggle_browse();
+            return;
+        }
         // the query is a one-line input, and the Mac editing keys have to work
         // in it: nothing is more annoying than a search box you can only
         // backspace out of one character at a time
@@ -915,10 +1249,17 @@ impl App {
             self.selected = 0;
             return;
         }
+        let tree = self.browse && self.overlay == Overlay::QuickOpen;
         match key.code {
             KeyCode::Esc => self.overlay = Overlay::None,
+            KeyCode::Right if tree => self.browse_right(),
+            KeyCode::Left if tree => self.browse_left(),
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down => {
+                // the row count is only ever wanted here, and asking for it
+                // builds every row of the overlay — in browse mode the whole
+                // tree — so a typed character must not pay for one
+                let count = self.overlay_items().len();
                 if count > 0 && self.selected + 1 < count {
                     self.selected += 1;
                 }
@@ -1023,14 +1364,33 @@ impl App {
     }
 
     /// Every block in the buffer. Cheap enough to recompute per frame.
+    ///
+    /// This is the one place the `front_matter` setting is consulted for the
+    /// editor. Making the block first and starting the markdown scan below it
+    /// is what keeps the closing `---` from becoming a rule and `tags:` from
+    /// picking up emphasis; everything downstream — reveal-on-cursor,
+    /// wrapping, click hit-testing — then does the right thing by itself.
     pub fn blocks(&self) -> Vec<md::Block> {
-        md::blocks(self.editor.lines())
+        blocks_with(self.editor.lines(), self.config.front_matter)
     }
 
     /// Does the cursor — or either end of a selection — sit inside `block`?
     /// If it does the block shows its raw source, so the syntax is editable.
     pub fn revealed(&self, block: &md::Block) -> bool {
         revealed_by(block, self.editor.cursor.0, self.editor.selection())
+    }
+
+    /// Is `row` a line the draw skips entirely? Only front matter set to
+    /// `hide` ever is, and it strikes the same bargain a code fence does: the
+    /// text is still in the file, and moving the cursor into the block brings
+    /// the whole thing back.
+    pub fn hidden_row(&self, blocks: &[md::Block], row: usize) -> bool {
+        hidden_by(
+            md::block_at(blocks, row),
+            self.config.front_matter,
+            self.editor.cursor.0,
+            self.editor.selection(),
+        )
     }
 
     /// Is `row` an image line that is currently drawn as a picture rather than
@@ -1059,12 +1419,51 @@ impl App {
     }
 
     /// The folder image references on this note resolve against.
+    /// What the create-a-note prompt should say: the filename the note will
+    /// be given, and the folder it will land in, `~/`-shortened. Worked out
+    /// from the same two calls `create_from_link` makes, so the prompt cannot
+    /// describe a different file from the one that then appears —
+    /// `[[stories/story-matrix]]` makes `story-matrix.md` inside `stories/`,
+    /// and saying "in ~/notes" would be a surprise on both counts.
+    ///
+    /// `None` for a target that names no note it is allowed to write.
+    pub fn pending_create(&self) -> Option<(String, String)> {
+        let (folder, name) = Self::link_note_path(self.pending_link.as_deref()?)?;
+        Some((name, index::short(&self.note_dir().join(folder))))
+    }
+
     pub fn note_dir(&self) -> PathBuf {
         self.active_note()
             .path
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| self.dir.clone())
+    }
+
+    /// The notes that link to the one on screen, or nothing at all while the
+    /// scan for them is still running.
+    ///
+    /// Owned rows rather than a borrow: this takes `&mut self` because it may
+    /// start or poll a scan, and the rest of the preview draw goes on to
+    /// mutate the app heavily. The rows are a handful of small structs, so the
+    /// clone costs nothing worth arranging the draw around.
+    pub fn linked_mentions(&mut self) -> Vec<crate::mentions::Mention> {
+        let path = self.active_note().path.clone();
+        // the title as it stands in the buffer, not on disk: a note renamed by
+        // its heading answers to the new name from the next frame
+        let title = notes::title_of(&self.active_note().content);
+        let roots = self.index_roots();
+        self.mentions
+            .rows_for(&path, || {
+                // canonicalized only when a scan is actually about to start,
+                // so the cached frame costs a path compare and no syscall
+                let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                (
+                    crate::mentions::target_entry(&canon, &title, &roots),
+                    roots.clone(),
+                )
+            })
+            .to_vec()
     }
 
     /// A click in the preview: open a link, toggle a checkbox, or start a
@@ -1076,7 +1475,7 @@ impl App {
         let at = ratatui::layout::Position { x, y };
         if let Some((_, url)) = self.preview_links.iter().find(|(r, _)| r.contains(at)) {
             let url = url.clone();
-            self.open_url(&url);
+            self.follow(md::LinkTarget::parse(&url));
             return;
         }
         if let Some((_, row)) = self.preview_checkboxes.iter().find(|(r, _)| r.contains(at)) {
@@ -1103,9 +1502,13 @@ impl App {
         self.view = View::Edit;
         if let Some((rect, row, cells)) = hit {
             let dcol = x.saturating_sub(rect.x) as usize;
-            let pos = cell_source(&cells, dcol).unwrap_or((row, 0));
-            self.editor.clear_selection();
-            self.editor.set_cursor(pos);
+            // a row the renderer invented is nowhere in the buffer: better to
+            // leave the cursor where it was than to answer a click on the
+            // footer with the top of the note
+            if let Some(pos) = cell_source(&cells, dcol).or_else(|| row.map(|r| (r, 0))) {
+                self.editor.clear_selection();
+                self.editor.set_cursor(pos);
+            }
         }
     }
 
@@ -1157,34 +1560,39 @@ impl App {
     /// The text the preview selection covers, assembled from the rows the last
     /// draw recorded. `None` when nothing is selected.
     pub fn preview_selected_text(&self) -> Option<String> {
-        let ((sr, sc), (er, ec)) = self.preview_span()?;
-        let mut out = String::new();
-        for (page_row, _, offset) in &self.preview_page_rows {
-            let row = *page_row;
-            if row < sr || row > er {
-                continue;
-            }
-            let cells = self.preview_cells(row)?;
-            let from = if row == sr { sc } else { *offset };
-            let to = if row == er { ec } else { usize::MAX };
-            out.push_str(&slice_cells(cells, *offset, from, to));
-            if row < er {
-                out.push('\n');
-            }
-        }
-        Some(out)
+        Some(selected_text(
+            &self.preview_page_rows,
+            &self.preview_rows,
+            self.preview_span()?,
+        ))
     }
 
-    /// The drawn cells of one page row, as the last draw laid them out.
-    fn preview_cells(&self, page_row: usize) -> Option<&Vec<crate::render::PCell>> {
-        let (_, rect, _) = self
-            .preview_page_rows
-            .iter()
-            .find(|(r, _, _)| *r == page_row)?;
-        self.preview_rows
-            .iter()
-            .find(|(r, _, _)| r.y == rect.y)
-            .map(|(_, _, cells)| cells)
+    /// The one door a link goes through, so a `wikilink:` href can never be
+    /// handed to `open`/`xdg-open` and a URL can never be looked for in the
+    /// vault.
+    fn follow(&mut self, target: md::LinkTarget) {
+        match target {
+            md::LinkTarget::Url(u) => self.open_url(&u),
+            md::LinkTarget::Wiki(t) => self.follow_wikilink(&t),
+            // the app drew this one from a file it had already found, so there
+            // is nothing left to resolve
+            md::LinkTarget::Note(p) => self.open_path(Path::new(&p)),
+        }
+    }
+
+    /// ⌥⏎: the link under the cursor, from the keyboard. Plain enter has to go
+    /// on inserting a newline, so following one needs a key of its own.
+    fn follow_link_at_cursor(&mut self) {
+        let pos = self.editor.cursor;
+        match self
+            .editor
+            .lines()
+            .get(pos.0)
+            .and_then(|l| md::link_at(l, pos.1))
+        {
+            Some(t) => self.follow(t),
+            None => self.flash("no link here".to_string()),
+        }
     }
 
     /// Hand a URL to the desktop.
@@ -1327,6 +1735,8 @@ impl App {
                 config.apply();
                 self.editor.tab_width = config.tab_width;
                 self.config = config;
+                // the roots to walk, or the setting itself, may have moved
+                self.mentions.invalidate();
                 if moved {
                     self.flash("notes_dir changed — restart tinynote".to_string());
                 } else {
@@ -1368,10 +1778,20 @@ impl App {
                         .cloned()
                     {
                         self.run_item(item);
-                    } else {
-                        self.overlay = Overlay::None; // click outside dismisses
+                    } else if !self
+                        .overlay_rect
+                        .contains(ratatui::layout::Position { x, y })
+                    {
+                        // outside the box dismisses; inside it but not on a row
+                        // is the prompt, the rule or the footer hint, and a hint
+                        // line that closed the overlay when clicked would be a
+                        // small betrayal
+                        self.overlay = Overlay::None;
                     }
-                } else if matches!(self.overlay, Overlay::ConfirmDelete | Overlay::RenameFile) {
+                } else if matches!(
+                    self.overlay,
+                    Overlay::ConfirmDelete | Overlay::ConfirmCreate | Overlay::RenameFile
+                ) {
                     self.overlay = Overlay::None;
                 } else if self.view == View::Preview
                     && self
@@ -1387,13 +1807,13 @@ impl App {
                     let pos = self.pos_at(x, y);
                     // modifier-click follows a link instead of moving the cursor
                     if follows_link(ev.modifiers) {
-                        if let Some(url) = self
+                        if let Some(target) = self
                             .editor
                             .lines()
                             .get(pos.0)
                             .and_then(|l| md::link_at(l, pos.1))
                         {
-                            self.open_url(&url);
+                            self.follow(target);
                             return;
                         }
                     }
@@ -1442,6 +1862,63 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// Every block in a buffer, with front matter made a block of its own unless
+/// the settings say to leave it as ordinary markdown. Prepending the block and
+/// starting the markdown scan on the line *below* it is what keeps the closing
+/// `---` from being read as a rule and `tags:` from picking up emphasis;
+/// filtering afterwards would not, since a stray ``` inside the block would
+/// still have swallowed the rest of the note.
+pub fn blocks_with(lines: &[String], front_matter: FrontMatter) -> Vec<md::Block> {
+    if front_matter != FrontMatter::Show {
+        if let Some(end) = notes::front_matter_end(lines.iter().map(String::as_str)) {
+            let mut out = vec![md::Block {
+                kind: md::BlockKind::FrontMatter,
+                start: 0,
+                end,
+            }];
+            out.extend(md::blocks_from(lines, end + 1));
+            return out;
+        }
+    }
+    md::blocks(lines)
+}
+
+/// Which line a note opens with the cursor on: the top of the file, except
+/// when front matter is hidden and the file starts with some.
+///
+/// `hide` promises the block is not drawn until the cursor moves into it, and
+/// a cursor parked at (0, 0) is already inside it — so without this every note
+/// with front matter would open showing the very metadata the setting was
+/// turned on to stop showing, and only start hiding it once you pressed ↓ past
+/// it. The body is where the writing is; ↑ still walks back into the block.
+pub fn opening_row(lines: &[String], front_matter: FrontMatter) -> usize {
+    if front_matter != FrontMatter::Hide {
+        return 0;
+    }
+    match notes::front_matter_end(lines.iter().map(String::as_str)) {
+        // a file that is nothing but front matter has no body line to sit on,
+        // and the block shows itself rather than leaving an empty screen
+        Some(end) => (end + 1).min(lines.len().saturating_sub(1)),
+        None => 0,
+    }
+}
+
+/// Is a source line one the draw skips entirely, spending no rows on it at
+/// all? Only front matter set to `hide` ever is, and it strikes the same
+/// bargain a code fence strikes: the text is still in the file, and moving the
+/// cursor into the block brings the whole thing back.
+pub fn hidden_by(
+    block: Option<&md::Block>,
+    front_matter: FrontMatter,
+    cursor_row: usize,
+    selection: Option<(Pos, Pos)>,
+) -> bool {
+    front_matter == FrontMatter::Hide
+        && block.is_some_and(|b| {
+            b.kind == md::BlockKind::FrontMatter && !revealed_by(b, cursor_row, selection)
+        })
 }
 
 /// A block shows its raw source while the cursor, or either end of a
@@ -1551,6 +2028,40 @@ fn delete_prev_word(input: &mut String) {
 /// than indices because that is what a pointer lands on, and a wide character
 /// covers two of them. `offset` is the column the first cell stands for — the
 /// pan, for a row of a scrolling table.
+/// The text a preview selection covers, from the rows the last draw recorded.
+///
+/// Free-standing so the rule for a row that has no cells can be tested without
+/// a terminal behind it: such a row contributes its newline and nothing else,
+/// rather than abandoning the whole copy. Blank lines between paragraphs are
+/// already like that, and the linked-mentions footer makes them easy to drag
+/// across.
+fn selected_text(
+    page_rows: &[(usize, Rect, usize)],
+    rows: &[(Rect, Option<usize>, Vec<crate::render::PCell>)],
+    ((sr, sc), (er, ec)): (PSel, PSel),
+) -> String {
+    let empty: Vec<crate::render::PCell> = Vec::new();
+    let mut out = String::new();
+    for (page_row, rect, offset) in page_rows {
+        let row = *page_row;
+        if row < sr || row > er {
+            continue;
+        }
+        let cells = rows
+            .iter()
+            .find(|(r, _, _)| r.y == rect.y)
+            .map(|(_, _, cells)| cells)
+            .unwrap_or(&empty);
+        let from = if row == sr { sc } else { *offset };
+        let to = if row == er { ec } else { usize::MAX };
+        out.push_str(&slice_cells(cells, *offset, from, to));
+        if row < er {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn slice_cells(cells: &[crate::render::PCell], offset: usize, from: usize, to: usize) -> String {
     let mut out = String::new();
     let mut col = offset;
@@ -1777,6 +2288,106 @@ mod tests {
     }
 
     #[test]
+    fn front_matter_is_a_block_of_its_own_unless_the_setting_shows_it() {
+        let lines: Vec<String> = "---\ntags: work\n---\n\n# Title\n\n---\n"
+            .lines()
+            .map(String::from)
+            .collect();
+        let dim = blocks_with(&lines, FrontMatter::Dim);
+        assert_eq!(dim[0].kind, md::BlockKind::FrontMatter);
+        assert_eq!((dim[0].start, dim[0].end), (0, 2));
+        // the rule further down is still a rule, and the block's own closing
+        // fence never became one
+        assert_eq!(dim.len(), 2);
+        assert_eq!(dim[1].kind, md::BlockKind::Rule);
+        assert_eq!(dim[1].start, 6);
+        // hide reads the block the same way; only the drawing differs
+        assert_eq!(blocks_with(&lines, FrontMatter::Hide), dim);
+
+        // show leaves it to the markdown scanner, which sees two rules
+        let shown = blocks_with(&lines, FrontMatter::Show);
+        assert!(shown.iter().all(|b| b.kind == md::BlockKind::Rule));
+        assert_eq!(
+            shown.iter().map(|b| b.start).collect::<Vec<_>>(),
+            vec![0, 2, 6]
+        );
+    }
+
+    #[test]
+    fn a_note_with_hidden_front_matter_opens_on_its_body_and_not_inside_the_block() {
+        let lines: Vec<String> = "---\ntags: work\n---\n# Title\n"
+            .lines()
+            .map(String::from)
+            .collect();
+        // a cursor at row 0 is inside the block, and a revealed block is a
+        // drawn one: `hide` would show the metadata on every note that has any
+        assert_eq!(opening_row(&lines, FrontMatter::Hide), 3);
+        // the other two draw the block, so there is nothing to step over
+        assert_eq!(opening_row(&lines, FrontMatter::Dim), 0);
+        assert_eq!(opening_row(&lines, FrontMatter::Show), 0);
+        // a note with no front matter, and one that is nothing but front
+        // matter, both open at the only place they can
+        let plain: Vec<String> = vec!["# Title".to_string()];
+        assert_eq!(opening_row(&plain, FrontMatter::Hide), 0);
+        let only: Vec<String> = "---\ntags: work\n---"
+            .lines()
+            .map(String::from)
+            .collect();
+        assert_eq!(opening_row(&only, FrontMatter::Hide), 2);
+    }
+
+    #[test]
+    fn the_cursor_reveals_front_matter_the_way_it_reveals_a_fence() {
+        let lines: Vec<String> = "---\ntags: work\n---\n# Title\n"
+            .lines()
+            .map(String::from)
+            .collect();
+        let blocks = blocks_with(&lines, FrontMatter::Dim);
+        let view = |row, cursor| {
+            view_line(&lines, &blocks, row, 20, cursor, None)
+                .cells
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+        };
+        // cursor outside: shown exactly as typed, fences and all — never
+        // stretched into a rule the way a thematic break would be
+        assert_eq!(view(0, 3), "---");
+        assert_eq!(view(1, 3), "tags: work");
+        // cursor anywhere inside reveals the whole block raw
+        assert_eq!(view(2, 0), "---");
+        assert_eq!(view(1, 0), "tags: work");
+    }
+
+    #[test]
+    fn hidden_front_matter_is_skipped_until_the_cursor_moves_into_it() {
+        let lines: Vec<String> = "---\ntags: work\n---\n# Title\n"
+            .lines()
+            .map(String::from)
+            .collect();
+        let blocks = blocks_with(&lines, FrontMatter::Hide);
+        let block = md::block_at(&blocks, 1);
+        // cursor down in the prose: the block takes no rows
+        assert!(hidden_by(block, FrontMatter::Hide, 3, None));
+        // cursor inside it, or a selection reaching into it: back it comes
+        assert!(!hidden_by(block, FrontMatter::Hide, 1, None));
+        assert!(!hidden_by(
+            block,
+            FrontMatter::Hide,
+            3,
+            Some(((0, 0), (3, 2)))
+        ));
+        // dim and show never hide anything, and prose is never hidden either
+        assert!(!hidden_by(block, FrontMatter::Dim, 3, None));
+        assert!(!hidden_by(
+            md::block_at(&blocks, 3),
+            FrontMatter::Hide,
+            0,
+            None
+        ));
+    }
+
+    #[test]
     fn only_a_modified_click_follows_a_link() {
         assert!(!follows_link(KeyModifiers::NONE));
         assert!(!follows_link(KeyModifiers::SHIFT));
@@ -1874,6 +2485,9 @@ mod tests {
             "the quick brown fox jumps over the lazy dog",
             "- [ ] a task whose text runs well past the edge of the page",
             "supercalifragilisticexpialidocious and more",
+            // hidden columns run in a block here — `[[`, the target and the
+            // pipe, then `]]` — so a wrap point can fall inside one
+            "see [[stories/story-matrix|the matrix]] and then some more text",
             "",
         ] {
             let rows = segs(src, 12);
@@ -1899,5 +2513,56 @@ mod tests {
             // the rows cover the whole line, in order
             assert_eq!(rows.last().unwrap().end_src, len);
         }
+    }
+
+    #[test]
+    fn a_wikilink_target_that_climbs_out_of_the_vault_is_refused() {
+        // a link target is note text, and the only thing between a pasted
+        // vault and a write outside it is this check
+        for bad in ["../x", "/etc/x", "~/x", "a/../../x", "", "  ", "a//b"] {
+            assert!(App::link_note_path(bad).is_none(), "{bad}");
+        }
+        let (folder, name) = App::link_note_path("stories/story-matrix.md").unwrap();
+        assert_eq!(folder, PathBuf::from("stories"));
+        assert_eq!(name, "story-matrix");
+        let (folder, name) = App::link_note_path("Story Matrix").unwrap();
+        assert_eq!(folder, PathBuf::new());
+        assert_eq!(name, "Story Matrix");
+    }
+
+    #[test]
+    fn a_preview_selection_across_a_row_with_no_source_line_still_copies() {
+        use crate::render::PCell;
+        let cells = |text: &str, src: Option<usize>| -> Vec<PCell> {
+            text.chars()
+                .enumerate()
+                .map(|(i, ch)| PCell {
+                    ch,
+                    style: md::theme::PLAIN,
+                    link: None,
+                    src: src.map(|l| (l, i)),
+                })
+                .collect()
+        };
+        let rect = |y: u16| Rect::new(0, y, 20, 1);
+        let page_rows = vec![(0, rect(0), 0), (1, rect(1), 0), (2, rect(2), 0)];
+        let span = ((0, 0), (2, 4));
+
+        // the middle row is a blank line or a footer row: drawn, selectable,
+        // and nowhere in the buffer
+        let rows = vec![
+            (rect(0), Some(3), cells("alpha", Some(3))),
+            (rect(1), None, Vec::new()),
+            (rect(2), Some(5), cells("beta", Some(5))),
+        ];
+        assert_eq!(selected_text(&page_rows, &rows, span), "alpha\n\nbeta");
+
+        // and a row the draw recorded nothing at all for costs its own text,
+        // never the text of everything around it
+        let rows = vec![
+            (rect(0), Some(3), cells("alpha", Some(3))),
+            (rect(2), Some(5), cells("beta", Some(5))),
+        ];
+        assert_eq!(selected_text(&page_rows, &rows, span), "alpha\n\nbeta");
     }
 }
