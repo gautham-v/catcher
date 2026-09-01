@@ -113,6 +113,7 @@ Every setting is a `- key: value` line with a one-line hint after it. The file i
 | `page_width` | widest the note column is drawn, in columns, or `full` |
 | `borders` | `rounded`, `square`, `none` |
 | `bold_headings`, `status_bar`, `key_hints` | chrome, on or off |
+| `window_title` | the terminal window's title follows the open note's name, on or off |
 | `status_bar_items` | what the bottom line shows, in order: `path`, `name`, `mode`, `properties`, `keys`, `message` |
 | `autosave_ms`, `tab_width` | how soon a note saves, how far `tab` goes |
 | `rename_files` | whether a filename follows its note's title |

@@ -189,6 +189,8 @@ pub enum Item {
 
 pub struct App {
     pub config: Config,
+    /// The terminal title last written, so nothing is sent when unchanged.
+    last_title: Option<String>,
     pub dir: PathBuf,
     pub notes: Vec<Note>,
     pub active: usize,
@@ -443,6 +445,7 @@ impl App {
             preview_hmax: 0,
             status: None,
             quit: false,
+            last_title: None,
             dirty: false,
             last_edit: Instant::now(),
             editor_area: Rect::default(),
@@ -502,6 +505,27 @@ impl App {
         self.preview_scroll = 0;
         self.preview_hscroll = 0;
         self.preview_sel = None;
+        self.sync_title();
+    }
+
+    /// Put the open note's name in the terminal's title, if it is not there
+    /// already. Off means the title is left alone.
+    pub fn sync_title(&mut self) {
+        if !self.config.window_title {
+            return;
+        }
+        let title = self.notes[self.active]
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if self.last_title.as_deref() != Some(title.as_str()) {
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::SetTitle(title.as_str())
+            );
+            self.last_title = Some(title);
+        }
     }
 
     fn sync_editor_to_note(&mut self) {
@@ -585,6 +609,8 @@ impl App {
         self.maybe_autosave();
         self.poll_index_scan();
         self.maybe_peek();
+        // a filename that followed its title on save
+        self.sync_title();
         if let Some((_, at)) = self.status {
             if at.elapsed() > Duration::from_secs(3) {
                 self.status = None;
@@ -1297,6 +1323,7 @@ impl App {
                 // the filename is one of the names a `[[wikilink]]` reaches a
                 // note by, so a rename changes what resolves and what does not
                 self.reindex();
+                self.sync_title();
                 self.flash(format!("renamed → {name}"));
             }
             Err(e) => self.flash(format!("rename failed: {e}")),
@@ -2034,6 +2061,7 @@ impl App {
                 config.apply();
                 self.editor.tab_width = config.tab_width;
                 self.config = config;
+                self.sync_title();
                 // the roots to walk, or the setting itself, may have moved
                 self.mentions.invalidate();
                 if moved {
