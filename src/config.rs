@@ -130,6 +130,8 @@ pub struct Config {
     pub bold_headings: bool,
     pub status_bar: bool,
     pub key_hints: bool,
+    /// Whether the terminal window's title follows the open note.
+    pub window_title: bool,
     /// What the status bar shows, in the order given.
     pub status_bar_items: Vec<StatusItem>,
     pub autosave_ms: u64,
@@ -175,6 +177,7 @@ impl Default for Config {
             bold_headings: true,
             status_bar: true,
             key_hints: true,
+            window_title: true,
             status_bar_items: vec![StatusItem::Path, StatusItem::Message, StatusItem::Keys],
             autosave_ms: 500,
             tab_width: 2,
@@ -294,6 +297,7 @@ impl Config {
         c.bold_headings = flag(text, "bold_headings", c.bold_headings);
         c.status_bar = flag(text, "status_bar", c.status_bar);
         c.key_hints = flag(text, "key_hints", c.key_hints);
+        c.window_title = flag(text, "window_title", c.window_title);
         let items: Vec<StatusItem> = values(text, "status_bar_items")
             .iter()
             .flat_map(|v| v.split(',').map(str::trim).map(str::to_ascii_lowercase))
@@ -435,6 +439,7 @@ impl Config {
         d.row("bold_headings", yn(self.bold_headings), "yes · no");
         d.row("status_bar", yn(self.status_bar), "the bottom line at all");
         d.row("key_hints", yn(self.key_hints), "the shortcuts in it");
+        d.row("window_title", yn(self.window_title), "the terminal title follows the note");
         d.row(
             "status_bar_items",
             self.status_bar_items
@@ -796,6 +801,7 @@ mod tests {
             borders: BorderStyle::None,
             bold_headings: false,
             key_hints: false,
+            window_title: false,
             autosave_ms: 1500,
             tab_width: 4,
             rename_files: false,

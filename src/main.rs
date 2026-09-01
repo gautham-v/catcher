@@ -147,7 +147,26 @@ fn keys() -> Result<()> {
     Ok(())
 }
 
+/// Save the terminal's own title (xterm title stack; Ghostty, iTerm2, kitty
+/// and WezTerm honour it) so the shell's comes back on exit.
+fn push_title() {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x1b[22;0t");
+    let _ = out.flush();
+}
+
+/// Put the shell's title back; on a terminal without the stack, a blank
+/// title is the harmless fallback.
+fn pop_title() {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x1b[23;0t");
+    let _ = crossterm::execute!(out, crossterm::terminal::SetTitle(""));
+}
+
 fn tui(launch: cli::Launch) -> Result<()> {
+    push_title();
     let mut app = app::App::launch(launch)?;
     let mut terminal = ratatui::init();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
@@ -160,6 +179,7 @@ fn tui(launch: cli::Launch) -> Result<()> {
     std::panic::set_hook(Box::new(move |info| {
         pop_keyboard();
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+        pop_title();
         hook(info);
     }));
 
@@ -171,6 +191,7 @@ fn tui(launch: cli::Launch) -> Result<()> {
     pop_keyboard();
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
+    pop_title();
     result
 }
 
