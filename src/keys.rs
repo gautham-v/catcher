@@ -134,6 +134,25 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
 /// read, the new one is what gets written.
 const ALIASES: &[(&str, &str)] = &[("key_help", "key_shortcuts")];
 
+/// Defaults that a settings file may still carry from an earlier version. The
+/// settings note is written out with every key filled in, so a default that
+/// changes would otherwise stay pinned to the old key on every machine that
+/// ever ran the old build. A value equal to a superseded default is treated
+/// as "never set" and follows the current default instead.
+const SUPERSEDED: &[(&str, &[&str])] = &[
+    ("key_help", &["^G"]),
+    ("key_back", &["⌥←", "alt+left", "ctrl+⌥←", "ctrl+alt+left"]),
+    ("key_forward", &["⌥→", "alt+right", "ctrl+⌥→", "ctrl+alt+right"]),
+];
+
+fn superseded(key: &str, spec: &str) -> bool {
+    let spec = spec.trim();
+    SUPERSEDED
+        .iter()
+        .find(|(k, _)| *k == key)
+        .is_some_and(|(_, olds)| olds.iter().any(|o| o.eq_ignore_ascii_case(spec)))
+}
+
 /// One key, as the settings file spells it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Binding {
@@ -338,7 +357,8 @@ impl Keymap {
         let mut map = Keymap::default();
         for (action, key, _, _) in ACTIONS {
             let old = ALIASES.iter().find(|(new, _)| new == key).map(|(_, old)| *old);
-            if let Some(spec) = lookup(key).or_else(|| old.and_then(&lookup)) {
+            let spec = lookup(key).or_else(|| old.and_then(&lookup));
+            if let Some(spec) = spec.filter(|s| !superseded(key, s)) {
                 // an unreadable spec unbinds rather than silently keeping the
                 // default, so a typo is visible instead of mysterious
                 map.set(*action, Binding::parse_all(&spec));
@@ -523,6 +543,21 @@ mod tests {
     }
 
     #[test]
+    fn a_superseded_default_in_the_file_yields_to_the_current_one() {
+        let map = Keymap::from_settings(|k| match k {
+            "key_help" => Some("^G".to_string()),
+            "key_back" => Some("ctrl+⌥←".to_string()),
+            _ => None,
+        });
+        assert_eq!(map.action(&ev(KeyCode::F(1), KeyModifiers::NONE)), Some(Action::Help));
+        assert_eq!(map.action(&ev(KeyCode::Char('g'), KeyModifiers::CONTROL)), None);
+        assert_eq!(map.action(&ev(KeyCode::Char('b'), KeyModifiers::CONTROL)), Some(Action::NavBack));
+        // a key the user chose on purpose still wins
+        let map = Keymap::from_settings(|k| (k == "key_help").then(|| "^H".to_string()));
+        assert_eq!(map.action(&ev(KeyCode::Char('h'), KeyModifiers::CONTROL)), Some(Action::Help));
+    }
+
+    #[test]
     fn a_spec_can_name_several_keys() {
         let bs = Binding::parse_all("^K, f5 alt+k");
         assert_eq!(bs.len(), 3);
@@ -536,17 +571,18 @@ mod tests {
 
     #[test]
     fn the_old_key_shortcuts_name_still_binds_help() {
-        let map = Keymap::from_settings(|k| (k == "key_shortcuts").then(|| "^G".to_string()));
-        assert_eq!(map.action(&ev(KeyCode::Char('g'), KeyModifiers::CONTROL)), Some(Action::Help));
+        // (^G itself is a superseded default and would be ignored, so ^H)
+        let map = Keymap::from_settings(|k| (k == "key_shortcuts").then(|| "^H".to_string()));
+        assert_eq!(map.action(&ev(KeyCode::Char('h'), KeyModifiers::CONTROL)), Some(Action::Help));
         assert_eq!(map.action(&ev(KeyCode::F(1), KeyModifiers::NONE)), None);
         // the new name wins when both are present
         let map = Keymap::from_settings(|k| match k {
             "key_help" => Some("f2".to_string()),
-            "key_shortcuts" => Some("^G".to_string()),
+            "key_shortcuts" => Some("^H".to_string()),
             _ => None,
         });
         assert_eq!(map.action(&ev(KeyCode::F(2), KeyModifiers::NONE)), Some(Action::Help));
-        assert_eq!(map.action(&ev(KeyCode::Char('g'), KeyModifiers::CONTROL)), None);
+        assert_eq!(map.action(&ev(KeyCode::Char('h'), KeyModifiers::CONTROL)), None);
         // and the settings writer emits the new name, never the old
         assert!(map.settings_rows().iter().any(|(k, _, _)| *k == "key_help"));
         assert!(!map.settings_rows().iter().any(|(k, _, _)| *k == "key_shortcuts"));
