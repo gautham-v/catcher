@@ -31,8 +31,13 @@ use std::time::SystemTime;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mention {
     pub path: PathBuf,
-    pub title: String,
+    /// The file's stem, which is how every other list in the app names a note.
+    pub name: String,
+    /// Raw markdown around the link, centred on it; the renderer styles it.
     pub excerpt: String,
+    /// Where the link sits in `excerpt`, in chars, so the renderer can keep it
+    /// on screen when the excerpt is cut to the page.
+    pub link: (usize, usize),
     /// How many times that note links here. Several mentions collapse to one
     /// row — the row names a note, and a note is named once.
     pub count: usize,
@@ -48,6 +53,8 @@ pub struct Hit {
     /// string a click on the link in the body would have given it.
     pub target: String,
     pub excerpt: String,
+    /// The link's span in `excerpt`, in chars.
+    pub link: (usize, usize),
 }
 
 /// A body past this is not prose any more — a pasted log, a generated dump, a
@@ -57,10 +64,12 @@ const MAX_BODY_BYTES: u64 = 256 * 1024;
 /// The footer is a footer, not a search results page. Past this many notes the
 /// answer to "what links here" is "lots", and the list stops being readable.
 const MAX_MENTIONS: usize = 50;
-/// Chars kept per excerpt, so one pathological line cannot be carried around
-/// whole. The real cut to the page width happens at render time, which is the
-/// only place that knows the width.
-const MAX_EXCERPT: usize = 200;
+/// Chars kept either side of the link. The link is the reason the row exists,
+/// so the excerpt is cut around it rather than from the start; the real cut to
+/// the page width happens at render time, which is the only place that knows
+/// the width.
+const BEFORE_LINK: usize = 60;
+const AFTER_LINK: usize = 120;
 
 /// The note on screen, described the way the index would describe it, so that
 /// [`index::link_keys`] can say what a `[[wikilink]]` could reach it by and
@@ -115,10 +124,12 @@ pub fn mentions_in(body: &str, names: &[String]) -> Vec<Hit> {
         }
         for w in crate::md::wikilinks(line) {
             if names.contains(&crate::md::link_key(&w.target)) {
+                let (excerpt, link) = excerpt(line, w.start, w.end);
                 out.push(Hit {
                     line: line_no,
                     target: w.target.clone(),
-                    excerpt: excerpt(line, w.start, w.end),
+                    excerpt,
+                    link,
                 });
             }
         }
@@ -126,52 +137,87 @@ pub fn mentions_in(body: &str, names: &[String]) -> Vec<Hit> {
     out
 }
 
-/// The sentence around a mention, as one line of plain text.
+/// The text around a mention, as one line of markdown centred on the link.
 ///
-/// A whole line is too much — a paragraph written as one line would fill the
-/// footer — and the words either side of the link are too little to be worth
-/// reading. The sentence is what someone actually said about this note, and
-/// the leading `…` says the sentence began before what you are being shown so
-/// it does not read as a line that starts mid-thought. `at`/`end` are the
-/// link's own source columns, in chars.
-pub fn excerpt(line: &str, at: usize, end: usize) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    let at = at.min(chars.len());
-    let end = end.min(chars.len());
-    // the last sentence end before the link, which is where this sentence
-    // began. A full stop with no space after it is a version number or a
-    // filename, never the end of a sentence.
-    let mut start = 0;
-    for i in 0..at {
-        if matches!(chars[i], '.' | '!' | '?') && chars.get(i + 1).is_some_and(|c| c.is_whitespace())
-        {
-            start = i + 1;
-        }
-    }
-    let mut stop = chars.len();
-    for (i, c) in chars.iter().enumerate().skip(end) {
-        if matches!(c, '.' | '!' | '?') {
-            stop = i + 1;
-            break;
-        }
-    }
-    let text: String = chars[start..stop].iter().collect();
-    // whatever the writing looked like, the footer row is one line: runs of
-    // whitespace collapse and the indent of a nested list goes away
-    let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if start == 0 {
-        out = strip_markers(&out);
+/// The link is what the row is about, so the cut is made around it: up to
+/// [`BEFORE_LINK`] chars before and [`AFTER_LINK`] after, with `…` on any side
+/// that was trimmed. A table row is reduced to the cell holding the link,
+/// because the pipes and the other cells are the table's business, and the
+/// markers a line is drawn with (bullet, quote, heading hashes) go away. What
+/// is left is still markdown — `**bold**`, `[[link]]` — and the renderer
+/// styles it. Returns the excerpt and the link's span within it, in chars.
+/// `at`/`end` are the link's own source columns, in chars.
+pub fn excerpt(line: &str, at: usize, end: usize) -> (String, (usize, usize)) {
+    let mut chars: Vec<char> = line.chars().collect();
+    let mut at = at.min(chars.len());
+    let mut end = end.min(chars.len());
+    // a table row: keep only the cell the link is in
+    if line.trim_start().starts_with('|') {
+        let prev = chars[..at].iter().rposition(|c| *c == '|').map_or(0, |p| p + 1);
+        let next = chars[end..]
+            .iter()
+            .position(|c| *c == '|')
+            .map_or(chars.len(), |p| end + p);
+        chars = chars[prev..next].to_vec();
+        at -= prev;
+        end -= prev;
     } else {
-        out = format!("…{out}");
+        let text: String = chars.iter().collect();
+        let stripped = strip_markers(&text);
+        let removed = chars.len() - stripped.chars().count();
+        if removed <= at {
+            chars = stripped.chars().collect();
+            at -= removed;
+            end -= removed;
+        }
     }
-    out.chars().take(MAX_EXCERPT).collect()
+    // whatever the writing looked like, the footer row is one line: runs of
+    // whitespace collapse, and the link's columns move with them
+    let mut out: Vec<char> = Vec::with_capacity(chars.len());
+    let (mut new_at, mut new_end) = (0, out.len());
+    for (i, c) in chars.iter().enumerate() {
+        if i == at {
+            new_at = out.len();
+        }
+        if i == end {
+            new_end = out.len();
+        }
+        if c.is_whitespace() {
+            if !out.is_empty() && out.last() != Some(&' ') {
+                out.push(' ');
+            }
+        } else {
+            out.push(*c);
+        }
+    }
+    if end >= chars.len() {
+        new_end = out.len();
+    }
+    while out.last() == Some(&' ') {
+        out.pop();
+    }
+    let new_end = new_end.min(out.len());
+    let start = new_at.saturating_sub(BEFORE_LINK);
+    let stop = (new_end + AFTER_LINK).min(out.len());
+    let mut text = String::new();
+    let mut shift = 0;
+    if start > 0 {
+        text.push('…');
+        shift = 1;
+    }
+    text.extend(out[start..stop].iter());
+    if stop < out.len() {
+        text.push('…');
+    }
+    (text, (new_at - start + shift, new_end - start + shift))
 }
 
 /// The markers a line is drawn with rather than the words it says: a heading's
-/// hashes, a bullet, a quote mark, a checkbox. Only stripped when the sentence
-/// starts at the beginning of the line, because further in they are the text.
+/// hashes, a bullet, a quote mark, a checkbox, a callout's `[!kind]`. Only a
+/// prefix is stripped, so the columns after it move by a fixed amount.
 fn strip_markers(s: &str) -> String {
-    let t = s.trim_start_matches('#').trim_start();
+    let t = s.trim_start();
+    let t = t.trim_start_matches('#').trim_start();
     let t = ["- ", "* ", "+ ", "> "]
         .iter()
         .find_map(|m| t.strip_prefix(m))
@@ -180,6 +226,13 @@ fn strip_markers(s: &str) -> String {
         .iter()
         .find_map(|m| t.strip_prefix(m))
         .unwrap_or(t);
+    let t = match t.strip_prefix("[!") {
+        Some(rest) => rest
+            .split_once(']')
+            .map(|(_, after)| after.trim_start())
+            .unwrap_or(t),
+        None => t,
+    };
     t.to_string()
 }
 
@@ -200,7 +253,7 @@ pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Menti
     // dir — and a note read twice would be a note mentioned twice
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut entries: Vec<Entry> = Vec::new();
-    let mut found: Vec<(PathBuf, String, SystemTime, Vec<Hit>)> = Vec::new();
+    let mut found: Vec<(PathBuf, SystemTime, Vec<Hit>)> = Vec::new();
     let mut files = 0usize;
     for root in roots {
         let root = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
@@ -260,7 +313,7 @@ pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Menti
                 };
                 entries.push(Entry {
                     path: path.clone(),
-                    title: title.clone(),
+                    title,
                     rel: rel_under(&path, std::slice::from_ref(&root)),
                     folder: String::new(),
                     modified,
@@ -275,7 +328,7 @@ pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Menti
                 }
                 let hits = mentions_in(&body, &names);
                 if !hits.is_empty() {
-                    found.push((path, title, modified, hits));
+                    found.push((path, modified, hits));
                 }
             }
         }
@@ -294,7 +347,7 @@ pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Menti
     // this the footer for it costs hits × notes and takes long enough to feel
     // like the scan never finished.
     let mut verdict: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-    for (path, title, modified, hits) in found {
+    for (path, modified, hits) in found {
         // by name a `[[spec]]` could be any note called spec; the resolver is
         // the only thing that can say which, and it is the same call the click
         // on that link would make, so the footer cannot claim a mention the
@@ -309,12 +362,19 @@ pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Menti
             continue;
         };
         let count = 1 + kept.count();
+        // the stem, not the title: every other list in the app names a note
+        // by its file, and the footer should read the same way
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         out.push((
             modified,
             Mention {
                 path,
-                title,
+                name,
                 excerpt: first.excerpt.clone(),
+                link: first.link,
                 count,
             },
         ));
@@ -508,25 +568,57 @@ mod tests {
         assert_eq!(hits[0].line, 0);
     }
 
-    #[test]
-    fn the_excerpt_is_the_sentence_around_the_mention_not_the_whole_line() {
-        let line = "First one. Middle of [[spec]] here. Last one.";
+    fn excerpt_of(line: &str) -> (String, (usize, usize)) {
         let w = &crate::md::wikilinks(line)[0];
-        let e = excerpt(line, w.start, w.end);
-        assert_eq!(e, "…Middle of [[spec]] here.");
-        assert!(!e.contains("Last one"));
+        excerpt(line, w.start, w.end)
+    }
+
+    /// The chars of `e` that the span names.
+    fn spanned(e: &str, (a, b): (usize, usize)) -> String {
+        e.chars().skip(a).take(b - a).collect()
     }
 
     #[test]
-    fn an_excerpt_cut_at_its_start_says_so_with_an_ellipsis() {
-        let line = "- see [[spec]] for the rest";
-        let w = &crate::md::wikilinks(line)[0];
-        // a sentence that starts where the line does is not cut, and the
-        // bullet it was drawn with is not part of what it says
-        assert_eq!(excerpt(line, w.start, w.end), "see [[spec]] for the rest");
-        let line = "Something else entirely. And then [[spec]]";
-        let w = &crate::md::wikilinks(line)[0];
-        assert_eq!(excerpt(line, w.start, w.end), "…And then [[spec]]");
+    fn the_excerpt_is_centred_on_the_link_and_says_where_it_was_cut() {
+        let far = "x".repeat(150);
+        let line = format!("{far} before [[spec]] after {far}");
+        let (e, span) = excerpt_of(&line);
+        assert!(e.starts_with('…') && e.ends_with('…'));
+        assert_eq!(spanned(&e, span), "[[spec]]");
+        assert_eq!(e.chars().count(), 1 + BEFORE_LINK + 8 + AFTER_LINK + 1);
+        // a short line is not cut at all
+        let (e, span) = excerpt_of("see [[spec]] for the rest");
+        assert_eq!(e, "see [[spec]] for the rest");
+        assert_eq!(spanned(&e, span), "[[spec]]");
+    }
+
+    #[test]
+    fn the_markers_a_line_is_drawn_with_are_not_part_of_the_excerpt() {
+        let (e, span) = excerpt_of("- see [[spec]] for the rest");
+        assert_eq!(e, "see [[spec]] for the rest");
+        assert_eq!(spanned(&e, span), "[[spec]]");
+        let (e, _) = excerpt_of("> [!summary] TL;DR of [[spec]]");
+        assert_eq!(e, "TL;DR of [[spec]]");
+        let (e, _) = excerpt_of("  ## about [[spec]]");
+        assert_eq!(e, "about [[spec]]");
+        // markdown inside the line is kept for the renderer to style
+        let (e, span) = excerpt_of("**Projects:** [[spec]]; more");
+        assert_eq!(e, "**Projects:** [[spec]]; more");
+        assert_eq!(spanned(&e, span), "[[spec]]");
+    }
+
+    #[test]
+    fn a_table_row_is_reduced_to_the_cell_holding_the_link() {
+        let (e, span) = excerpt_of("| Projects | see [[spec]] here | tight deadline |");
+        assert_eq!(e, "see [[spec]] here");
+        assert_eq!(spanned(&e, span), "[[spec]]");
+    }
+
+    #[test]
+    fn runs_of_whitespace_collapse_without_losing_the_link() {
+        let (e, span) = excerpt_of("a   lot\tof   space [[spec|the spec]]   here");
+        assert_eq!(e, "a lot of space [[spec|the spec]] here");
+        assert_eq!(spanned(&e, span), "[[spec|the spec]]");
     }
 
     #[test]
@@ -540,7 +632,7 @@ mod tests {
         );
         let rows = scan(&target(&dir, "spec.md", "Spec"), std::slice::from_ref(&dir));
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].title, "Meta");
+        assert_eq!(rows[0].name, "meta");
         assert_eq!(rows[0].count, 2);
         assert_eq!(rows[0].excerpt, "see [[spec]] for the shape.");
         let _ = fs::remove_dir_all(&dir);
@@ -572,8 +664,8 @@ mod tests {
         write(&dir, ".obsidian/cache.md", "# Cache\n[[spec]]\n");
         write(&dir, "node_modules/readme.md", "# Dep\n[[spec]]\n");
         let rows = scan(&target(&dir, "spec.md", "Spec"), std::slice::from_ref(&dir));
-        let titles: Vec<&str> = rows.iter().map(|m| m.title.as_str()).collect();
-        assert_eq!(titles, vec!["Inner"]);
+        let names: Vec<&str> = rows.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["note"]);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -603,7 +695,7 @@ mod tests {
         // and the note the link does open still gets its row
         let rows = scan(&target(&dir, "spec.md", "Spec"), std::slice::from_ref(&dir));
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].title, "Other");
+        assert_eq!(rows[0].name, "other");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -636,7 +728,7 @@ mod tests {
         // both notes answer to the name; only one is the note the link opens
         let near = scan(&target(&dir, "spec.md", "Spec"), std::slice::from_ref(&dir));
         assert_eq!(near.len(), 1);
-        assert_eq!(near[0].title, "Other");
+        assert_eq!(near[0].name, "other");
         let far = scan(&target(&dir, "deep/spec.md", "Spec"), std::slice::from_ref(&dir));
         assert!(far.is_empty());
         let _ = fs::remove_dir_all(&dir);

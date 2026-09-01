@@ -169,14 +169,14 @@ pub fn append_mentions(r: &mut Rendered, mentions: &[crate::mentions::Mention], 
         ..Default::default()
     });
 
-    // one title column for the whole footer, so the excerpts line up and read
+    // one name column for the whole footer, so the excerpts line up and read
     // as a column rather than as ragged sentences
-    let titlew = mentions
+    let namew = mentions
         .iter()
-        .map(|m| crate::md::str_width(&m.title))
+        .map(|m| crate::md::str_width(&m.name))
         .max()
         .unwrap_or(0)
-        .min(24)
+        .min(MAX_NAME_COLS)
         .min(width.saturating_sub(2));
     for m in mentions {
         let idx = r.urls.len();
@@ -185,12 +185,12 @@ pub fn append_mentions(r: &mut Rendered, mentions: &[crate::mentions::Mention], 
         r.urls
             .push(crate::md::LinkTarget::Note(m.path.to_string_lossy().into_owned()).href());
         let mut cells = str_cells("  ", dim);
-        let mut title = truncate_cells(&str_cells(&m.title, theme::link()), titlew);
-        for c in &mut title {
+        let mut name = truncate_cells(&str_cells(&m.name, theme::link()), namew);
+        for c in &mut name {
             c.link = Some(idx);
         }
-        let pad = titlew.saturating_sub(cells_width(&title));
-        cells.extend(title);
+        let pad = namew.saturating_sub(cells_width(&name));
+        cells.extend(name);
         cells.extend(str_cells(&" ".repeat(pad), dim));
         // ×3 is the whole reason the row collapsed, so its room is taken
         // before the excerpt's and it is never the thing that gets cut away
@@ -206,7 +206,7 @@ pub fn append_mentions(r: &mut Rendered, mentions: &[crate::mentions::Mention], 
         // excerpt with a dozen columns to live in says nothing worth the space
         if room >= 12 && !m.excerpt.is_empty() {
             cells.extend(str_cells("  ", dim));
-            cells.extend(truncate_cells(&str_cells(&m.excerpt, dim), room));
+            cells.extend(excerpt_cells(&m.excerpt, m.link, dim, room));
         }
         cells.extend(str_cells(&tail, dim));
         r.lines.push(PLine {
@@ -221,6 +221,67 @@ pub fn append_mentions(r: &mut Rendered, mentions: &[crate::mentions::Mention], 
 /// The widest an excerpt is ever drawn, however wide the window is. Past this
 /// the eye stops reading the column and starts reading the page twice.
 const MAX_EXCERPT_COLS: usize = 80;
+/// The widest the name column gets: a longer name is cut, so one note with a
+/// long name cannot push every excerpt off the page.
+const MAX_NAME_COLS: usize = 28;
+
+/// An excerpt styled the way the editor would style it — bold as bold, a
+/// wikilink as its label — and cut to `room` columns around the link at
+/// `link` (a char span in `excerpt`), so the link itself is always on screen.
+/// The cells carry no link and no source position: the footer is not the
+/// note, and a click on an excerpt has nowhere in the note to go.
+fn excerpt_cells(
+    excerpt: &str,
+    link: (usize, usize),
+    base: Style,
+    room: usize,
+) -> Vec<PCell> {
+    let cells: Vec<PCell> = crate::md::style_inline(excerpt)
+        .into_iter()
+        .map(|c| PCell {
+            ch: c.ch,
+            style: base.patch(c.style),
+            link: None,
+            src: Some((0, c.src)),
+        })
+        .collect();
+    if cells_width(&cells) <= room {
+        return strip_src(cells);
+    }
+    // where the link landed once the brackets were hidden
+    let first = cells.iter().position(|c| c.src.is_some_and(|s| s.1 >= link.0));
+    let last = cells.iter().rposition(|c| c.src.is_some_and(|s| s.1 < link.1));
+    let (Some(first), Some(last)) = (first, last) else {
+        return strip_src(truncate_cells(&cells, room));
+    };
+    let before = cells_width(&cells[..first]);
+    let linkw = cells_width(&cells[first..=last]);
+    // the link fits from the start: cut from the right as any row would be
+    if before + linkw < room {
+        return strip_src(truncate_cells(&cells, room));
+    }
+    // otherwise open a window with the link a third of the way in, so what
+    // was said before it is read as context and what came after as the point
+    let lead = room.saturating_sub(linkw + 2) / 3;
+    let mut skip = first;
+    let mut skipped = 0;
+    while skip > 0 && skipped + crate::md::char_width(cells[skip - 1].ch) <= lead {
+        skip -= 1;
+        skipped += crate::md::char_width(cells[skip].ch);
+    }
+    let mut out = str_cells("…", base);
+    out.extend(truncate_cells(&cells[skip..], room.saturating_sub(1)));
+    strip_src(out)
+}
+
+/// Forget the source columns the inline styler recorded: they were only ever
+/// there to find the link, and a footer cell must not map into the note.
+fn strip_src(mut cells: Vec<PCell>) -> Vec<PCell> {
+    for c in &mut cells {
+        c.src = None;
+    }
+    cells
+}
 
 /// Where cells are currently going: the page, or a table cell being measured.
 enum Sink {
@@ -1774,13 +1835,27 @@ mod tests {
         );
     }
 
-    fn mention(title: &str, excerpt: &str, count: usize) -> crate::mentions::Mention {
+    fn mention(name: &str, excerpt: &str, count: usize) -> crate::mentions::Mention {
+        // the link span is whatever the scan would have recorded for the
+        // first wikilink; an excerpt without one has an empty span
+        let link = crate::md::wikilinks(excerpt)
+            .first()
+            .map(|w| (w.start, w.end))
+            .unwrap_or((0, 0));
         crate::mentions::Mention {
-            path: std::path::PathBuf::from(format!("/vault/{title}.md")),
-            title: title.to_string(),
+            path: std::path::PathBuf::from(format!("/vault/{name}.md")),
+            name: name.to_string(),
             excerpt: excerpt.to_string(),
+            link,
             count,
         }
+    }
+
+    fn footer_row<'a>(r: &'a Rendered, name: &str) -> &'a PLine {
+        r.lines
+            .iter()
+            .find(|l| l.text().starts_with(&format!("  {name}")))
+            .unwrap()
     }
 
     #[test]
@@ -1807,7 +1882,7 @@ mod tests {
         let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
         assert!(text.iter().any(|t| t == "2 notes link here"));
         let first = text.iter().find(|t| t.contains("meta-os-control")).unwrap();
-        assert!(first.contains("…see [[spec]] for the"));
+        assert!(first.contains("…see spec for the"));
         // several mentions in one note are one row, with the count beside it
         assert!(first.ends_with(" ×3"));
         let second = text.iter().find(|t| t.contains("ford-mvp")).unwrap();
@@ -1865,6 +1940,66 @@ mod tests {
             30,
         );
         assert!(r.lines.iter().all(|l| cells_width(&l.cells) <= 30));
+    }
+
+    #[test]
+    fn the_footer_names_a_note_by_its_file_not_its_first_line() {
+        let mut r = render("# Spec\n");
+        let mut m = mention("meta-os-control", "about [[spec]]", 1);
+        m.path = std::path::PathBuf::from("/vault/deep/meta-os-control.md");
+        append_mentions(&mut r, &[m], 60);
+        let row = footer_row(&r, "meta-os-control");
+        let name: String = row
+            .cells
+            .iter()
+            .filter(|c| c.link.is_some())
+            .map(|c| c.ch)
+            .collect();
+        assert_eq!(name, "meta-os-control");
+        assert!(row.cells.iter().filter(|c| c.link.is_some()).all(|c| c.style == theme::link()));
+    }
+
+    #[test]
+    fn the_excerpt_is_styled_rather_than_shown_as_raw_markdown() {
+        let mut r = render("# Spec\n");
+        append_mentions(
+            &mut r,
+            &[mention("meta", "**Projects:** [[spec|the spec]] and `code`", 1)],
+            80,
+        );
+        let row = footer_row(&r, "meta");
+        let text = row.text();
+        assert!(!text.contains("**"), "{text}");
+        assert!(!text.contains("[["), "{text}");
+        assert!(!text.contains('`'), "{text}");
+        assert!(text.contains("Projects: the spec and code"), "{text}");
+        // bold is bold, and the link reads as a link
+        let p = row.cells.iter().find(|c| c.ch == 'P').unwrap();
+        assert!(p.style.add_modifier.contains(Modifier::BOLD));
+        let t = row.cells.iter().find(|c| c.ch == 't').unwrap();
+        assert!(t.style.add_modifier.contains(Modifier::UNDERLINED));
+        // and nothing in the excerpt maps back into the note
+        assert!(row.cells.iter().all(|c| c.src.is_none()));
+    }
+
+    #[test]
+    fn a_long_excerpt_is_cut_around_the_link_so_the_link_stays_on_screen() {
+        let mut r = render("# Spec\n");
+        let before = "word ".repeat(30);
+        let after = " tail".repeat(30);
+        let excerpt = format!("{before}[[spec]]{after}");
+        append_mentions(&mut r, &[mention("meta", &excerpt, 1)], 60);
+        let row = footer_row(&r, "meta");
+        let text = row.text();
+        assert!(text.contains("spec"), "{text}");
+        // the window opens with an ellipsis, right after the name column
+        assert!(text.starts_with("  meta  …"), "{text}");
+        assert!(cells_width(&row.cells) <= 60);
+        // and one that fits from the start is not moved
+        let mut r = render("# Spec\n");
+        let excerpt = format!("[[spec]]{after}");
+        append_mentions(&mut r, &[mention("meta", &excerpt, 1)], 60);
+        assert!(footer_row(&r, "meta").text().contains("  spec tail"));
     }
 
     #[test]
