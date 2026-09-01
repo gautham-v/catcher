@@ -578,10 +578,14 @@ impl App {
         }
     }
 
+    /// Every way of opening a note that already exists ends here or in
+    /// `open_path`. Neither touches `view`: following a link or picking a
+    /// note from ^O while reading keeps you reading, and the same from the
+    /// editor keeps you editing. Only a note that did not exist a moment ago
+    /// (^N, a link's offer to create) and the settings note force the editor.
     fn switch_to(&mut self, idx: usize) {
         self.save_now();
         self.active = idx;
-        self.view = View::Edit;
         self.load_active_into_editor();
         self.remember_active();
     }
@@ -634,7 +638,6 @@ impl App {
                 self.save_now();
                 self.notes.insert(0, note);
                 self.active = 0;
-                self.view = View::Edit;
                 self.load_active_into_editor();
                 self.remember_active();
             }
@@ -659,6 +662,8 @@ impl App {
             }
         }
         self.open_path(&path);
+        // the settings are for editing, whatever view you came from
+        self.view = View::Edit;
         self.flash("settings — ^S applies them".to_string());
     }
 
@@ -931,6 +936,8 @@ impl App {
             Ok(note) => {
                 let path = note.path.clone();
                 self.open_path(&path);
+                // a note that is still just its title is for writing, not reading
+                self.view = View::Edit;
                 // the link that made this note stops being red at once
                 self.refresh_index();
                 self.flash(format!("created \u{201c}{name}\u{201d}"));
