@@ -1,17 +1,17 @@
-//! `~/.config/tinynote/settings.md` — the settings, as a note.
+//! `~/.config/catcher/settings.md` — the settings, as a note.
 //!
-//! Settings are markdown because they are edited *inside tinynote*: the same
+//! Settings are markdown because they are edited *inside catcher*: the same
 //! editor, the same live preview, no $EDITOR and no TOML. Every setting is a
 //! `- key: value` line under a `##` heading, with the prose around it saying
 //! what it does. Delete a line and its default stands.
 //!
-//! Notes default to `~/tinynote`, not `~/notes`: tinynote renames files to
+//! Notes default to `~/catcher`, not `~/notes`: catcher renames files to
 //! follow their titles, so pointing it at a directory someone might already
 //! keep markdown in would let it quietly reorganize a collection it was never
 //! given. A directory named after the tool can only be the tool's.
 //!
-//! `TINYNOTE_DIR` still wins over `notes_dir`, which keeps
-//! `TINYNOTE_DIR=/tmp/x cargo run` working. An old `config.toml` is read once,
+//! `CATCHER_DIR` still wins over `notes_dir`, which keeps
+//! `CATCHER_DIR=/tmp/x cargo run` working. An old `config.toml` is read once,
 //! to seed `settings.md` the first time, and never again.
 
 use crate::keys::Keymap;
@@ -44,7 +44,7 @@ pub enum PreviewClick {
     /// Place a selection anchor; dragging selects text and copies it.
     #[default]
     Select,
-    /// Drop into the editor at the same spot (how tinynote used to behave).
+    /// Drop into the editor at the same spot (how catcher used to behave).
     Edit,
 }
 
@@ -157,7 +157,7 @@ pub struct Config {
     pub status_bar_items: Vec<StatusItem>,
     pub autosave_ms: u64,
     pub tab_width: usize,
-    /// Whether a filename follows its note's title. Off means tinynote never
+    /// Whether a filename follows its note's title. Off means catcher never
     /// renames a file for you.
     pub rename_files: bool,
     pub table_style: TableStyle,
@@ -187,7 +187,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let notes_dir = home.join("tinynote");
+        let notes_dir = default_notes_dir(&home);
         Config {
             attachments_dir: notes_dir.join("attachments"),
             notes_dir,
@@ -222,10 +222,26 @@ pub fn settings_path() -> Result<PathBuf> {
 }
 
 pub fn config_dir() -> Result<PathBuf> {
-    Ok(dirs::home_dir()
-        .context("no home directory")?
-        .join(".config")
-        .join("tinynote"))
+    let config = dirs::home_dir().context("no home directory")?.join(".config");
+    let new = config.join("catcher");
+    let old = config.join("tinynote");
+    // The app was called tinynote until 0.9. A settings folder left behind
+    // by that name is still the user's settings: use it until they move it.
+    if !new.exists() && old.is_dir() {
+        return Ok(old);
+    }
+    Ok(new)
+}
+
+/// `~/catcher`, unless the notes are still in the `~/tinynote` the app
+/// used before it was renamed and no `~/catcher` exists yet.
+fn default_notes_dir(home: &Path) -> PathBuf {
+    let new = home.join("catcher");
+    let old = home.join("tinynote");
+    if !new.exists() && old.is_dir() {
+        return old;
+    }
+    new
 }
 
 /// The pre-markdown config file. Only ever read to seed `settings.md`.
@@ -251,7 +267,7 @@ impl Config {
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let config = Config::from_str(&text);
-        // A settings file written by an older tinynote is missing whatever has
+        // A settings file written by an older catcher is missing whatever has
         // been added since, and a setting you cannot see is a setting you do
         // not have. Rewriting is safe because the document is generated from
         // the config the file was just parsed into: every value survives.
@@ -279,7 +295,9 @@ impl Config {
             c.attachments_dir = c.notes_dir.join("attachments");
         }
         // the environment wins: it is how a one-off session is pointed elsewhere
-        if let Some(d) = std::env::var_os("TINYNOTE_DIR") {
+        if let Some(d) =
+            std::env::var_os("CATCHER_DIR").or_else(|| std::env::var_os("TINYNOTE_DIR"))
+        {
             c.notes_dir = PathBuf::from(d);
             c.attachments_dir = c.notes_dir.join("attachments");
         }
@@ -587,7 +605,7 @@ fn write_settings(path: &Path, config: &Config) -> Result<()> {
     fs::write(path, config.to_document()).with_context(|| format!("writing {}", path.display()))
 }
 
-/// Does `text` already mention every setting tinynote has? Compared against
+/// Does `text` already mention every setting catcher has? Compared against
 /// the document this config would generate, so the check maintains itself:
 /// a setting added to `to_document` is one an old file is missing.
 fn covers_every_setting(text: &str, config: &Config) -> bool {
@@ -789,7 +807,7 @@ mod tests {
 
     #[test]
     fn the_old_toml_spelling_still_parses_for_the_migration() {
-        let text = "# tinynote configuration.\nnotes_dir = \"/a/b\"  # trailing\n";
+        let text = "# catcher configuration.\nnotes_dir = \"/a/b\"  # trailing\n";
         assert_eq!(value(text, "notes_dir").as_deref(), Some("/a/b"));
         // a commented-out key is not a value
         assert_eq!(value("# notes_dir = \"/x\"\n", "notes_dir"), None);
@@ -842,7 +860,7 @@ mod tests {
             ..Default::default()
         };
         let back = Config::from_str(&c.to_document());
-        if std::env::var_os("TINYNOTE_DIR").is_none() {
+        if std::env::var_os("CATCHER_DIR").is_none() {
             assert_eq!(back, c);
         }
     }
@@ -934,7 +952,7 @@ mod tests {
         assert!(covers_every_setting(&fresh, &c));
         let back = Config::from_str(&fresh);
         assert_eq!(back.theme, Theme::Light);
-        if std::env::var_os("TINYNOTE_DIR").is_none() {
+        if std::env::var_os("CATCHER_DIR").is_none() {
             assert_eq!(back.notes_dir, PathBuf::from("/vault"));
         }
         // and the prose is gone
@@ -964,20 +982,20 @@ mod tests {
     fn every_default_survives_a_round_trip() {
         let c = Config::default();
         let back = Config::from_str(&c.to_document());
-        if std::env::var_os("TINYNOTE_DIR").is_none() {
+        if std::env::var_os("CATCHER_DIR").is_none() {
             assert_eq!(back, c);
         }
     }
 
     #[test]
-    fn the_defaults_are_tinynote_s_own_directory() {
-        // an unset notes_dir must never land on ~/notes: tinynote renames
+    fn the_defaults_are_catcher_s_own_directory() {
+        // an unset notes_dir must never land on ~/notes: catcher renames
         // files to follow their titles, and that directory may be someone
         // else's markdown
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let c = Config::from_str("nothing set\n");
-        if std::env::var_os("TINYNOTE_DIR").is_none() {
-            assert_eq!(c.notes_dir, home.join("tinynote"));
+        if std::env::var_os("CATCHER_DIR").is_none() {
+            assert_eq!(c.notes_dir, default_notes_dir(&home));
         }
         assert_eq!(c.attachments_dir, c.notes_dir.join("attachments"));
     }
@@ -985,7 +1003,7 @@ mod tests {
     #[test]
     fn attachments_follow_a_changed_notes_dir_unless_set_themselves() {
         let c = Config::from_str("- notes_dir: /vault\n");
-        if std::env::var_os("TINYNOTE_DIR").is_none() {
+        if std::env::var_os("CATCHER_DIR").is_none() {
             assert_eq!(c.attachments_dir, PathBuf::from("/vault/attachments"));
             let c = Config::from_str("- notes_dir: /vault\n- attachments_dir: /pics\n");
             assert_eq!(c.attachments_dir, PathBuf::from("/pics"));

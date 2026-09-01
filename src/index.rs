@@ -341,7 +341,7 @@ mod tests {
     use std::time::Duration;
 
     fn tmpdir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tinynote-index-{name}"));
+        let dir = std::env::temp_dir().join(format!("catcher-index-{name}"));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

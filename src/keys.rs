@@ -1,13 +1,13 @@
 //! User-settable key bindings.
 //!
-//! Every global action tinynote has is named here once, with the key it
+//! Every global action catcher has is named here once, with the key it
 //! answers to. The settings file overrides any of them by name, the palette
 //! shows each command's current key beside it, and the help card is generated
 //! from the same table — so a rebound key is right everywhere, and an action
 //! that isn't in this list has no key and isn't discoverable.
 //!
 //! Editor motions (⌥←, ⌘⌫, and the rest) are deliberately not here: they are
-//! the platform's text-editing conventions, not tinynote's opinions.
+//! the platform's text-editing conventions, not catcher's opinions.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

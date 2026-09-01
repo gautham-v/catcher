@@ -90,6 +90,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcher"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "crossterm",
+ "dirs",
+ "image",
+ "pulldown-cmark",
+ "ratatui",
+ "ratatui-image",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -999,21 +1014,6 @@ dependencies = [
  "quick-error",
  "weezl",
  "zune-jpeg",
-]
-
-[[package]]
-name = "tinynote"
-version = "0.8.0"
-dependencies = [
- "anyhow",
- "arboard",
- "crossterm",
- "dirs",
- "image",
- "pulldown-cmark",
- "ratatui",
- "ratatui-image",
- "unicode-width 0.2.0",
 ]
 
 [[package]]

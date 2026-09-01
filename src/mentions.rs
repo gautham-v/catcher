@@ -7,7 +7,7 @@
 //! frame, and nowhere near enough to justify an index file: a persistent link
 //! graph would make the answer instant, but it would be a file that has to
 //! stay in step with every other program that writes into the vault, and a
-//! stale graph is worse than a slow one because it lies. tinynote keeps
+//! stale graph is worse than a slow one because it lies. catcher keeps
 //! nothing beside the notes today and does not want to start here.
 //!
 //! So the cost is paid honestly and off the draw path: the reading view asks,
@@ -506,7 +506,7 @@ mod tests {
     }
 
     fn tmpdir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tinynote-mentions-{name}"));
+        let dir = std::env::temp_dir().join(format!("catcher-mentions-{name}"));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         // the walk canonicalizes its roots, so a fixture that does not would
@@ -738,7 +738,7 @@ mod tests {
     fn a_scan_of_a_vault_that_is_not_there_answers_with_nothing() {
         // the roots move under a session — a vault on a volume that is not
         // mounted, a folder someone deleted — and the footer is simply absent
-        let dir = std::env::temp_dir().join("tinynote-mentions-missing");
+        let dir = std::env::temp_dir().join("catcher-mentions-missing");
         let _ = fs::remove_dir_all(&dir);
         assert!(scan(&target(&dir, "spec.md", "Spec"), std::slice::from_ref(&dir)).is_empty());
     }

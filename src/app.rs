@@ -20,7 +20,7 @@ enum Want {
 }
 
 /// The note whose *title* best fuzzy-matches `name`, if any matches at all.
-/// Bodies are deliberately not searched: `tinynote groceries` should either
+/// Bodies are deliberately not searched: `catcher groceries` should either
 /// land on the note called Groceries or make one, never on a note that merely
 /// mentions the word.
 pub fn best_title_match(notes: &[Note], name: &str) -> Option<usize> {
@@ -271,7 +271,7 @@ pub struct App {
     /// What has been typed into the shortcuts card, which filters its rows.
     pub help_query: String,
     /// True when the session is rooted outside the configured notes dir (a
-    /// `tinynote <file>` / `<dir>` invocation). Renaming and image paste are
+    /// `catcher <file>` / `<dir>` invocation). Renaming and image paste are
     /// decided per note now — quick-open can reach anywhere — but the flag
     /// still says what kind of session this is.
     #[allow(dead_code)]
@@ -394,9 +394,9 @@ impl App {
                 .unwrap_or_else(|_| config.notes_dir.clone());
 
         let recents = index::load_recent();
-        // a plain `tinynote` picks up where you left off: the note you had
+        // a plain `catcher` picks up where you left off: the note you had
         // open when you closed it, wherever it lives. Only a launch that names
-        // nothing gets this — `tinynote <file>` asked for something else.
+        // nothing gets this — `catcher <file>` asked for something else.
         let restore = matches!(launch, Launch::Default)
             .then(|| recents.first().cloned())
             .flatten();
@@ -540,7 +540,7 @@ impl App {
         }
     }
 
-    /// Is `path` a file tinynote may rename to follow its title? Only inside
+    /// Is `path` a file catcher may rename to follow its title? Only inside
     /// the configured notes dir, and only while `rename_files` is on: an
     /// Obsidian vault's links are its filenames, and moving one breaks them.
     fn may_rename(&self, path: &Path) -> bool {
@@ -583,7 +583,7 @@ impl App {
             Ok(_) => {
                 self.dirty = false;
                 // a save is the only way a body under the roots changes from
-                // inside tinynote, and it is what makes a mention you have
+                // inside catcher, and it is what makes a mention you have
                 // just typed turn up in the footer of the note it names
                 self.mentions.invalidate();
             }
@@ -1025,7 +1025,7 @@ impl App {
     }
 
     /// A typed path — `~/vault/spec.md`, `/tmp/x.md` — as an openable file.
-    /// The escape hatch for a note in a folder tinynote has never been shown:
+    /// The escape hatch for a note in a folder catcher has never been shown:
     /// you can always say where it is.
     fn typed_path(&self) -> Option<PathBuf> {
         let q = self.query.trim();
@@ -2094,7 +2094,7 @@ impl App {
                 // the roots to walk, or the setting itself, may have moved
                 self.mentions.invalidate();
                 if moved {
-                    self.flash("notes_dir changed — restart tinynote".to_string());
+                    self.flash("notes_dir changed — restart catcher".to_string());
                 } else {
                     self.flash("settings applied".to_string());
                 }

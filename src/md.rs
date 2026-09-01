@@ -31,7 +31,7 @@ pub fn str_width(s: &str) -> usize {
 ///
 /// A neutral grey chassis with a single accent. Hue is never decoration: it
 /// appears in exactly three places — the top-level heading, a checked task,
-/// and the status bar when tinynote is talking about itself. Everything else
+/// and the status bar when catcher is talking about itself. Everything else
 /// is a step on the grey ramp, which is why the ramp never reaches pure black
 /// or pure white at either end: text that hits #ffffff on someone's custom
 /// background looks like a bug, not emphasis.
@@ -51,7 +51,7 @@ pub mod theme {
         Light,
     }
 
-    /// Every colour tinynote can draw with, at one polarity. Each field is
+    /// Every colour catcher can draw with, at one polarity. Each field is
     /// settable by name from the settings file, so a user who wants their own
     /// hue for links or headings sets that one field and inherits the rest.
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -306,7 +306,7 @@ pub mod theme {
             .fg(palette().dim)
             .add_modifier(Modifier::CROSSED_OUT)
     }
-    /// Status-bar state, panel titles: tinynote talking about itself.
+    /// Status-bar state, panel titles: catcher talking about itself.
     pub fn state() -> Style {
         Style::new().fg(palette().accent)
     }
@@ -1128,7 +1128,7 @@ fn find_pair(src: &[char], from: usize, ch: char) -> Option<usize> {
 // Wikilinks
 //
 // `[[note]]` is how an Obsidian vault spells a link from one of its own notes
-// to another, and a vault migrated into tinynote is full of them. The syntax
+// to another, and a vault migrated into catcher is full of them. The syntax
 // lives here, next to the rest of the inline grammar, because md.rs is the
 // leaf: it owns what the characters mean, index.rs owns which file they name,
 // and app.rs owns what happens when you press enter on one. Keeping the

@@ -1,36 +1,38 @@
-# tinynote
+# catcher
 
 https://github.com/user-attachments/assets/5a060469-40c5-4fd8-a17c-cab2e60b6f96
 
-A minimal note-taking app for the terminal. Local-first, no accounts, no sync — your notes are just a flat folder of `.md` files in `~/tinynote`, so `grep`, git, and Obsidian all work on them too.
+A minimal note-taking app for the terminal. Local-first, no accounts, no sync — your notes are just a flat folder of `.md` files in `~/catcher`, so `grep`, git, and Obsidian all work on them too.
 
 Open a terminal pane, jot something down, close it.
+
+> catcher was called **tinynote** until 0.9. The binary, the crate, the formula, and the `~/.config/catcher` and `~/catcher` folders all changed name; an existing `~/.config/tinynote` or `~/tinynote` is still picked up, and `TINYNOTE_DIR` still works, so nothing needs moving.
 
 ## Install
 
 ```
-brew install tinycomputer-io/tap/tinynote
+brew install tinycomputer-io/tap/catcher
 ```
 
 Or with cargo:
 
 ```
-cargo install tinynote
+cargo install catcher
 ```
 
-Then run `tinynote`.
+Then run `catcher`.
 
 ## Using it
 
-A bare `tinynote` reopens the note you had open when you closed it, wherever it lives. Naming something — `tinynote spec.md`, `tinynote ~/vault` — asks for that instead.
+A bare `catcher` reopens the note you had open when you closed it, wherever it lives. Naming something — `catcher spec.md`, `catcher ~/vault` — asks for that instead.
 
 One note on screen at a time. **^K** opens the palette — every note listed by filename with the folder it lives in, fuzzy-searched by filename first, then title, then body, plus commands (new, open, delete, rename file, preview, help, settings, quit).
 
-**^O** opens a note. It is the palette's twin, and the difference is what it ranks by: notes you opened most recently first, then the most recently edited, and it walks *subfolders* — so pointing tinynote at an Obsidian vault still lets you jump straight to `applications/log.md` from wherever you are. Both the list and the tree show each note by its filename, the name a `[[wikilink]]` reaches it by. Type to fuzzy-search filenames, with titles and folder paths as a second chance.
+**^O** opens a note. It is the palette's twin, and the difference is what it ranks by: notes you opened most recently first, then the most recently edited, and it walks *subfolders* — so pointing catcher at an Obsidian vault still lets you jump straight to `applications/log.md` from wherever you are. Both the list and the tree show each note by its filename, the name a `[[wikilink]]` reaches it by. Type to fuzzy-search filenames, with titles and folder paths as a second chance.
 
 **Tab** flips **^O** between the ranked list and a folder tree — the same index, the other way of looking at it. The tree opens on the note you have open, with the folders above it unfolded, so the first thing it tells you is where you are; **→** unfolds a folder or opens a note, **←** folds one or steps out to the folder it lives in, and a closed folder says how many notes are beneath it. Whatever you have typed comes along either way, so `log` and then tab shows you *where* the log notes live. `quick_open_mode: browse` in the settings makes the tree what **^O** opens on.
 
-It reaches past your notes dir three ways. A note **you have opened before** is always offered, wherever it lives — that is what the recents list is for, and it survives restarts. Folders listed in `quick_open_dirs` are searched every time. And typing a **path** — `~/vault/spec.md`, or `~/vault/spec` — opens that file directly, which is the escape hatch for a note tinynote has never been shown. Opening a note from another folder pulls it into the session; it saves back where it lives, and is never renamed.
+It reaches past your notes dir three ways. A note **you have opened before** is always offered, wherever it lives — that is what the recents list is for, and it survives restarts. Folders listed in `quick_open_dirs` are searched every time. And typing a **path** — `~/vault/spec.md`, or `~/vault/spec` — opens that file directly, which is the escape hatch for a note catcher has never been shown. Opening a note from another folder pulls it into the session; it saves back where it lives, and is never renamed.
 
 The editor is a **live preview**, Obsidian-style: headings, emphasis, `==highlight==`, code, links, quotes, bullets and `☐`/`✓` checkboxes are styled as you type, and the line the cursor is on shows its raw markdown so it's always editable. Code fences, tables, rules and images are drawn whole and flip back to source when the cursor lands inside. Long lines soft-wrap; nothing scrolls sideways. **^P** flips to the full rendered page, with images drawn inline in terminals that support graphics (Ghostty, kitty, iTerm2). The view sticks across notes: follow a link, pick a linked mention or open another note while reading and it opens as a page too; a new note always opens in the editor. Quotes keep their `▌` rail down every row, blank and wrapped ones included, and an Obsidian callout (`> [!summary] TL;DR`, or `[!note]`, `[!tip]`, `[!warning]`…) is drawn as a boxed card with its type and title across the top.
 
@@ -49,18 +51,18 @@ Notes autosave half a second after you stop typing. Mouse works as expected: cli
 ## CLI
 
 ```
-tinynote                  open the TUI on the note you last had open
-tinynote groceries        open the note whose title best matches; create it if none does
-tinynote add "buy milk"   write a new note and print its path — no TUI
-cat x | tinynote add      same, from stdin
-tinynote path             print the notes directory
-tinynote ~/vault/spec.md  open that file, with the session rooted at its folder
-tinynote ~/vault          open the TUI rooted at that folder
-tinynote --keys           print the key events your terminal sends (esc quits)
-tinynote --help           usage
+catcher                  open the TUI on the note you last had open
+catcher groceries        open the note whose title best matches; create it if none does
+catcher add "buy milk"   write a new note and print its path — no TUI
+cat x | catcher add      same, from stdin
+catcher path             print the notes directory
+catcher ~/vault/spec.md  open that file, with the session rooted at its folder
+catcher ~/vault          open the TUI rooted at that folder
+catcher --keys           print the key events your terminal sends (esc quits)
+catcher --help           usage
 ```
 
-Pointing tinynote at a file or folder roots that one session there without touching your config. Outside your configured notes dir, filenames are never auto-renamed (Obsidian links depend on them) and image paste is refused.
+Pointing catcher at a file or folder roots that one session there without touching your config. Outside your configured notes dir, filenames are never auto-renamed (Obsidian links depend on them) and image paste is refused.
 
 ## Keys
 
@@ -88,7 +90,7 @@ The palette's search box takes the Mac editing keys too: `⌘⌫` clears it, `�
 
 Editing is macOS-style — `⌘←`/`⌘→` for line start/end, `⌘↑`/`⌘↓` for top/bottom, `⌥←`/`⌥→` by word, `⌘⌫` and `⌥⌫` to delete, `⌘A` to select all. Add `⇧` to any movement to extend the selection. `^`-click or `⌥`-click follows a link.
 
-If a shortcut misbehaves, run `tinynote --keys` to see what your terminal actually sends. Ghostty binds most Mac editing keys to legacy control codes, which tinynote handles — except `⌘↑`/`⌘↓`, which Ghostty keeps for itself. Use `^Home`/`^End`, or unbind them:
+If a shortcut misbehaves, run `catcher --keys` to see what your terminal actually sends. Ghostty binds most Mac editing keys to legacy control codes, which catcher handles — except `⌘↑`/`⌘↓`, which Ghostty keeps for itself. Use `^Home`/`^End`, or unbind them:
 
 ```
 keybind = cmd+up=unbind
@@ -101,14 +103,14 @@ keybind = cmd+down=unbind
 
 Every note you land on — from **^O**, the tree, a `[[wikilink]]`, a linked mention, **^N** — goes on a history, and `^B` / `^F` walk it the way a browser does: going back and then opening something else drops what was ahead, and a note deleted in the meantime is skipped.
 
-Settings are a note. **^,** opens `~/.config/tinynote/settings.md` in tinynote itself — same editor, same preview, no `$EDITOR` and no TOML — and **^S** applies it at once. Colours, page width and everything else but `notes_dir` change on the next frame.
+Settings are a note. **^,** opens `~/.config/catcher/settings.md` in catcher itself — same editor, same preview, no `$EDITOR` and no TOML — and **^S** applies it at once. Colours, page width and everything else but `notes_dir` change on the next frame.
 
 Every setting is a `- key: value` line with a one-line hint after it. The file is written on first run with all of them in it, and rewritten when a new setting appears — your values are kept, since the file is generated from the settings it was just read into.
 
 | | |
 | --- | --- |
-| `notes_dir`, `attachments_dir` | where notes and pasted images live (`~/` expands; `TINYNOTE_DIR` overrides the first) |
-| `theme` | `auto` (the default: tinynote asks the terminal which way its background runs at startup), `dark`, or `light` |
+| `notes_dir`, `attachments_dir` | where notes and pasted images live (`~/` expands; `CATCHER_DIR` overrides the first) |
+| `theme` | `auto` (the default: catcher asks the terminal which way its background runs at startup), `dark`, or `light` |
 | `accent`, `bright`, `grey`, `dim`, `link`, `code_bg`, `code_fg`, `border`, `danger`, `ground` | the ten colours, as `#rrggbb`, `#rgb`, an ANSI name, `default`, or `theme` to leave it to the theme |
 | `page_width` | widest the note column is drawn, in columns, or `full` |
 | `borders` | `rounded`, `square`, `none` |
@@ -132,7 +134,7 @@ An existing `config.toml` is read once, to seed `settings.md`, and then left alo
 ## Development
 
 ```
-cargo run      # against ~/tinynote (set TINYNOTE_DIR to test elsewhere)
+cargo run      # against ~/catcher (set CATCHER_DIR to test elsewhere)
 cargo test
 cargo clippy
 ```

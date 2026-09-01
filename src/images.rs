@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn resolves_beside_the_note_and_in_attachments() {
-        let dir = std::env::temp_dir().join("tinynote-images-test");
+        let dir = std::env::temp_dir().join("catcher-images-test");
         let att = dir.join("attachments");
         std::fs::create_dir_all(&att).unwrap();
         std::fs::write(dir.join("a.png"), b"x").unwrap();

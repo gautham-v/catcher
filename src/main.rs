@@ -74,7 +74,7 @@ fn main() -> Result<()> {
         cli::Cli::Add(text) => return add(text),
         cli::Cli::Keys => return keys(),
         cli::Cli::Error(msg) => {
-            eprintln!("tinynote: {msg}\n\n{}", cli::USAGE);
+            eprintln!("catcher: {msg}\n\n{}", cli::USAGE);
             std::process::exit(2);
         }
     };
@@ -93,7 +93,7 @@ fn probe(s: &str) -> cli::PathKind {
     }
 }
 
-/// `tinynote add` — capture without ever starting the TUI. The first line
+/// `catcher add` — capture without ever starting the TUI. The first line
 /// becomes the title and so the filename; the path is printed for scripts.
 fn add(text: Option<String>) -> Result<()> {
     let text = match text {
@@ -115,7 +115,7 @@ fn add(text: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// `tinynote --keys` — ground truth about a terminal.
+/// `catcher --keys` — ground truth about a terminal.
 ///
 /// Raw mode, the keyboard enhancement pushed exactly as the TUI pushes it, and
 /// then every key event printed as it arrives, until Esc. What a terminal

@@ -1,28 +1,28 @@
 //! Hand-rolled argument parsing. No clap: the surface is five shapes.
 //!
 //! ```text
-//! tinynote                 open the TUI on the newest note
-//! tinynote <name>          fuzzy-open a note by title, or create it
-//! tinynote <file>.md       open the TUI on that file, rooted at its parent
-//! tinynote <dir>           open the TUI rooted at that directory
-//! tinynote add "text"      capture a note without the TUI (stdin if no text)
-//! tinynote path            print the resolved notes dir
+//! catcher                 open the TUI on the newest note
+//! catcher <name>          fuzzy-open a note by title, or create it
+//! catcher <file>.md       open the TUI on that file, rooted at its parent
+//! catcher <dir>           open the TUI rooted at that directory
+//! catcher add "text"      capture a note without the TUI (stdin if no text)
+//! catcher path            print the resolved notes dir
 //! ```
 
 use std::path::PathBuf;
 
 pub const USAGE: &str = "\
-tinynote — a tiny markdown notes TUI over plain files
+catcher — a tiny markdown notes TUI over plain files
 
 usage:
-  tinynote                 open the notes TUI
-  tinynote <name>          open the note whose title best matches, else create it
-  tinynote <file>.md       open that file, rooted at its parent directory
-  tinynote <dir>           open the TUI rooted at that directory
-  tinynote add [text]      write a new note from text (or stdin) and print its path
-  tinynote path            print the notes directory
-  tinynote --keys          print the key events this terminal sends (esc quits)
-  tinynote --help          this message
+  catcher                 open the notes TUI
+  catcher <name>          open the note whose title best matches, else create it
+  catcher <file>.md       open that file, rooted at its parent directory
+  catcher <dir>           open the TUI rooted at that directory
+  catcher add [text]      write a new note from text (or stdin) and print its path
+  catcher path            print the notes directory
+  catcher --keys          print the key events this terminal sends (esc quits)
+  catcher --help          this message
 ";
 
 /// What a bare argument turned out to be on disk.
@@ -60,7 +60,7 @@ pub enum Cli {
 }
 
 /// Parse argv (without argv[0]). `probe` answers what a bare string is on disk,
-/// which is what separates `tinynote notes` the directory from `tinynote notes`
+/// which is what separates `catcher notes` the directory from `catcher notes`
 /// the note title — injected so the dispatch is testable without a filesystem.
 pub fn parse(args: &[String], probe: impl Fn(&str) -> PathKind) -> Cli {
     let Some(first) = args.first() else {
