@@ -315,10 +315,22 @@ impl Peek {
             return;
         }
         let rendered = crate::render::render_page_at(&self.body, 0, width, tables);
+        // wrapped at draw width the way the reading view is, so a paragraph
+        // that overruns the popup folds instead of falling off its right edge;
+        // a wide row (a table too broad to fold) stays one row, as it does there
         self.rows = rendered
             .lines
             .iter()
-            .map(|l| crate::render::to_line(&l.cells))
+            .flat_map(|l| {
+                if l.wide {
+                    vec![crate::render::to_line(&l.cells)]
+                } else {
+                    crate::render::wrap_pcells(&l.cells, width.max(1))
+                        .iter()
+                        .map(|cells| crate::render::to_line(cells))
+                        .collect()
+                }
+            })
             .collect();
         self.rows_width = width;
         self.clamp();
@@ -2414,6 +2426,27 @@ fn screen_to_cell(area: Rect, scroll: usize, x: u16, y: u16) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn peek_wraps_long_paragraphs_at_width() {
+        let mut p = super::Peek {
+            path: PathBuf::new(),
+            target: String::new(),
+            name: String::new(),
+            body: "# A heading that is longer than thirty columns\n\nAs Lead PM for a connected vehicle platform, I nudged a long paragraph across many rows.".into(),
+            anchor: super::Rect::default(),
+            rows: Vec::new(),
+            rows_width: 0,
+            scroll: 0,
+            view_rows: 5,
+            rect: super::Rect::default(),
+        };
+        p.ensure_rendered(30, crate::config::TableStyle::default());
+        assert!(p.rows.len() > 2, "expected wrapped rows, got {}", p.rows.len());
+        for row in &p.rows {
+            assert!(row.width() <= 30, "row wider than 30: {:?}", row);
+        }
+    }
+
     #[test]
     fn peek_scroll_clamps_to_content() {
         let mut p = super::Peek {
