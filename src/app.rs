@@ -258,6 +258,8 @@ pub struct App {
     pub rename_input: String,
     /// The wikilink target the create prompt is asking about.
     pub pending_link: Option<String>,
+    /// Where you have been, for ⌥← and ⌥→.
+    pub history: crate::history::History,
     /// What has been typed into the shortcuts card, which filters its rows.
     pub help_query: String,
     /// True when the session is rooted outside the configured notes dir (a
@@ -368,6 +370,7 @@ impl App {
             preview_sel: None,
             preview_dragging: false,
             preview_page_rows: Vec::new(),
+            history: crate::history::History::default(),
         };
         app.remember_active();
         app.load_active_into_editor();
@@ -505,13 +508,33 @@ impl App {
     /// Put the note on screen at the front of the recents list, which is what
     /// quick-open ranks by.
     fn remember_active(&mut self) {
+        let path = self.notes[self.active].path.clone();
+        // history is every landing, the settings note included: ⌥← from it
+        // should go back to what you were reading
+        self.history.push(&path);
         // the settings note has its own key and its own palette row; putting
         // it at the top of "recently opened" would only push notes down
         if self.editing_settings() {
             return;
         }
-        let path = self.notes[self.active].path.clone();
         index::push_recent(&mut self.recents, &path);
+    }
+
+    /// ⌥← / ⌥→: the note before or after this one in the history. Opening
+    /// goes through `open_path`, which saves first and pushes the landing —
+    /// a push of the entry just made current is a no-op, so the stack stays
+    /// where it is.
+    fn nav_history(&mut self, back: bool) {
+        let exists = |p: &Path| p.exists();
+        let target = if back {
+            self.history.back(exists)
+        } else {
+            self.history.forward(exists)
+        };
+        match target {
+            Some(path) => self.open_path(&path),
+            None => self.flash(if back { "nothing to go back to" } else { "nothing ahead" }.to_string()),
+        }
     }
 
     /// Open any `.md` file by path, from anywhere. Already-loaded notes are
@@ -932,6 +955,7 @@ impl App {
         self.active = 0;
         self.load_active_into_editor();
         self.view = View::Edit;
+        self.history.push(&self.notes[0].path.clone());
         // the file is gone, and an index that still lists it is worse than no
         // index at all: `follow_wikilink` would resolve a `[[link]]` against
         // the entry, open nothing, and never reach the offer to create it
@@ -1232,6 +1256,8 @@ impl App {
             }
             Action::RenameFile => self.open_rename(),
             Action::FollowLink => self.follow_link_at_cursor(),
+            Action::NavBack => self.nav_history(true),
+            Action::NavForward => self.nav_history(false),
         }
     }
 
