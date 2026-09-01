@@ -1,9 +1,21 @@
 /// Case-insensitive subsequence fuzzy match. Higher is better; None = no match.
-/// Rewards contiguous runs, word-boundary hits, and early matches.
+/// Rewards contiguous runs, word-boundary hits, and early matches. A query
+/// with spaces is several words, each matched on its own, so `story mat`
+/// finds `story-matrix`: the space is where the reader's word ends, not a
+/// character the filename has to contain.
 pub fn fuzzy(query: &str, text: &str) -> Option<i64> {
-    if query.is_empty() {
+    let mut words = query.split_whitespace();
+    let Some(first) = words.next() else {
         return Some(0);
+    };
+    let mut score = fuzzy_word(first, text)?;
+    for w in words {
+        score += fuzzy_word(w, text)?;
     }
+    Some(score)
+}
+
+fn fuzzy_word(query: &str, text: &str) -> Option<i64> {
     let q: Vec<char> = query.to_lowercase().chars().collect();
     let t: Vec<char> = text.to_lowercase().chars().collect();
     let mut score: i64 = 0;
@@ -56,6 +68,14 @@ mod tests {
         let exact = fuzzy("meet", "Meeting notes").unwrap();
         let scattered = fuzzy("meet", "my extra effort today").unwrap();
         assert!(exact > scattered);
+    }
+
+    #[test]
+    fn a_space_in_the_query_separates_words_rather_than_being_one() {
+        assert!(fuzzy("story mat", "story-matrix").is_some());
+        assert!(fuzzy("story mat", "airstream-global-chip-shortage").is_none());
+        assert!(fuzzy("mat story", "story-matrix").is_some());
+        assert_eq!(fuzzy("   ", "anything"), Some(0));
     }
 
     #[test]

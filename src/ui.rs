@@ -756,6 +756,16 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
         .max()
         .unwrap_or(0);
 
+    // the name column fits the longest filename on screen, up to a ceiling,
+    // rather than cutting every note at a width sized for command names
+    let longest_name = items
+        .iter()
+        .skip(start)
+        .take(shown as usize)
+        .map(|r| crate::md::str_width(&r.name))
+        .max()
+        .unwrap_or(0)
+        .clamp(22, 40);
     for (row_i, (i, row)) in items
         .iter()
         .enumerate()
@@ -767,9 +777,9 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
         let selected = i == app.selected;
         let (name, detail, tag) = (&row.name, &row.detail, row.tag);
         let item = &row.item;
-        // quick-open is all notes, so the tag would say the same thing on
-        // every row; in the palette it is what tells a command from a note
-        let tag = if quick && tag == "note" { "" } else { tag };
+        // a note row says where it lives; a tag saying "note" on top of that
+        // is noise, and a command is already told apart by its key column
+        let tag = if tag == "note" { "" } else { tag };
         let key = match item {
             Item::Command(c) => c
                 .action()
@@ -795,7 +805,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
         // a note three folders down would be all indent and an ellipsis at 22
         let namew = (area.width as usize)
             .saturating_sub(6 + keyw + 3 + tag_width(tag))
-            .clamp(8, if browse { 40 } else { 22 });
+            .clamp(8, if browse { 40 } else { longest_name });
         let padded = pad_to(name, namew);
         // three columns of air before the key, so the description never runs
         // into it however long it is
@@ -928,7 +938,7 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
             // the filename, as in the open picker: the search ranks it first,
             // then the title, then the body. Beside it, where the note lives:
             // empty at the root, `work/airstream` below it, `~/…` outside
-            (n.name(), crate::index::folder_of(&n.path, &app.dir), "note")
+            (n.name(), folder_or_root(crate::index::folder_of(&n.path, &app.dir), app), "note")
         }
         // a typed path that exists — labelled so it is clear this is the file
         // on disk and not a search hit
@@ -942,13 +952,25 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
         Item::Entry(idx) => match app.open_index.get(*idx) {
             // the filename, not the title: it is the name the note is found
             // under on disk, and the one a wikilink reaches it by
-            Some(e) => (e.name(), e.folder.clone(), "note"),
+            Some(e) => (e.name(), folder_or_root(e.folder.clone(), app), "note"),
             None => (String::new(), String::new(), ""),
         },
         // a folder row writes its own text in `palette_rows`, where the tree
         // around it is still in hand; it never reaches here
         Item::Folder(_) => (String::new(), String::new(), ""),
     }
+}
+
+/// A note at the root has no folder of its own to show, so it gets the notes
+/// directory's name: every row then says where its note lives.
+fn folder_or_root(folder: String, app: &App) -> String {
+    if !folder.is_empty() {
+        return folder;
+    }
+    app.dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn tag_width(tag: &str) -> usize {
