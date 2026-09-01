@@ -984,7 +984,7 @@ fn draw_peek(f: &mut Frame, app: &mut App) {
         return;
     };
     let screen = f.area();
-    let width = 60.min(screen.width.saturating_sub(2)).max(10);
+    let width = 80.min(screen.width.saturating_sub(4)).max(10).min(screen.width);
     let inner_w = width.saturating_sub(2) as usize;
     peek.ensure_rendered(inner_w, table_style);
 
