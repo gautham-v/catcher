@@ -70,7 +70,7 @@ pub(crate) fn title_at(path: &Path) -> String {
 /// What to show beside a note's title: its folder relative to the notes dir,
 /// empty when it sits directly in it, and a `~/`-shortened path when it lives
 /// somewhere else entirely.
-fn folder_of(path: &Path, notes_dir: &Path) -> String {
+pub fn folder_of(path: &Path, notes_dir: &Path) -> String {
     let parent = path.parent().unwrap_or(path);
     match parent.strip_prefix(notes_dir) {
         Ok(rel) => rel.to_string_lossy().into_owned(),

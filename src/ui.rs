@@ -926,8 +926,9 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
         Item::Note(idx) => {
             let n = &app.notes[*idx];
             // the filename, as in the open picker: the search ranks it first,
-            // then the title, then the body
-            (n.name(), n.snippet(), "note")
+            // then the title, then the body. Beside it, where the note lives:
+            // empty at the root, `work/airstream` below it, `~/…` outside
+            (n.name(), crate::index::folder_of(&n.path, &app.dir), "note")
         }
         // a typed path that exists — labelled so it is clear this is the file
         // on disk and not a search hit

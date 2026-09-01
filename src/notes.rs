@@ -42,17 +42,6 @@ impl Note {
         // as a detachment for the half second before the autosave renames
         (!tracks(stem, &self.disk_title)).then(|| name.to_string())
     }
-
-    pub fn snippet(&self) -> String {
-        let mut lines = body_after_front_matter(&self.content)
-            .lines()
-            .filter(|l| !l.trim().is_empty());
-        lines.next(); // skip the title line
-        lines
-            .next()
-            .map(|l| l.trim_start_matches(['#', '>', '-', ' ']).to_string())
-            .unwrap_or_default()
-    }
 }
 
 /// The note's title: its first line of prose. YAML front matter is stepped
@@ -348,14 +337,6 @@ mod tests {
     fn front_matter_is_stepped_over_not_read_as_the_title() {
         let md = "---\ntype: log\nupdated: 2026-08-25\n---\n\n# Job Application Log\nbody\n";
         assert_eq!(title_of(md), "Job Application Log");
-        let n = Note {
-            path: PathBuf::from("/n/log.md"),
-            content: md.to_string(),
-            modified: SystemTime::now(),
-            disk_title: "Job Application Log".into(),
-        };
-        // and the snippet is the note's own prose, not a front-matter field
-        assert_eq!(n.snippet(), "body");
 
         // a rule further down is a rule, not front matter
         assert_eq!(title_of("# Title\n\n---\n\nmore"), "Title");

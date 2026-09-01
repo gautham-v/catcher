@@ -24,7 +24,7 @@ Then run `tinynote`.
 
 A bare `tinynote` reopens the note you had open when you closed it, wherever it lives. Naming something — `tinynote spec.md`, `tinynote ~/vault` — asks for that instead.
 
-One note on screen at a time. **^K** opens the palette — every note listed by filename, fuzzy-searched by filename first, then title, then body, plus commands (new, open, delete, rename file, preview, help, settings, quit).
+One note on screen at a time. **^K** opens the palette — every note listed by filename with the folder it lives in, fuzzy-searched by filename first, then title, then body, plus commands (new, open, delete, rename file, preview, help, settings, quit).
 
 **^O** opens a note. It is the palette's twin, and the difference is what it ranks by: notes you opened most recently first, then the most recently edited, and it walks *subfolders* — so pointing tinynote at an Obsidian vault still lets you jump straight to `applications/log.md` from wherever you are. Both the list and the tree show each note by its filename, the name a `[[wikilink]]` reaches it by. Type to fuzzy-search filenames, with titles and folder paths as a second chance.
 
