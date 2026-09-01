@@ -245,7 +245,23 @@ struct Ren {
     sink: Sink,
     styles: Vec<Style>,
     link: Option<usize>,
-    prefix: String,
+    /// How many `▌ ` rails the line being built sits behind — one per
+    /// enclosing plain blockquote.
+    rails: usize,
+    /// Inside a callout box (`> [!type]`). Only the outermost callout gets a
+    /// box; a callout inside it is drawn as a rail.
+    boxed: bool,
+    /// Columns the open box spans, fixed when it opened: the page width is
+    /// narrowed while a table is laid out, and the box must not follow it.
+    box_w: usize,
+    /// A quote has just opened and nothing has been drawn inside it yet, so a
+    /// block asking for a blank line above itself does not get a rail-only row.
+    quote_fresh: bool,
+    /// The last row emitted was a rail-only (or box-only) blank row.
+    quote_blank: bool,
+    /// Columns the continuation rows of the line being built hang in under
+    /// its marker — a list item wraps under its text, not under its bullet.
+    hang: usize,
     list_depth: usize,
     in_code_block: bool,
     table: Option<Table>,
@@ -286,7 +302,12 @@ impl Ren {
             sink: Sink::Page,
             styles: vec![Style::default()],
             link: None,
-            prefix: String::new(),
+            rails: 0,
+            boxed: false,
+            box_w: 0,
+            quote_fresh: false,
+            quote_blank: false,
+            hang: 0,
             list_depth: 0,
             in_code_block: false,
             table: None,
@@ -360,17 +381,111 @@ impl Ren {
             return;
         }
         let cells = std::mem::take(&mut self.cells);
-        self.out.lines.push(PLine {
-            cells,
-            checkbox: self.pending_checkbox.take(),
-            image: None,
-            src_line: self.src_line,
-            wide: false,
-        });
+        let checkbox = self.pending_checkbox.take();
+        let src_line = self.src_line;
+        let hang = std::mem::take(&mut self.hang);
+        self.emit_wrapped(cells, checkbox, None, src_line, hang);
+    }
+
+    /// Width the text of a line may use once the quote decoration around it
+    /// — box edges and rails — has taken its share.
+    fn inner_width(&self) -> usize {
+        let taken = self.rails * 2 + if self.boxed { 4 } else { 0 };
+        if self.width == usize::MAX {
+            usize::MAX
+        } else {
+            self.width.saturating_sub(taken).max(8)
+        }
+    }
+
+    /// Width a callout box is drawn at. A width no page has means the caller
+    /// did not care, so the box takes a comfortable default.
+    fn box_width(&self) -> usize {
+        if self.width == usize::MAX {
+            80
+        } else {
+            self.width.max(8)
+        }
+    }
+
+    /// Wrap a line to the room inside its quote decoration and emit each row
+    /// with its rails and box edges. Wrapping happens here, not in the draw,
+    /// so every row a quote takes gets its bar — the draw only sees rows that
+    /// already fit the page.
+    fn emit_wrapped(
+        &mut self,
+        cells: Vec<PCell>,
+        checkbox: Option<usize>,
+        image: Option<usize>,
+        src_line: Option<usize>,
+        hang: usize,
+    ) {
+        if self.rails == 0 && !self.boxed {
+            self.emit_line(PLine {
+                cells,
+                checkbox,
+                image,
+                src_line,
+                wide: false,
+            });
+            return;
+        }
+        let avail = self.inner_width();
+        let rest = avail.saturating_sub(hang).max(4);
+        for (i, row) in wrap_hang(&cells, avail, rest).into_iter().enumerate() {
+            let mut cells = if i == 0 {
+                Vec::new()
+            } else {
+                str_cells(&" ".repeat(hang), theme::PLAIN)
+            };
+            cells.extend(row);
+            self.emit_line(PLine {
+                cells,
+                checkbox: if i == 0 { checkbox } else { None },
+                image: if i == 0 { image } else { None },
+                src_line,
+                wide: false,
+            });
+        }
+    }
+
+    /// Put one row on the page, behind whatever rails and box edges the row
+    /// is inside. Every row the renderer makes goes through here, so a table
+    /// or a code line inside a quote is decorated like a paragraph is. A wide
+    /// (panning) row is left bare: its edges would pan off with it.
+    fn emit_line(&mut self, mut line: PLine) {
+        if !line.wide && (self.rails > 0 || self.boxed) {
+            let mut cells = Vec::new();
+            if self.boxed {
+                cells.extend(str_cells("│ ", theme::state()));
+            }
+            for _ in 0..self.rails {
+                cells.extend(str_cells(&format!("{} ", theme::QUOTE_BAR), theme::marker()));
+            }
+            cells.extend(line.cells);
+            if self.boxed {
+                let pad = self.box_w.saturating_sub(cells_width(&cells) + 2);
+                cells.extend(str_cells(&" ".repeat(pad), theme::PLAIN));
+                cells.extend(str_cells(" │", theme::state()));
+            }
+            line.cells = cells;
+        }
+        self.quote_fresh = false;
+        self.quote_blank = false;
+        self.out.lines.push(line);
     }
 
     fn blank(&mut self) {
         self.flush();
+        if self.rails > 0 || self.boxed {
+            // a rail-only row, once, and never as the first thing in a quote
+            if self.quote_fresh || self.quote_blank {
+                return;
+            }
+            self.emit_line(PLine::default());
+            self.quote_blank = true;
+            return;
+        }
         if !self
             .out
             .lines
@@ -382,22 +497,56 @@ impl Ren {
         }
     }
 
-    /// Start a line inside a blockquote with its `▌ ` bars. Continuation lines
-    /// get theirs at the soft break; this is the first line of each block.
-    fn line_prefix(&mut self) {
-        if self.prefix.is_empty() || !matches!(self.sink, Sink::Page) || !self.cells.is_empty() {
-            return;
+    /// Open a callout box: the title row, in the accent.
+    fn open_box(&mut self, kind: &str, title: &str) {
+        let w = self.box_width();
+        self.box_w = w;
+        let mut cells = str_cells("╭─ ", theme::state());
+        if let Some(g) = callout_glyph(kind) {
+            cells.extend(str_cells(&format!("{g} "), theme::state()));
         }
-        let p = self.prefix.clone();
-        self.push(&p, theme::marker(), None);
+        cells.extend(str_cells(kind, theme::state()));
+        if !title.is_empty() {
+            cells.extend(str_cells(" · ", theme::state()));
+            cells.extend(str_cells(
+                title,
+                theme::state().add_modifier(Modifier::BOLD),
+            ));
+        }
+        cells.push(PCell {
+            ch: ' ',
+            style: theme::state(),
+            link: None,
+            src: None,
+        });
+        let cells = truncate_cells(&cells, w.saturating_sub(1));
+        let mut row = cells;
+        let dashes = w.saturating_sub(cells_width(&row) + 1);
+        row.extend(str_cells(&"─".repeat(dashes), theme::state()));
+        row.extend(str_cells("╮", theme::state()));
+        self.out.lines.push(PLine {
+            cells: row,
+            checkbox: None,
+            image: None,
+            src_line: self.src_line,
+            wide: false,
+        });
+    }
+
+    fn close_box(&mut self) {
+        let w = self.box_w;
+        let row = format!("╰{}╯", "─".repeat(w.saturating_sub(2)));
+        self.out.lines.push(PLine {
+            cells: str_cells(&row, theme::state()),
+            checkbox: None,
+            image: None,
+            src_line: self.src_line,
+            wide: false,
+        });
     }
 
     fn indent(&self) -> String {
-        format!(
-            "{}{}",
-            self.prefix,
-            "  ".repeat(self.list_depth.saturating_sub(1))
-        )
+        "  ".repeat(self.list_depth.saturating_sub(1))
     }
 
     /// The `[[wikilink]]` starting at byte offset `off` of the source, as
@@ -529,7 +678,6 @@ impl Ren {
             Event::Start(Tag::Heading { level, .. }) => {
                 self.blank();
                 self.src_line = Some(src_line);
-                self.line_prefix();
                 self.styles.push(theme::heading(level as usize));
             }
             Event::End(TagEnd::Heading(_)) => {
@@ -541,19 +689,39 @@ impl Ren {
                     self.blank();
                     self.src_line = Some(src_line);
                 }
-                self.line_prefix();
             }
             Event::End(TagEnd::Paragraph) => self.flush(),
             Event::Start(Tag::BlockQuote(_)) => {
                 self.blank();
-                self.prefix.push_str("▌ ");
+                self.src_line = Some(src_line);
+                match callout_at(&self.src, range.start) {
+                    Some((kind, title, end)) if !self.boxed => {
+                        self.open_box(&kind, &title);
+                        self.boxed = true;
+                        // the `[!type] Title` line is the box's title, not
+                        // its first paragraph: nothing in it is drawn again
+                        self.wiki_until = self.wiki_until.max(end);
+                    }
+                    Some((_, _, end)) => {
+                        self.rails += 1;
+                        self.wiki_until = self.wiki_until.max(end);
+                    }
+                    None => self.rails += 1,
+                }
+                self.quote_fresh = true;
                 self.styles.push(theme::quote());
             }
             Event::End(TagEnd::BlockQuote(_)) => {
                 self.styles.pop();
-                let n = self.prefix.len().saturating_sub("▌ ".len());
-                self.prefix.truncate(n);
                 self.flush();
+                if self.rails > 0 {
+                    self.rails -= 1;
+                } else if self.boxed {
+                    self.boxed = false;
+                    self.close_box();
+                }
+                self.quote_fresh = false;
+                self.quote_blank = false;
             }
             Event::Start(Tag::List(_)) => {
                 if self.list_depth == 0 {
@@ -569,6 +737,7 @@ impl Ren {
                 self.flush();
                 self.src_line = Some(src_line);
                 let text = format!("{}{} ", self.indent(), theme::BULLET);
+                self.hang = crate::md::str_width(&text);
                 self.push(&text, theme::marker(), None);
             }
             Event::End(TagEnd::Item) => {
@@ -587,6 +756,7 @@ impl Ren {
                     (theme::UNCHECKED, theme::marker())
                 };
                 let text = format!("{}{mark} ", self.indent());
+                self.hang = crate::md::str_width(&text);
                 self.push(&text, style, None);
                 self.pending_checkbox = Some(src_line);
                 if done {
@@ -652,13 +822,8 @@ impl Ren {
                     };
                     self.push(&label, theme::marker(), None);
                     let cells = std::mem::take(&mut self.cells);
-                    self.out.lines.push(PLine {
-                        cells,
-                        checkbox: None,
-                        image: Some(idx),
-                        src_line: self.src_line,
-                        wide: false,
-                    });
+                    let src_line = self.src_line;
+                    self.emit_wrapped(cells, None, Some(idx), src_line, 0);
                 }
             }
             // tables
@@ -726,13 +891,8 @@ impl Ren {
                         self.push_at(l, theme::code(), None, Some(off));
                         off += raw.len();
                         let cells = std::mem::take(&mut self.cells);
-                        self.out.lines.push(PLine {
-                            cells,
-                            checkbox: None,
-                            image: None,
-                            src_line: self.src_line,
-                            wide: false,
-                        });
+                        let src_line = self.src_line;
+                        self.emit_wrapped(cells, None, None, src_line, 2);
                     }
                 } else if let Some((end, target, ls, le)) = self.wikilink_here(range.start) {
                     // the label keeps its own source bytes, so `push_at` gives
@@ -756,10 +916,6 @@ impl Ren {
                 } else {
                     self.flush();
                     self.src_line = Some(src_line);
-                    if !self.prefix.is_empty() {
-                        let p = self.prefix.clone();
-                        self.push(&p, theme::marker(), None);
-                    }
                 }
             }
             Event::HardBreak => self.flush(),
@@ -780,6 +936,14 @@ impl Ren {
         if t.rows.is_empty() {
             return;
         }
+        // inside a quote the table has only the room its rails leave it
+        let page = self.width;
+        self.width = self.inner_width();
+        self.emit_table_in(&t);
+        self.width = page;
+    }
+
+    fn emit_table_in(&mut self, t: &Table) {
         let cols = t.rows.iter().map(|r| r.len()).max().unwrap_or(0);
         let measured: Vec<Vec<usize>> = t
             .rows
@@ -793,13 +957,13 @@ impl Ren {
         match self.table_shape(cols, seps, fits) {
             Shape::Grid { wrap } => {
                 let widths = crate::md::fit_widths(&natural, self.width);
-                self.emit_grid(&t, cols, &widths, wrap, false);
+                self.emit_grid(t, cols, &widths, wrap, false);
             }
             Shape::Scroll => {
                 let widths = self.scroll_widths(&natural);
-                self.emit_grid(&t, cols, &widths, true, true);
+                self.emit_grid(t, cols, &widths, true, true);
             }
-            Shape::Cards => self.emit_cards(&t, cols),
+            Shape::Cards => self.emit_cards(t, cols),
         }
     }
 
@@ -874,7 +1038,7 @@ impl Ren {
                     cells.extend(part.iter().cloned());
                     cells.extend(str_cells(&" ".repeat(right), theme::PLAIN));
                 }
-                self.out.lines.push(PLine {
+                self.emit_line(PLine {
                     cells,
                     checkbox: None,
                     image: None,
@@ -886,7 +1050,7 @@ impl Ren {
             let last = ri + 1 == t.rows.len();
             if ri == 0 || (ruled && !last) {
                 let rule = crate::md::table_rule(widths);
-                self.out.lines.push(PLine {
+                self.emit_line(PLine {
                     cells: str_cells(&rule, theme::marker()),
                     checkbox: None,
                     image: None,
@@ -924,19 +1088,12 @@ impl Ren {
             .max()
             .unwrap_or(0);
 
-        let push = |cells: Vec<PCell>, out: &mut Rendered| {
-            out.lines.push(PLine {
-                cells,
-                checkbox: None,
-                image: None,
-                src_line,
-                wide: false,
-            });
-        };
+        let mut made: Vec<Vec<PCell>> = Vec::new();
+        let push = |cells: Vec<PCell>, made: &mut Vec<Vec<PCell>>| made.push(cells);
 
         for (ri, row) in t.rows.iter().enumerate().skip(1) {
             if ri > 1 {
-                push(Vec::new(), &mut self.out);
+                push(Vec::new(), &mut made);
             }
             // the heading: the first column, which is nearly always the row's
             // name or date, marked with the same bar a blockquote uses
@@ -947,7 +1104,7 @@ impl Ren {
                 c.style = c.style.patch(theme::heading(3)).fg(theme::palette().accent);
                 c
             }));
-            push(title, &mut self.out);
+            push(title, &mut made);
 
             for ci in 1..cols {
                 let value = row.get(ci).unwrap_or(&empty);
@@ -970,9 +1127,18 @@ impl Ren {
                         str_cells(&" ".repeat(indent), theme::PLAIN)
                     };
                     cells.extend(part);
-                    push(cells, &mut self.out);
+                    push(cells, &mut made);
                 }
             }
+        }
+        for cells in made {
+            self.emit_line(PLine {
+                cells,
+                checkbox: None,
+                image: None,
+                src_line,
+                wide: false,
+            });
         }
     }
 
@@ -1005,6 +1171,54 @@ pub fn wrap_pcells(cells: &[PCell], width: usize) -> Vec<Vec<PCell>> {
         .into_iter()
         .map(|(s, e)| cells[s..e].to_vec())
         .collect()
+}
+
+/// Word-wrap like [`wrap_pcells`], but with `first` columns for the first row
+/// and `rest` for every row after it — the room a hanging indent leaves.
+fn wrap_hang(cells: &[PCell], first: usize, rest: usize) -> Vec<Vec<PCell>> {
+    if cells_width(cells) <= first {
+        return vec![cells.to_vec()];
+    }
+    let chars: Vec<char> = cells.iter().map(|c| c.ch).collect();
+    crate::md::wrap_breaks(&chars, first, rest)
+        .into_iter()
+        .map(|(s, e)| cells[s..e].to_vec())
+        .collect()
+}
+
+/// The Obsidian callout a blockquote starting at byte `start` opens with, if
+/// any: `> [!type] Title` (a `-`/`+` fold marker after the type is ignored).
+/// Returns (type, title, byte offset of the line ending), the offset so the
+/// caller can skip everything the parser hands back from that line.
+fn callout_at(src: &str, start: usize) -> Option<(String, String, usize)> {
+    let rest = src.get(start..)?;
+    let line_end = rest.find('\n').map_or(rest.len(), |i| i + 1);
+    let line = &rest[..line_end];
+    let body = line.trim_start_matches(|c: char| c == '>' || c == ' ' || c == '\t');
+    let inner = body.strip_prefix("[!")?;
+    let close = inner.find(']')?;
+    let kind = inner[..close].trim();
+    if kind.is_empty() || kind.chars().any(|c| c.is_whitespace()) {
+        return None;
+    }
+    let after = inner[close + 1..].trim_start_matches(['-', '+']);
+    let title = after.trim().to_string();
+    Some((kind.to_lowercase(), title, start + line_end))
+}
+
+/// The glyph a callout type is drawn with in its title row.
+fn callout_glyph(kind: &str) -> Option<char> {
+    match kind {
+        "summary" | "abstract" | "tldr" => Some('≡'),
+        "note" | "info" => Some('i'),
+        "tip" | "hint" => Some('✓'),
+        "warning" | "caution" => Some('!'),
+        "danger" | "error" | "bug" => Some('✗'),
+        "question" | "help" => Some('?'),
+        "example" => Some('▸'),
+        "quote" => Some('❝'),
+        _ => None,
+    }
 }
 
 /// pulldown's alignment in the shared vocabulary.
@@ -1295,6 +1509,68 @@ mod tests {
         assert_eq!(quoted, vec!["▌ first line", "▌ second line"]);
         // text outside the quote keeps its bar off
         assert!(r.lines.iter().any(|l| l.text() == "after"));
+    }
+
+    #[test]
+    fn the_rail_runs_down_blank_and_wrapped_rows_alike() {
+        let md = "> one two three four five six seven eight nine ten\n>\n> - alpha beta gamma delta epsilon zeta eta\n\nafter\n";
+        let r = render_wide(md, 24);
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        let quoted: Vec<&String> = rows.iter().filter(|t| t.starts_with("▌")).collect();
+        // one paragraph and one bullet, each wrapped, with a blank row between
+        assert!(quoted.len() >= 5, "{rows:?}");
+        assert!(quoted.iter().any(|t| t.trim() == "▌"), "blank row keeps its bar: {rows:?}");
+        for t in &quoted {
+            assert!(crate::md::str_width(t) <= 24, "{t:?}");
+        }
+        // the wrapped bullet hangs under its text, not under the bullet
+        let bullet = rows.iter().position(|t| t.contains("• alpha")).unwrap();
+        assert!(rows[bullet + 1].starts_with("▌   "), "{:?}", rows[bullet + 1]);
+        // nothing after the quote carries a bar, and the quote body is not dim
+        assert!(rows.iter().any(|t| t == "after"));
+        let body = r.lines.iter().find(|l| l.text().contains("one two")).unwrap();
+        let word = body.cells.iter().find(|c| c.ch == 'o').unwrap();
+        assert_eq!(word.style, Style::default());
+    }
+
+    #[test]
+    fn a_callout_becomes_a_box_the_width_of_the_page() {
+        let md = "> [!summary] TL;DR\n> **Situation:**\n>\n> - At Airstream, during the MY22 launch, the connected vehicle platform.\n\nafter\n";
+        let w = 40;
+        let r = render_wide(md, w);
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        let top = rows.iter().find(|t| t.starts_with('╭')).expect("top edge");
+        let bottom = rows.iter().find(|t| t.starts_with('╰')).expect("bottom edge");
+        assert_eq!(crate::md::str_width(top), w, "{top:?}");
+        assert_eq!(crate::md::str_width(bottom), w, "{bottom:?}");
+        assert!(top.ends_with('╮') && bottom.ends_with('╯'));
+        assert!(top.contains("≡ summary · TL;DR"), "{top:?}");
+        let ti = rows.iter().position(|t| t.starts_with('╭')).unwrap();
+        let bi = rows.iter().position(|t| t.starts_with('╰')).unwrap();
+        assert!(bi > ti + 2);
+        for t in &rows[ti + 1..bi] {
+            assert!(t.starts_with('│') && t.ends_with('│'), "{t:?}");
+            assert_eq!(crate::md::str_width(t), w, "{t:?}");
+        }
+        assert!(rows.iter().all(|t| !t.contains("[!summary]")), "{rows:?}");
+        assert!(rows.iter().any(|t| t.contains("Situation:")));
+        // the bullet wrapped inside the box, and blank quoted rows are bare box rows
+        assert!(rows[ti + 1..bi].iter().any(|t| t.trim_matches(|c| c == '│' || c == ' ').is_empty()));
+        assert!(rows[ti + 1..bi].iter().filter(|t| t.contains("Airstream") || t.contains("platform")).count() >= 2);
+        // text in the box still knows its source line
+        let sit = r.lines.iter().find(|l| l.text().contains("Situation")).unwrap();
+        assert_eq!(sit.cells.iter().find(|c| c.ch == 'S').unwrap().src, Some((1, 4)));
+        assert!(rows.iter().any(|t| t == "after"));
+    }
+
+    #[test]
+    fn a_callout_without_a_title_and_with_a_fold_marker_still_boxes() {
+        let r = render_wide("> [!tip]- \n> body\n", 30);
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        let top = rows.iter().find(|t| t.starts_with('╭')).unwrap();
+        assert!(top.contains("✓ tip ─"), "{top:?}");
+        assert!(!top.contains('·'));
+        assert!(rows.iter().any(|t| t.starts_with("│ body")));
     }
 
     #[test]

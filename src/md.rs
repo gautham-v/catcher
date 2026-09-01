@@ -218,10 +218,10 @@ pub mod theme {
         }
     }
 
+    /// Quoted text reads in the normal foreground: the rail is the signal,
+    /// and bold or code inside the quote should look like bold or code.
     pub fn quote() -> Style {
         Style::new()
-            .fg(palette().dim)
-            .add_modifier(Modifier::ITALIC)
     }
     pub fn marker() -> Style {
         Style::new().fg(palette().dim)
