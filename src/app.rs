@@ -145,6 +145,10 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
                 "open the link or [[wikilink]] under the pointer",
             ),
             ("wheel", "scroll without moving the cursor"),
+            (
+                "hover (reading view)",
+                "rest on a [[wikilink]] to peek at the note",
+            ),
         ],
     ),
     (
@@ -266,7 +270,34 @@ pub struct App {
     /// still says what kind of session this is.
     #[allow(dead_code)]
     pub foreign_root: bool,
+    /// The wikilink the pointer is resting on in the reading view, and when
+    /// it arrived there. A peek opens once it has stayed put for a moment.
+    hover: Option<(String, Rect, Instant)>,
+    /// The peek popup on screen, if any: the note a link points at, loaded
+    /// once when the link under the pointer changed and not touched again
+    /// for every pointer twitch after.
+    pub peek: Option<Peek>,
 }
+
+/// A floating glimpse of another note, Obsidian-style.
+#[derive(Clone, Debug)]
+pub struct Peek {
+    /// The link target it was opened for, so a hover over the same link is a
+    /// no-op rather than a re-read.
+    pub target: String,
+    /// The file's name, which titles the popup.
+    pub name: String,
+    /// The note's markdown with any front matter already cut off.
+    pub body: String,
+    /// The screen band of the link it belongs to, which the popup sits beside.
+    pub anchor: Rect,
+}
+
+/// How long the pointer rests on a link before it is taken as a request to
+/// peek, rather than as a path across the page.
+const PEEK_DWELL: Duration = Duration::from_millis(300);
+/// How many rendered rows the peek shows.
+pub const PEEK_ROWS: usize = 12;
 
 impl App {
     /// Build the app for one of the CLI's launch shapes.
@@ -363,6 +394,8 @@ impl App {
             browse: false,
             tree_open: BTreeSet::new(),
             overlay_rect: Rect::default(),
+            hover: None,
+            peek: None,
             mentions: crate::mentions::Backlinks::default(),
             recents,
             preview_sel: None,
@@ -487,6 +520,7 @@ impl App {
     pub fn tick(&mut self) {
         self.maybe_autosave();
         self.poll_index_scan();
+        self.maybe_peek();
         if let Some((_, at)) = self.status {
             if at.elapsed() > Duration::from_secs(3) {
                 self.status = None;
@@ -647,6 +681,122 @@ impl App {
     /// screen, switches to an already-loaded one, and remembers the new one in
     /// the recents list — so the save-back rules for a note outside the notes
     /// dir are inherited rather than written a second time here.
+    /// The pointer moved. Cheap on purpose — terminals send one of these for
+    /// every cell the pointer crosses — so it only compares against the link
+    /// boxes the last draw cached, and touches no file. The read happens in
+    /// [`Self::maybe_peek`] once the pointer has rested for [`PEEK_DWELL`].
+    fn on_hover(&mut self, x: u16, y: u16) {
+        if self.view != View::Preview || self.overlay != Overlay::None {
+            return;
+        }
+        let at = ratatui::layout::Position { x, y };
+        let hit = self
+            .preview_links
+            .iter()
+            .find(|(r, _)| r.contains(at))
+            .filter(|(_, url)| {
+                matches!(
+                    md::LinkTarget::parse(url),
+                    md::LinkTarget::Wiki(_) | md::LinkTarget::Note(_)
+                )
+            });
+        match hit {
+            Some((rect, url)) => {
+                let same = self.hover.as_ref().is_some_and(|(u, _, _)| u == url);
+                if !same {
+                    self.hover = Some((url.clone(), *rect, Instant::now()));
+                }
+                if self.peek.as_ref().is_some_and(|p| &p.target != url) {
+                    self.peek = None;
+                }
+            }
+            None => {
+                self.hover = None;
+                self.peek = None;
+            }
+        }
+    }
+
+    /// Open the peek for a hover that has lasted long enough.
+    fn maybe_peek(&mut self) {
+        let Some((url, rect, since)) = self.hover.clone() else {
+            return;
+        };
+        if since.elapsed() < PEEK_DWELL || self.peek.as_ref().is_some_and(|p| p.target == url) {
+            return;
+        }
+        if let Some(peek) = self.load_peek(&url, rect) {
+            self.peek = Some(peek);
+        } else {
+            // nothing to show: forget the hover so this is not retried every
+            // tick for as long as the pointer sits there
+            self.hover = None;
+        }
+    }
+
+    /// ⌥P: peek at the [[wikilink]] under the editor cursor, which is the
+    /// only cursor the app has — the reading view is pointer-driven.
+    fn peek_at_cursor(&mut self) {
+        let pos = self.editor.cursor;
+        let target = self
+            .editor
+            .lines()
+            .get(pos.0)
+            .and_then(|l| md::link_at(l, pos.1));
+        let url = match target {
+            Some(t @ (md::LinkTarget::Wiki(_) | md::LinkTarget::Note(_))) => t.href(),
+            _ => {
+                self.flash("no wikilink here".to_string());
+                return;
+            }
+        };
+        // beside the cursor's row when it is on screen, else the top of the page
+        let anchor = self
+            .edit_rows
+            .iter()
+            .find(|r| r.line == pos.0)
+            .map(|r| r.rect)
+            .unwrap_or(Rect::new(
+                self.editor_area.x,
+                self.editor_area.y,
+                self.editor_area.width,
+                1,
+            ));
+        match self.load_peek(&url, anchor) {
+            Some(p) => self.peek = Some(p),
+            None => self.flash("no such note".to_string()),
+        }
+    }
+
+    /// Read the note a link names, for a peek. `None` when the link resolves
+    /// to nothing; deliberately no vault re-walk here, which is a cost a
+    /// hover must not pay.
+    fn load_peek(&self, url: &str, anchor: Rect) -> Option<Peek> {
+        let path = match md::LinkTarget::parse(url) {
+            md::LinkTarget::Note(p) => PathBuf::from(p),
+            md::LinkTarget::Wiki(t) => match index::resolve(&self.open_index, &t) {
+                Some(e) => e.path.clone(),
+                None => self.notes[best_title_match(&self.notes, &t)?].path.clone(),
+            },
+            md::LinkTarget::Url(_) => return None,
+        };
+        // an open note may have edits the disk has not seen yet
+        let content = match self.notes.iter().find(|n| n.path == path) {
+            Some(n) => n.content.clone(),
+            None => std::fs::read_to_string(&path).ok()?,
+        };
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| url.to_string());
+        Some(Peek {
+            target: url.to_string(),
+            name,
+            body: notes::body_after_front_matter(&content).to_string(),
+            anchor,
+        })
+    }
+
     fn follow_wikilink(&mut self, target: &str) {
         if let Some(path) = index::resolve(&self.open_index, target).map(|e| e.path.clone()) {
             self.open_path(&path);
@@ -1058,6 +1208,9 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        // any key puts the peek away; the peek action itself opens a new one
+        self.peek = None;
+        self.hover = None;
         let cmd = key.modifiers.contains(KeyModifiers::SUPER);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -1232,6 +1385,7 @@ impl App {
             }
             Action::RenameFile => self.open_rename(),
             Action::FollowLink => self.follow_link_at_cursor(),
+            Action::Peek => self.peek_at_cursor(),
         }
     }
 
@@ -1768,8 +1922,11 @@ impl App {
             },
             MouseEventKind::ScrollLeft if self.view == View::Preview => self.pan(-4),
             MouseEventKind::ScrollRight if self.view == View::Preview => self.pan(4),
+            MouseEventKind::Moved => self.on_hover(ev.column, ev.row),
             MouseEventKind::Down(MouseButton::Left) => {
                 let (x, y) = (ev.column, ev.row);
+                self.peek = None;
+                self.hover = None;
                 if matches!(self.overlay, Overlay::Palette | Overlay::QuickOpen) {
                     if let Some((_, item)) = self
                         .palette_rows

@@ -63,6 +63,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_status(f, app, status);
     }
 
+    if app.overlay == Overlay::None {
+        draw_peek(f, app);
+    }
+
     match app.overlay {
         Overlay::Palette | Overlay::QuickOpen => draw_palette(f, app),
         Overlay::ConfirmDelete => draw_confirm(f, app),
@@ -971,6 +975,49 @@ fn truncate(text: &str, width: usize) -> String {
 /// The ^G card: every binding, in the groups `app::SHORTCUTS` declares. Sized
 /// to its content and centred, and dismissed by any key at all — it is a
 /// reference to glance at, not a mode to get stuck in.
+/// The peek popup: the first rows of the note a hovered (or ⌥P'd) wikilink
+/// points at, floated just under the link — or above it when the link is
+/// near the bottom — and titled with the file's name.
+fn draw_peek(f: &mut Frame, app: &App) {
+    let Some(peek) = &app.peek else {
+        return;
+    };
+    let screen = f.area();
+    let width = 60.min(screen.width.saturating_sub(2)).max(10);
+    let inner_w = width.saturating_sub(2) as usize;
+    let rendered = crate::render::render_page_at(&peek.body, 0, inner_w, app.config.table_style);
+    let mut lines: Vec<Line> = rendered
+        .lines
+        .iter()
+        .take(crate::app::PEEK_ROWS)
+        .map(|l| crate::render::to_line(&l.cells))
+        .collect();
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("(empty note)", dim())));
+    } else if rendered.lines.len() > crate::app::PEEK_ROWS {
+        lines.push(Line::from(Span::styled("…", dim())));
+    }
+    let height = (lines.len() as u16 + 2).min(screen.height);
+
+    // under the link when there is room, over it when there is not, and
+    // never off the right edge
+    let a = peek.anchor;
+    let y = if a.y + 1 + height <= screen.height {
+        a.y + 1
+    } else {
+        a.y.saturating_sub(height)
+    };
+    let x = a.x.min(screen.width.saturating_sub(width));
+    let rect = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, rect);
+    let title = format!(" {} ", truncate(&peek.name, inner_w.saturating_sub(2)));
+    let block = panel(app).title(Span::styled(title, theme::state()));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_help(f: &mut Frame, app: &App) {
     // the settable bindings first, as the settings currently have them
     let bound = app.config.keys.card_rows();
