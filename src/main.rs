@@ -20,6 +20,7 @@ mod notes;
 mod render;
 mod search;
 mod terminal;
+mod theme;
 #[cfg(test)]
 mod testutil;
 mod tree;
@@ -183,7 +184,7 @@ fn pop_title() {
 /// so a terminal that ignores the colour query still ends the read. When
 /// neither arrives in time, `COLORFGBG` (rxvt, Konsole and a few others set
 /// it) is the fallback, and dark is the fallback for that.
-fn detect_background() -> md::theme::Mode {
+fn detect_background() -> theme::Mode {
     use std::io::{IsTerminal, Read, Write};
     if !std::io::stdin().is_terminal() || std::env::var_os("TMUX").is_some() {
         return from_colorfgbg().unwrap_or_default();
@@ -220,7 +221,7 @@ fn detect_background() -> md::theme::Mode {
 
 /// The polarity in an OSC 11 reply: `]11;rgb:RRRR/GGGG/BBBB` with 1–4 hex
 /// digits per channel, terminated by ST or BEL.
-fn parse_osc11(reply: &[u8]) -> Option<md::theme::Mode> {
+fn parse_osc11(reply: &[u8]) -> Option<theme::Mode> {
     let text = String::from_utf8_lossy(reply);
     let rest = text.split("]11;").nth(1)?;
     let rest = rest.strip_prefix("rgb:")?;
@@ -236,13 +237,13 @@ fn parse_osc11(reply: &[u8]) -> Option<md::theme::Mode> {
         }
     });
     let (r, g, b) = (chan.next()??, chan.next()??, chan.next()??);
-    Some(md::theme::mode_of_background(r, g, b))
+    Some(theme::mode_of_background(r, g, b))
 }
 
 /// `COLORFGBG=fg;bg`, with the background as an ANSI index: 0–6 and 8 are
 /// dark, 7 and 9–15 are light.
-fn from_colorfgbg() -> Option<md::theme::Mode> {
-    use md::theme::Mode;
+fn from_colorfgbg() -> Option<theme::Mode> {
+    use theme::Mode;
     let v = std::env::var("COLORFGBG").ok()?;
     let bg: u8 = v.rsplit(';').next()?.trim().parse().ok()?;
     Some(match bg {
@@ -255,10 +256,10 @@ fn tui(launch: cli::Launch) -> Result<()> {
     push_title();
     // before the settings load: `theme: auto` resolves against this
     let detected = detect_background();
-    md::theme::set_detected(detected);
+    theme::set_detected(detected);
     // a terminal whose background matches the system appearance is taken to
     // follow it, and the palette then follows too — see `follow_system_theme`
-    md::theme::set_follows_system(md::theme::system_mode() == Some(detected));
+    theme::set_follows_system(theme::system_mode() == Some(detected));
     // shells out to `date` once, so it runs before raw mode
     dates::init();
     let mut app = app::App::launch(launch)?;
@@ -325,7 +326,7 @@ fn handle(app: &mut app::App, ev: Event) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use md::theme::Mode;
+    use theme::Mode;
 
     #[test]
     fn osc11_reply_tells_light_from_dark() {

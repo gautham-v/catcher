@@ -54,6 +54,15 @@ pub enum View {
     Preview,
 }
 
+/// Which of ^O's three tabs is on screen: the ranked list, the folder
+/// tree, or a search over note contents.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QuickTab {
+    Recent,
+    Tree,
+    Contents,
+}
+
 #[derive(PartialEq, Clone, Copy)]
 pub enum Overlay {
     None,
@@ -268,8 +277,58 @@ pub enum Item {
     Command(Command),
 }
 
+/// One row the reading view drew: where it sits on screen, which page row it
+/// is, and what it drew. `pan` is the display column the first drawn cell
+/// stands for — the pan for a row of a scrolling table and zero for everything
+/// else — and is what keeps a click landing on the character under the
+/// pointer. `src_line` is `None` for a row the renderer invented — a blank
+/// line between paragraphs, a linked-mentions row — which can be selected and
+/// copied but is nowhere in the buffer to click into.
+#[derive(Clone, Debug)]
+pub struct PreviewRow {
+    pub page_row: usize,
+    pub rect: Rect,
+    pub pan: usize,
+    pub src_line: Option<usize>,
+    pub cells: Vec<crate::render::PCell>,
+}
+
+/// One screen row of the reading view, after wrapping and image expansion.
+#[derive(Clone, Debug)]
+pub struct PageRow {
+    pub cells: Vec<crate::render::PCell>,
+    pub checkbox: Option<usize>,
+    pub src_line: Option<usize>,
+    /// A row of a scrolling table: never soft-wrapped, panned instead.
+    pub wide: bool,
+}
+
+/// The reading view's page as laid out before the scroll window is cut from
+/// it: parsed, folded, wrapped, with the rows its pictures take. Rebuilt only
+/// when something it was made from changes — the draw runs ten times a second
+/// whether anything happened or not, and a parse of the whole note each time
+/// is work nobody asked for.
+#[derive(Clone, Debug, Default)]
+pub struct PreviewPage {
+    /// A hash of every input the layout reads; `None` before the first draw.
+    pub key: Option<u64>,
+    pub rows: Vec<PageRow>,
+    /// (first page row, rows, image index) of each picture drawn as a band.
+    pub bands: Vec<(usize, u16, usize)>,
+    /// Link targets by index, what a cell's `link` points into.
+    pub urls: Vec<String>,
+    pub images: Vec<crate::render::ImageSpec>,
+    /// The widest table row, which bounds the sideways pan.
+    pub widest: usize,
+}
+
 pub struct App {
     pub config: Config,
+    /// Bumped whenever `config` is replaced, so anything laid out under the
+    /// old one — table style, theme colours — knows to start over.
+    pub config_gen: u64,
+    /// The reading view's laid-out page, kept between frames.
+    pub preview_page: PreviewPage,
     /// The terminal title last written, so nothing is sent when unchanged.
     last_title: Option<String>,
     pub dir: PathBuf,
@@ -315,11 +374,8 @@ pub struct App {
     /// The picture taking the whole terminal, if one is: its URL as written.
     pub zoom: Option<String>,
     pub preview_checkboxes: Vec<(Rect, usize)>,
-    /// Every drawn row, its source line, and the cells it drew. The source
-    /// line is `None` for a row the renderer invented — a blank line between
-    /// paragraphs, a linked-mentions row — which can be selected and copied
-    /// but is nowhere in the buffer to click into.
-    pub preview_rows: Vec<(Rect, Option<usize>, Vec<crate::render::PCell>)>,
+    /// Every row the last draw put on screen, in order.
+    pub preview_rows: Vec<PreviewRow>,
     pub images: Images,
     dragging: bool,
     /// Every `.md` file quick-open can reach, rebuilt each time ^O opens.
@@ -327,11 +383,8 @@ pub struct App {
     /// A walk started on a thread and not yet collected — the launch one,
     /// which must not hold up the first frame.
     index_rx: Option<std::sync::mpsc::Receiver<Vec<index::Entry>>>,
-    /// True while ^O is showing the folder tree instead of the ranked list.
-    pub browse: bool,
-    /// True while ^O is searching note contents instead. Never set together
-    /// with `browse`: the tabs are recent, tree, contents, one at a time.
-    pub contents: bool,
+    /// The ^O tab on screen: recent, tree, or contents.
+    pub tab: QuickTab,
     /// Every body the contents tab searches, one per `open_index` entry, read
     /// once when the tab is entered so a keystroke never touches the disk.
     contents_bodies: Vec<Option<crate::contents::Body>>,
@@ -362,11 +415,6 @@ pub struct App {
     pub preview_sel: Option<(PSel, PSel)>,
     /// True while the pointer is down and dragging out a preview selection.
     preview_dragging: bool,
-    /// The rows the last draw put on screen: (page row index, rect, the
-    /// display column the row's first drawn cell stands for). That last one is
-    /// the pan for a scrolling table row and zero for everything else, and is
-    /// what keeps a click landing on the character under the pointer.
-    pub preview_page_rows: Vec<(usize, Rect, usize)>,
     /// Buffer for the inline rename prompt.
     pub rename_input: String,
     /// Where you have been, for ^B and ^F.
@@ -569,6 +617,8 @@ impl App {
             help_query: String::new(),
             images: Images::new(config.attachments_dir.clone()),
             config,
+            config_gen: 0,
+            preview_page: PreviewPage::default(),
             dir,
             notes: all,
             active,
@@ -599,10 +649,9 @@ impl App {
             dragging: false,
             open_index: Vec::new(),
             index_rx: None,
-            browse: false,
+            tab: QuickTab::Recent,
             tag_filter: None,
             tree_open: BTreeSet::new(),
-            contents: false,
             contents_bodies: Vec::new(),
             move_targets: Vec::new(),
             preview_goto: None,
@@ -613,7 +662,6 @@ impl App {
             recents,
             preview_sel: None,
             preview_dragging: false,
-            preview_page_rows: Vec::new(),
             history: crate::history::History::default(),
             folds: crate::fold::Folds::default(),
             visible: crate::fold::Visible::default(),
@@ -722,16 +770,16 @@ impl App {
                     crate::fold::heading_at(self.editor.lines(), &blocks, line).is_some()
                 };
                 let at_sel = self.preview_span().and_then(|((row, _), _)| {
-                    let i = self
-                        .preview_page_rows
+                    self.preview_rows
                         .iter()
-                        .position(|(r, _, _)| *r == row)?;
-                    self.preview_rows.get(i)?.1.filter(|&l| heading(l))
+                        .find(|r| r.page_row == row)?
+                        .src_line
+                        .filter(|&l| heading(l))
                 });
                 at_sel.or_else(|| {
                     self.preview_rows
                         .iter()
-                        .filter_map(|(_, l, _)| *l)
+                        .filter_map(|r| r.src_line)
                         .find(|&l| heading(l))
                 })
             }
@@ -1089,20 +1137,21 @@ impl App {
     /// colour overrides still sit on top of the new base.
     fn follow_system_theme(&mut self) {
         if self.config.theme != crate::config::Theme::Auto
-            || !crate::md::theme::follows_system()
+            || !crate::theme::follows_system()
             || self.theme_checked.elapsed() < Duration::from_secs(2)
         {
             return;
         }
         self.theme_checked = Instant::now();
-        let Some(mode) = crate::md::theme::system_mode() else {
+        let Some(mode) = crate::theme::system_mode() else {
             return;
         };
-        if mode != crate::md::theme::detected() {
-            crate::md::theme::set_detected(mode);
+        if mode != crate::theme::detected() {
+            crate::theme::set_detected(mode);
             if let Ok(config) = Config::load() {
                 config.apply();
                 self.config = config;
+                self.config_gen += 1;
             }
         }
     }
@@ -1591,9 +1640,8 @@ impl App {
         // before `enter_browse`, which reads the index it builds
         self.refresh_index();
         self.overlay = Overlay::QuickOpen;
-        self.contents = false;
-        self.browse = self.config.quick_open_browse;
-        if self.browse {
+        self.tab = QuickTab::Recent;
+        if self.config.quick_open_browse {
             self.enter_browse();
         }
     }
@@ -1602,7 +1650,6 @@ impl App {
     fn open_search_all(&mut self) {
         self.open_quick_open();
         self.tag_filter = None;
-        self.browse = false;
         self.enter_contents();
     }
 
@@ -1610,7 +1657,7 @@ impl App {
     /// A vault of a few thousand notes is a moment's work, and after it each
     /// keystroke is string search over memory.
     fn enter_contents(&mut self) {
-        self.contents = true;
+        self.tab = QuickTab::Contents;
         self.selected = 0;
         // a note this session holds is searched as it stands in memory: the
         // file may be an autosave behind, and a hit's line number has to be
@@ -1728,15 +1775,13 @@ impl App {
         if self.tag_filter.is_some() {
             return;
         }
-        if self.browse {
-            self.browse = false;
-            self.enter_contents();
-        } else if self.contents {
-            self.contents = false;
-            self.selected = 0;
-        } else {
-            self.browse = true;
-            self.enter_browse();
+        match self.tab {
+            QuickTab::Tree => self.enter_contents(),
+            QuickTab::Contents => {
+                self.tab = QuickTab::Recent;
+                self.selected = 0;
+            }
+            QuickTab::Recent => self.enter_browse(),
         }
     }
 
@@ -1744,6 +1789,7 @@ impl App {
     /// the note you have open, so the first thing the tree tells you is where
     /// you are rather than where the vault starts.
     fn enter_browse(&mut self) {
+        self.tab = QuickTab::Tree;
         let active = std::fs::canonicalize(&self.active_note().path).ok();
         // the query comes along, because the tree about to be drawn is the
         // filtered one: a row counted against the whole vault would put the
@@ -1815,7 +1861,7 @@ impl App {
             // the tree's notes reuse `Item::Entry`, so opening one from here
             // goes down the exact path quick-open already uses; only a folder
             // needed a variant of its own
-            Overlay::QuickOpen if self.browse => self
+            Overlay::QuickOpen if self.tab == QuickTab::Tree => self
                 .browse_rows()
                 .iter()
                 .map(|r| match &r.kind {
@@ -1823,7 +1869,7 @@ impl App {
                     crate::tree::RowKind::Note { entry, .. } => Item::Entry(*entry),
                 })
                 .collect(),
-            Overlay::QuickOpen if self.contents => self
+            Overlay::QuickOpen if self.tab == QuickTab::Contents => self
                 .contents_rows()
                 .into_iter()
                 .map(|r| match r {
@@ -2002,26 +2048,10 @@ impl App {
             Item::Line(entry, line) => self.open_at_line(entry, line),
             // handled above, before the overlay was closed
             Item::Folder(_) | Item::Notice => {}
-            Item::Command(Command::NewNote) => self.new_note(),
-            Item::Command(Command::DailyNote) => self.open_daily(),
-            Item::Command(Command::QuickOpen) => self.open_quick_open(),
-            Item::Command(Command::SearchAll) => self.open_search_all(),
-            Item::Command(Command::TogglePreview) => self.toggle_preview(),
-            Item::Command(Command::Shortcuts) => {
-                self.help_query.clear();
-                self.overlay = Overlay::Help;
-            }
-            Item::Command(Command::OpenSettings) => self.open_settings(),
-            Item::Command(Command::Quit) => {
-                self.save_now();
-                self.quit = true;
-            }
-            Item::Command(Command::DeleteNote) => {
-                self.overlay = Overlay::ConfirmDelete;
-            }
-            Item::Command(Command::RenameFile) => self.open_rename(),
+            // palette-only: the one command without a key
             Item::Command(Command::MoveFile) => self.open_move(),
-            // the rest are plain actions: one path, whether by key or palette
+            // the rest are plain actions: one path, whether by key or palette;
+            // the overlay is already closed, so the toggling ones just open
             Item::Command(c) => {
                 if let Some(a) = c.action() {
                     self.run_action(a);
@@ -2197,6 +2227,12 @@ impl App {
             }
         }
 
+        self.on_mode_key(key);
+    }
+
+    /// A key no binding claimed, given to whatever is on screen: the overlay
+    /// if one is open, otherwise the preview or the editor.
+    fn on_mode_key(&mut self, key: KeyEvent) {
         match self.overlay {
             // the card is searchable, so typing filters it rather than
             // dismissing it; esc and enter are how you leave
@@ -2227,47 +2263,52 @@ impl App {
                 }
             }
             Overlay::None => match self.view {
-                View::Preview => match key.code {
-                    // ← and → pan a table too wide for the page; with nothing
-                    // to pan they do nothing rather than something surprising
-                    KeyCode::Left => self.pan(-4),
-                    KeyCode::Right => self.pan(4),
-                    KeyCode::Home => self.preview_hscroll = 0,
-                    KeyCode::Up => self.preview_scroll = self.preview_scroll.saturating_sub(1),
-                    KeyCode::Down => self.preview_scroll = self.preview_scroll.saturating_add(1),
-                    KeyCode::PageUp => self.preview_scroll = self.preview_scroll.saturating_sub(10),
-                    KeyCode::PageDown => {
-                        self.preview_scroll = self.preview_scroll.saturating_add(10)
-                    }
-                    // esc drops a selection before it drops the preview, the
-                    // same order it takes in the editor
-                    KeyCode::Esc if self.preview_sel.is_some() => self.preview_sel = None,
-                    KeyCode::Esc if self.preview_hscroll > 0 => self.preview_hscroll = 0,
-                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('e') => self.view = View::Edit,
-                    _ => {}
-                },
-                View::Edit => {
-                    // Up/Down move by display row, which only the view knows,
-                    // so they are handled here rather than in the buffer.
-                    // ⌘↑/⌘↓ (document ends) stay with the buffer.
-                    let plain = !key.modifiers.intersects(
-                        KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT,
-                    );
-                    let select = key.modifiers.contains(KeyModifiers::SHIFT);
-                    let before = self.editor.cursor.0;
-                    match key.code {
-                        KeyCode::Up if plain => self.move_vertical(false, select),
-                        KeyCode::Down if plain => self.move_vertical(true, select),
-                        _ => {
-                            if self.editor.on_key(key) {
-                                self.sync_editor_to_note();
-                            }
-                        }
-                    }
-                    self.leave_folds(before);
-                }
+                View::Preview => self.on_preview_key(key),
+                View::Edit => self.on_edit_key(key),
             },
         }
+    }
+
+    /// A key in the reading view: scrolling, panning and leaving it.
+    fn on_preview_key(&mut self, key: KeyEvent) {
+        match key.code {
+            // ← and → pan a table too wide for the page; with nothing
+            // to pan they do nothing rather than something surprising
+            KeyCode::Left => self.pan(-4),
+            KeyCode::Right => self.pan(4),
+            KeyCode::Home => self.preview_hscroll = 0,
+            KeyCode::Up => self.preview_scroll = self.preview_scroll.saturating_sub(1),
+            KeyCode::Down => self.preview_scroll = self.preview_scroll.saturating_add(1),
+            KeyCode::PageUp => self.preview_scroll = self.preview_scroll.saturating_sub(10),
+            KeyCode::PageDown => self.preview_scroll = self.preview_scroll.saturating_add(10),
+            // esc drops a selection before it drops the preview, the
+            // same order it takes in the editor
+            KeyCode::Esc if self.preview_sel.is_some() => self.preview_sel = None,
+            KeyCode::Esc if self.preview_hscroll > 0 => self.preview_hscroll = 0,
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('e') => self.view = View::Edit,
+            _ => {}
+        }
+    }
+
+    /// A key in the editor. Up/Down move by display row, which only the view
+    /// knows, so they are handled here rather than in the buffer; ⌘↑/⌘↓
+    /// (document ends) stay with the buffer.
+    fn on_edit_key(&mut self, key: KeyEvent) {
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let select = key.modifiers.contains(KeyModifiers::SHIFT);
+        let before = self.editor.cursor.0;
+        match key.code {
+            KeyCode::Up if plain => self.move_vertical(false, select),
+            KeyCode::Down if plain => self.move_vertical(true, select),
+            _ => {
+                if self.editor.on_key(key) {
+                    self.sync_editor_to_note();
+                }
+            }
+        }
+        self.leave_folds(before);
     }
 
     /// Do one of the actions a key can be bound to. The single place a
@@ -2347,7 +2388,7 @@ impl App {
             Action::NavForward => self.nav_history(false),
             Action::Peek => self.peek_at_cursor(),
             Action::SearchAll => {
-                if self.overlay == Overlay::QuickOpen && self.contents {
+                if self.overlay == Overlay::QuickOpen && self.tab == QuickTab::Contents {
                     self.overlay = Overlay::None;
                 } else {
                     self.open_search_all();
@@ -2453,7 +2494,7 @@ impl App {
             self.selected = 0;
             return;
         }
-        let tree = self.browse && self.overlay == Overlay::QuickOpen;
+        let tree = self.tab == QuickTab::Tree && self.overlay == Overlay::QuickOpen;
         match key.code {
             KeyCode::Esc => self.overlay = Overlay::None,
             KeyCode::Right if tree => self.browse_right(),
@@ -2743,8 +2784,8 @@ impl App {
         let heading = self
             .preview_rows
             .iter()
-            .find(|(r, _, _)| r.contains(at))
-            .and_then(|(_, line, _)| *line)
+            .find(|r| r.rect.contains(at))
+            .and_then(|r| r.src_line)
             .filter(|&l| crate::fold::heading_at(self.editor.lines(), &self.blocks(), l).is_some());
         if heading.is_some_and(|row| self.toggle_fold(row)) {
             return;
@@ -2784,15 +2825,17 @@ impl App {
         let hit = self
             .preview_rows
             .iter()
-            .find(|(r, _, _)| r.contains(ratatui::layout::Position { x, y }))
-            .map(|(r, row, cells)| (*r, *row, cells.clone()));
+            .find(|r| r.rect.contains(ratatui::layout::Position { x, y }))
+            .cloned();
         self.view = View::Edit;
-        if let Some((rect, row, cells)) = hit {
-            let dcol = x.saturating_sub(rect.x) as usize;
+        if let Some(row) = hit {
+            let dcol = x.saturating_sub(row.rect.x) as usize;
             // a row the renderer invented is nowhere in the buffer: better to
             // leave the cursor where it was than to answer a click on the
             // footer with the top of the note
-            if let Some(pos) = cell_source(&cells, dcol).or_else(|| row.map(|r| (r, 0))) {
+            if let Some(pos) =
+                cell_source(&row.cells, dcol).or_else(|| row.src_line.map(|r| (r, 0)))
+            {
                 self.editor.clear_selection();
                 self.editor.set_cursor(pos);
             }
@@ -2803,20 +2846,22 @@ impl App {
     /// the drawn rows clamp to the first or last one, so dragging off the top
     /// or bottom of the window extends the selection rather than stalling.
     fn preview_point(&self, x: u16, y: u16) -> Option<PSel> {
-        let first = self.preview_page_rows.first()?;
-        let last = self.preview_page_rows.last()?;
-        let (page_row, rect, offset) = if y < first.1.y {
-            *first
-        } else if y > last.1.y {
-            *last
+        let first = self.preview_rows.first()?;
+        let last = self.preview_rows.last()?;
+        let row = if y < first.rect.y {
+            first
+        } else if y > last.rect.y {
+            last
         } else {
-            *self
-                .preview_page_rows
+            self.preview_rows
                 .iter()
-                .find(|(_, r, _)| y >= r.y && y < r.y + r.height)
+                .find(|r| y >= r.rect.y && y < r.rect.y + r.rect.height)
                 .unwrap_or(last)
         };
-        Some((page_row, x.saturating_sub(rect.x) as usize + offset))
+        Some((
+            row.page_row,
+            x.saturating_sub(row.rect.x) as usize + row.pan,
+        ))
     }
 
     /// The preview selection ordered from its earlier point to its later one.
@@ -2847,11 +2892,7 @@ impl App {
     /// The text the preview selection covers, assembled from the rows the last
     /// draw recorded. `None` when nothing is selected.
     pub fn preview_selected_text(&self) -> Option<String> {
-        Some(selected_text(
-            &self.preview_page_rows,
-            &self.preview_rows,
-            self.preview_span()?,
-        ))
+        Some(selected_text(&self.preview_rows, self.preview_span()?))
     }
 
     /// The one door a link goes through, so a `wikilink:` href can never be
@@ -2882,8 +2923,7 @@ impl App {
         self.query.clear();
         self.selected = 0;
         self.tag_filter = Some((tag.to_string(), hits));
-        self.browse = false;
-        self.contents = false;
+        self.tab = QuickTab::Recent;
         self.overlay = Overlay::QuickOpen;
     }
 
@@ -3042,6 +3082,7 @@ impl App {
                 config.apply();
                 self.editor.tab_width = config.tab_width;
                 self.config = config;
+                self.config_gen += 1;
                 self.sync_title();
                 // the roots to walk, or the setting itself, may have moved
                 self.mentions.invalidate();
@@ -3082,92 +3123,13 @@ impl App {
             }
         }
         match ev.kind {
-            MouseEventKind::ScrollUp => match (self.overlay, self.view) {
-                (Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile, _) => {
-                    self.selected = self.selected.saturating_sub(1)
-                }
-                (_, View::Preview) => self.preview_scroll = self.preview_scroll.saturating_sub(2),
-                (_, View::Edit) => self.scroll_edit(-2),
-            },
-            MouseEventKind::ScrollDown => match (self.overlay, self.view) {
-                (Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile, _) => {
-                    let count = self.overlay_items().len();
-                    if count > 0 && self.selected + 1 < count {
-                        self.selected += 1;
-                    }
-                }
-                (_, View::Preview) => self.preview_scroll = self.preview_scroll.saturating_add(2),
-                (_, View::Edit) => self.scroll_edit(2),
-            },
+            MouseEventKind::ScrollUp => self.on_wheel(-2),
+            MouseEventKind::ScrollDown => self.on_wheel(2),
             MouseEventKind::ScrollLeft if self.view == View::Preview => self.pan(-4),
             MouseEventKind::ScrollRight if self.view == View::Preview => self.pan(4),
             MouseEventKind::Moved => self.on_hover(ev.column, ev.row),
             MouseEventKind::Down(MouseButton::Left) => {
-                let (x, y) = (ev.column, ev.row);
-                // a click on the popup opens the note it shows
-                if self.peek.as_ref().is_some_and(|p| p.contains(x, y)) {
-                    self.open_peek();
-                    return;
-                }
-                self.peek = None;
-                self.hover = None;
-                if matches!(
-                    self.overlay,
-                    Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile
-                ) {
-                    if let Some((_, item)) = self
-                        .palette_rows
-                        .iter()
-                        .find(|(r, _)| r.contains(ratatui::layout::Position { x, y }))
-                        .cloned()
-                    {
-                        match beside_place(ev.modifiers) {
-                            Some(place) if self.overlay == Overlay::QuickOpen => {
-                                self.run_item_beside(item, place)
-                            }
-                            _ => self.run_item(item),
-                        }
-                    } else if !self
-                        .overlay_rect
-                        .contains(ratatui::layout::Position { x, y })
-                    {
-                        // outside the box dismisses; inside it but not on a row
-                        // is the prompt, the rule or the footer hint, and a hint
-                        // line that closed the overlay when clicked would be a
-                        // small betrayal
-                        self.overlay = Overlay::None;
-                    }
-                } else if matches!(self.overlay, Overlay::ConfirmDelete | Overlay::RenameFile) {
-                    self.overlay = Overlay::None;
-                } else if self.view == View::Preview
-                    && self
-                        .editor_area
-                        .contains(ratatui::layout::Position { x, y })
-                {
-                    self.click_preview(x, y);
-                } else if self.view == View::Edit
-                    && self
-                        .editor_area
-                        .contains(ratatui::layout::Position { x, y })
-                {
-                    let pos = self.pos_at(x, y);
-                    // modifier-click follows a link instead of moving the cursor
-                    if follows_link(ev.modifiers) {
-                        if let Some(target) = self
-                            .editor
-                            .lines()
-                            .get(pos.0)
-                            .and_then(|l| md::link_at(l, pos.1))
-                        {
-                            self.follow(target);
-                            return;
-                        }
-                    }
-                    self.editor.clear_selection();
-                    self.editor.set_cursor(pos);
-                    self.editor.anchor = Some(self.editor.cursor);
-                    self.dragging = true;
-                }
+                self.on_click(ev.column, ev.row, ev.modifiers)
             }
             MouseEventKind::Drag(MouseButton::Left) if self.preview_dragging => {
                 if let (Some(point), Some((anchor, _))) =
@@ -3206,6 +3168,101 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The wheel by `delta` rows, over the list overlay if one is open,
+    /// otherwise the reading view or the editor.
+    fn on_wheel(&mut self, delta: isize) {
+        match (self.overlay, self.view) {
+            (Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile, _) => {
+                if delta < 0 {
+                    self.selected = self.selected.saturating_sub(1);
+                } else {
+                    let count = self.overlay_items().len();
+                    if count > 0 && self.selected + 1 < count {
+                        self.selected += 1;
+                    }
+                }
+            }
+            (_, View::Preview) => {
+                let n = delta.unsigned_abs() as u16;
+                self.preview_scroll = if delta < 0 {
+                    self.preview_scroll.saturating_sub(n)
+                } else {
+                    self.preview_scroll.saturating_add(n)
+                };
+            }
+            (_, View::Edit) => self.scroll_edit(delta),
+        }
+    }
+
+    /// A left click at (x, y): on the peek, an overlay, the reading view or
+    /// the editor, in that order.
+    fn on_click(&mut self, x: u16, y: u16, modifiers: KeyModifiers) {
+        // a click on the popup opens the note it shows
+        if self.peek.as_ref().is_some_and(|p| p.contains(x, y)) {
+            self.open_peek();
+            return;
+        }
+        self.peek = None;
+        self.hover = None;
+        if matches!(
+            self.overlay,
+            Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile
+        ) {
+            if let Some((_, item)) = self
+                .palette_rows
+                .iter()
+                .find(|(r, _)| r.contains(ratatui::layout::Position { x, y }))
+                .cloned()
+            {
+                match beside_place(modifiers) {
+                    Some(place) if self.overlay == Overlay::QuickOpen => {
+                        self.run_item_beside(item, place)
+                    }
+                    _ => self.run_item(item),
+                }
+            } else if !self
+                .overlay_rect
+                .contains(ratatui::layout::Position { x, y })
+            {
+                // outside the box dismisses; inside it but not on a row
+                // is the prompt, the rule or the footer hint, and a hint
+                // line that closed the overlay when clicked would be a
+                // small betrayal
+                self.overlay = Overlay::None;
+            }
+        } else if matches!(self.overlay, Overlay::ConfirmDelete | Overlay::RenameFile) {
+            self.overlay = Overlay::None;
+        } else if self.view == View::Preview
+            && self
+                .editor_area
+                .contains(ratatui::layout::Position { x, y })
+        {
+            self.click_preview(x, y);
+        } else if self.view == View::Edit
+            && self
+                .editor_area
+                .contains(ratatui::layout::Position { x, y })
+        {
+            let pos = self.pos_at(x, y);
+            // modifier-click follows a link instead of moving the cursor
+            if follows_link(modifiers) {
+                if let Some(target) = self
+                    .editor
+                    .lines()
+                    .get(pos.0)
+                    .and_then(|l| md::link_at(l, pos.1))
+                {
+                    self.follow(target);
+                    return;
+                }
+            }
+            self.editor.clear_selection();
+            self.editor.set_cursor(pos);
+            self.editor.anchor = Some(self.editor.cursor);
+            self.dragging = true;
         }
     }
 }
@@ -3311,9 +3368,9 @@ fn fold_key_takes(key: &KeyEvent, on_heading: bool) -> bool {
 /// for source column 0 — the first `#` — so a click on it lands at the start
 /// of the line and the cursor's own column mapping is untouched.
 pub fn fold_marked(mut line: md::RLine) -> md::RLine {
-    let marker = md::theme::FOLDED.chars().map(|ch| md::Cell {
+    let marker = crate::theme::FOLDED.chars().map(|ch| md::Cell {
         ch,
-        style: md::theme::fold(),
+        style: crate::theme::fold(),
         src: 0,
     });
     line.cells.splice(0..0, marker);
@@ -3390,10 +3447,6 @@ fn delete_prev_word(input: &mut String) {
     }
 }
 
-/// The text of `cells` between two display columns, as drawn. Columns rather
-/// than indices because that is what a pointer lands on, and a wide character
-/// covers two of them. `offset` is the column the first cell stands for — the
-/// pan, for a row of a scrolling table.
 /// The text a preview selection covers, from the rows the last draw recorded.
 ///
 /// Free-standing so the rule for a row that has no cells can be tested without
@@ -3401,26 +3454,16 @@ fn delete_prev_word(input: &mut String) {
 /// rather than abandoning the whole copy. Blank lines between paragraphs are
 /// already like that, and the linked-mentions footer makes them easy to drag
 /// across.
-fn selected_text(
-    page_rows: &[(usize, Rect, usize)],
-    rows: &[(Rect, Option<usize>, Vec<crate::render::PCell>)],
-    ((sr, sc), (er, ec)): (PSel, PSel),
-) -> String {
-    let empty: Vec<crate::render::PCell> = Vec::new();
+fn selected_text(rows: &[PreviewRow], ((sr, sc), (er, ec)): (PSel, PSel)) -> String {
     let mut out = String::new();
-    for (page_row, rect, offset) in page_rows {
-        let row = *page_row;
+    for r in rows {
+        let row = r.page_row;
         if row < sr || row > er {
             continue;
         }
-        let cells = rows
-            .iter()
-            .find(|(r, _, _)| r.y == rect.y)
-            .map(|(_, _, cells)| cells)
-            .unwrap_or(&empty);
-        let from = if row == sr { sc } else { *offset };
+        let from = if row == sr { sc } else { r.pan };
         let to = if row == er { ec } else { usize::MAX };
-        out.push_str(&slice_cells(cells, *offset, from, to));
+        out.push_str(&slice_cells(&r.cells, r.pan, from, to));
         if row < er {
             out.push('\n');
         }
@@ -3428,6 +3471,10 @@ fn selected_text(
     out
 }
 
+/// The text of `cells` between two display columns, as drawn. Columns rather
+/// than indices because that is what a pointer lands on, and a wide character
+/// covers two of them. `offset` is the column the first cell stands for — the
+/// pan, for a row of a scrolling table.
 fn slice_cells(cells: &[crate::render::PCell], offset: usize, from: usize, to: usize) -> String {
     let mut out = String::new();
     let mut col = offset;
@@ -3502,6 +3549,20 @@ fn beside_place(m: KeyModifiers) -> Option<crate::terminal::Place> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_palette_command_but_move_is_an_action() {
+        // run_item dispatches the palette through action(); a command that
+        // returned None would silently do nothing when picked
+        for c in super::COMMANDS {
+            assert_eq!(
+                c.action().is_none(),
+                c == super::Command::MoveFile,
+                "{}",
+                c.label().0
+            );
+        }
+    }
+
     #[test]
     fn peek_wraps_long_paragraphs_at_width() {
         let mut p = super::Peek {
@@ -3968,7 +4029,7 @@ mod tests {
         let line = fold_marked(md::style_line("## Title"));
         let text: String = line.cells.iter().map(|c| c.ch).collect();
         assert_eq!(text, "\u{25b8} Title");
-        assert_eq!(line.cells[0].style, md::theme::fold());
+        assert_eq!(line.cells[0].style, crate::theme::fold());
         let seg = line.one_row();
         // the marker stands for the start of the line; the text is where it was
         assert_eq!(seg.display_to_source(0), 0);
@@ -4061,31 +4122,28 @@ mod tests {
                 .enumerate()
                 .map(|(i, ch)| PCell {
                     ch,
-                    style: md::theme::PLAIN,
+                    style: crate::theme::PLAIN,
                     link: None,
                     src: src.map(|l| (l, i)),
                 })
                 .collect()
         };
-        let rect = |y: u16| Rect::new(0, y, 20, 1);
-        let page_rows = vec![(0, rect(0), 0), (1, rect(1), 0), (2, rect(2), 0)];
+        let row = |page_row: usize, src_line: Option<usize>, cells: Vec<PCell>| PreviewRow {
+            page_row,
+            rect: Rect::new(0, page_row as u16, 20, 1),
+            pan: 0,
+            src_line,
+            cells,
+        };
         let span = ((0, 0), (2, 4));
 
         // the middle row is a blank line or a footer row: drawn, selectable,
         // and nowhere in the buffer
         let rows = vec![
-            (rect(0), Some(3), cells("alpha", Some(3))),
-            (rect(1), None, Vec::new()),
-            (rect(2), Some(5), cells("beta", Some(5))),
+            row(0, Some(3), cells("alpha", Some(3))),
+            row(1, None, Vec::new()),
+            row(2, Some(5), cells("beta", Some(5))),
         ];
-        assert_eq!(selected_text(&page_rows, &rows, span), "alpha\n\nbeta");
-
-        // and a row the draw recorded nothing at all for costs its own text,
-        // never the text of everything around it
-        let rows = vec![
-            (rect(0), Some(3), cells("alpha", Some(3))),
-            (rect(2), Some(5), cells("beta", Some(5))),
-        ];
-        assert_eq!(selected_text(&page_rows, &rows, span), "alpha\n\nbeta");
+        assert_eq!(selected_text(&rows, span), "alpha\n\nbeta");
     }
 }

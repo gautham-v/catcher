@@ -15,7 +15,7 @@
 //! to seed `settings.md` the first time, and never again.
 
 use crate::keys::Keymap;
-use crate::md::theme::{self, Mode, Palette};
+use crate::theme::{self, Mode, Palette};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};

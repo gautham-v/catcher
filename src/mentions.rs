@@ -27,7 +27,7 @@ use std::time::SystemTime;
 
 /// One row of the footer: a note that links here, and the first thing it says
 /// around the link.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Mention {
     pub path: PathBuf,
     /// The file's stem, which is how every other list in the app names a note.

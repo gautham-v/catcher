@@ -1,6 +1,7 @@
-use crate::app::{App, EditRow, Item, Overlay, View};
+use crate::app::{App, EditRow, Item, Overlay, PageRow, PreviewPage, QuickTab, View};
 use crate::config::BorderStyle;
-use crate::md::{theme, truncate};
+use crate::md::truncate;
+use crate::theme;
 use crate::render::{wrap_pcells as wrap_cells, PCell};
 use crate::tree::RowKind;
 use ratatui::buffer::Buffer;
@@ -254,18 +255,37 @@ fn row_height(
     (rows.max(1) as u16, None)
 }
 
-/// One screen row of the preview, after wrapping and image expansion.
-struct Row {
-    cells: Vec<PCell>,
-    checkbox: Option<usize>,
-    src_line: Option<usize>,
-    /// A row of a scrolling table: never soft-wrapped, panned instead.
-    wide: bool,
+/// Everything the reading view's layout depends on, folded into one hash: a
+/// change in any of it means the page has to be laid out again. The note's
+/// body is hashed rather than versioned so that no edit path — the editor, a
+/// checkbox click, a reload from disk — has to remember to say so.
+fn preview_key(app: &mut App, area: Rect) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let note = app.active_note();
+    note.path.hash(&mut h);
+    note.content.hash(&mut h);
+    area.width.hash(&mut h);
+    area.height.hash(&mut h);
+    app.config_gen.hash(&mut h);
+    app.folded_lines().hash(&mut h);
+    // the footer's rows rather than a scan counter: a scan still running
+    // answers with no rows, and the rows it lands with are what changes
+    if app.config.linked_mentions && app.config.wikilinks {
+        app.linked_mentions().hash(&mut h);
+    }
+    // a picture the last layout looked for and found, or did not: a screenshot
+    // saved after the note named it should get its rows on the next frame,
+    // as it did when every frame laid the page out afresh
+    let dir = app.note_dir();
+    for image in &app.preview_page.images {
+        app.images.resolve(&image.url, &dir).is_some().hash(&mut h);
+    }
+    h.finish()
 }
 
-/// The rendered page: pre-wrapped so every row is exactly one screen line,
-/// which is what makes link and checkbox hit-testing exact.
-fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
+/// Lay the note out for `area`: the whole page, before any scrolling.
+fn layout_preview(app: &mut App, area: Rect) -> PreviewPage {
     let width = area.width.max(1) as usize;
     // front matter is metadata, not prose: the reading view never shows it,
     // whatever the editor has been told to do with it. The body's lines are
@@ -292,7 +312,7 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let dir = app.note_dir();
 
     // wrap, then give drawable images the rows they need
-    let mut rows: Vec<Row> = Vec::new();
+    let mut rows: Vec<PageRow> = Vec::new();
     // (first page row, rows, image index) — kept aside from the visible window
     // so a band whose own first row is scrolled off the top is still drawn
     let mut bands: Vec<(usize, u16, usize)> = Vec::new();
@@ -305,7 +325,7 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
                 let h = crate::images::band_rows(natural, area.height);
                 bands.push((rows.len(), h, idx));
                 for _ in 0..h {
-                    rows.push(Row {
+                    rows.push(PageRow {
                         cells: Vec::new(),
                         checkbox: None,
                         src_line: pline.src_line,
@@ -317,7 +337,7 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
         }
         // a wide row is one row, however long it is: it pans, it never wraps
         if pline.wide {
-            rows.push(Row {
+            rows.push(PageRow {
                 cells: pline.cells.clone(),
                 checkbox: pline.checkbox,
                 src_line: pline.src_line,
@@ -326,7 +346,7 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
             continue;
         }
         for (i, cells) in wrap_cells(&pline.cells, width).into_iter().enumerate() {
-            rows.push(Row {
+            rows.push(PageRow {
                 cells,
                 checkbox: if i == 0 { pline.checkbox } else { None },
                 src_line: pline.src_line,
@@ -343,6 +363,37 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|r| crate::render::cells_width(&r.cells))
         .max()
         .unwrap_or(0);
+    PreviewPage {
+        key: None,
+        rows,
+        bands,
+        urls: rendered.urls,
+        images: rendered.images,
+        widest,
+    }
+}
+
+/// The rendered page: pre-wrapped so every row is exactly one screen line,
+/// which is what makes link and checkbox hit-testing exact.
+///
+/// The layout — parse, folds, mentions footer, wrapping, image bands — is
+/// kept on the app between frames and redone only when one of its inputs
+/// changes; the scroll window, pan and selection are cut from it every frame.
+fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
+    let width = area.width.max(1) as usize;
+    let key = preview_key(app, area);
+    if app.preview_page.key != Some(key) {
+        let mut page = layout_preview(app, area);
+        page.key = Some(key);
+        app.preview_page = page;
+    }
+    // taken out for the frame so the draw is free to write the hit boxes and
+    // pictures back into the app; put back before returning
+    let page = std::mem::take(&mut app.preview_page);
+    let rows = &page.rows;
+    let bands = &page.bands;
+    let widest = page.widest;
+
     app.preview_hmax = widest.saturating_sub(width) as u16;
     app.preview_hscroll = app.preview_hscroll.min(app.preview_hmax);
     let pan = app.preview_hscroll as usize;
@@ -365,10 +416,9 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
 
     app.preview_links.clear();
     app.preview_images.clear();
-    app.preview_image_urls = rendered.images.iter().map(|i| i.url.clone()).collect();
+    app.preview_image_urls = page.images.iter().map(|i| i.url.clone()).collect();
     app.preview_checkboxes.clear();
     app.preview_rows.clear();
-    app.preview_page_rows.clear();
     let span = app.preview_span();
 
     let mut lines: Vec<Line> = Vec::new();
@@ -376,7 +426,7 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let mut images: Vec<(Rect, usize, u16, u16)> = Vec::new();
     // the chevrons go on the first wide row on screen, and only there
     let mut marked = false;
-    for (start, h, idx) in &bands {
+    for (start, h, idx) in bands {
         // a band only partly on screen is drawn cropped to its visible slice,
         // so a picture scrolls in and out instead of popping into view whole
         if let Some(s) = crate::images::band_slice(*start, *h, top, area.height) {
@@ -414,7 +464,6 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
                 edge(&mut shown, last, '›');
             }
         }
-        app.preview_page_rows.push((page_row, rect, offset));
         lines.push(crate::render::to_line(&selected(
             &shown, page_row, offset, span,
         )));
@@ -422,7 +471,13 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
         // invented — a blank line, a footer row — is still a row a selection
         // can be dragged across, and one that is missing here silently kills
         // the copy of everything around it
-        app.preview_rows.push((rect, row.src_line, shown.clone()));
+        app.preview_rows.push(crate::app::PreviewRow {
+            page_row,
+            rect,
+            pan: offset,
+            src_line: row.src_line,
+            cells: shown.clone(),
+        });
         if row.checkbox.is_some() {
             if let Some(src) = row.src_line {
                 app.preview_checkboxes.push((rect, src));
@@ -430,7 +485,7 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
         }
         // link hit boxes are measured on what is actually on screen, so a
         // half-panned link is clickable over exactly the part you can see
-        for (start, len, url) in link_runs(&shown, &rendered) {
+        for (start, len, url) in link_runs(&shown, &page.urls) {
             let x = area.x + start as u16;
             app.preview_links
                 .push((Rect::new(x, y, len as u16, 1), url));
@@ -438,12 +493,14 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     }
     f.render_widget(Paragraph::new(lines), area);
 
+    let dir = app.note_dir();
     for (rect, idx, band, hidden) in images {
-        let url = rendered.images[idx].url.clone();
+        let url = page.images[idx].url.clone();
         if draw_band(f, app, &url, &dir, rect, band, hidden) {
             app.preview_images.push((rect, url));
         }
     }
+    app.preview_page = page;
 }
 
 /// Draw the part of a picture that is on screen: `rect` is that part, the
@@ -638,7 +695,7 @@ fn cropped(clip_top: bool) -> StatefulImage<ratatui_image::protocol::StatefulPro
 }
 
 /// Contiguous runs of cells belonging to the same link: (column, width, url).
-fn link_runs(cells: &[PCell], rendered: &crate::render::Rendered) -> Vec<(usize, usize, String)> {
+fn link_runs(cells: &[PCell], urls: &[String]) -> Vec<(usize, usize, String)> {
     let mut runs = Vec::new();
     let mut i = 0;
     let mut x = 0; // display column of cells[i]
@@ -650,8 +707,8 @@ fn link_runs(cells: &[PCell], rendered: &crate::render::Rendered) -> Vec<(usize,
                     x += crate::md::char_width(cells[i].ch);
                     i += 1;
                 }
-                if let Some(url) = rendered.url(idx) {
-                    runs.push((start, x - start, url.to_string()));
+                if let Some(url) = urls.get(idx) {
+                    runs.push((start, x - start, url.clone()));
                 }
             }
             None => {
@@ -845,8 +902,8 @@ fn overlay_budget(f: &Frame) -> u16 {
 
 fn draw_palette(f: &mut Frame, app: &mut App) {
     let quick = app.overlay == Overlay::QuickOpen;
-    let browse = quick && app.browse;
-    let contents = quick && app.contents;
+    let browse = quick && app.tab == QuickTab::Tree;
+    let contents = quick && app.tab == QuickTab::Contents;
     // the box is at most 100 wide and inset 2 from each side of the frame,
     // less the border: what a snippet has to fit in, known before the box is
     let width = overlay_rect_wide(f, 1, 100).width.saturating_sub(2) as usize;
@@ -1059,13 +1116,8 @@ struct PRow {
 
 /// The three tabs of ^O, the one on screen in the accent.
 fn tab_strip(app: &App) -> Line<'static> {
-    let on = if app.browse {
-        1
-    } else if app.contents {
-        2
-    } else {
-        0
-    };
+    // the enum's declaration order is the strip's order
+    let on = app.tab as usize;
     let mut spans = vec![Span::raw(" ")];
     for (i, name) in ["recent", "tree", "contents"].into_iter().enumerate() {
         if i > 0 {
@@ -1126,10 +1178,10 @@ fn contents_rows(app: &App, width: usize) -> Vec<PRow> {
 /// count all come from where it sits in the tree, and the tree is walked once
 /// here rather than once per row.
 fn palette_rows(app: &App, width: usize) -> Vec<PRow> {
-    if app.overlay == Overlay::QuickOpen && app.contents {
+    if app.overlay == Overlay::QuickOpen && app.tab == QuickTab::Contents {
         return contents_rows(app, width);
     }
-    if app.overlay == Overlay::QuickOpen && app.browse {
+    if app.overlay == Overlay::QuickOpen && app.tab == QuickTab::Tree {
         let now = SystemTime::now();
         return app
             .browse_rows()
@@ -1555,7 +1607,7 @@ mod tests {
     fn link_runs_cover_the_link_text_only() {
         let r = render("see [docs](http://x.y) now");
         let line = &r.lines[0];
-        let runs = link_runs(&line.cells, &r);
+        let runs = link_runs(&line.cells, &r.urls);
         assert_eq!(runs.len(), 1);
         let (start, len, url) = &runs[0];
         assert_eq!(*start, 4);

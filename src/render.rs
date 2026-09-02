@@ -1,7 +1,7 @@
 //! Markdown → styled cells for the full-page preview (^P).
 //!
 //! Block structure comes from pulldown-cmark here; the live-preview editor is
-//! line-based instead. Both share the palette in [`crate::md::theme`].
+//! line-based instead. Both share the palette in [`crate::theme`].
 //!
 //! The preview keeps more than text: every cell remembers whether it belongs to
 //! a link, every line remembers which source line it came from, and checkbox and
@@ -10,7 +10,7 @@
 //! same place.
 
 use crate::config::TableStyle;
-use crate::md::theme;
+use crate::theme;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -87,6 +87,7 @@ pub struct Rendered {
 }
 
 impl Rendered {
+    #[cfg(test)]
     pub fn url(&self, i: usize) -> Option<&str> {
         self.urls.get(i).map(String::as_str)
     }
@@ -1360,7 +1361,7 @@ impl Ren {
             }
             // the heading: the first column, which is nearly always the row's
             // name or date, marked with the same bar a blockquote uses
-            let mut title = str_cells(&format!("{} ", crate::md::theme::QUOTE_BAR), theme::state());
+            let mut title = str_cells(&format!("{} ", theme::QUOTE_BAR), theme::state());
             let first = truncate_cells(row.first().unwrap_or(&empty), self.width.saturating_sub(2));
             title.extend(first.iter().map(|c| {
                 let mut c = c.clone();
