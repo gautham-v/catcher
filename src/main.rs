@@ -2,6 +2,8 @@ mod app;
 mod cli;
 mod clipboard;
 mod config;
+mod daily;
+mod dates;
 mod editor;
 mod history;
 mod images;
@@ -200,7 +202,9 @@ fn detect_background() -> md::theme::Mode {
         }
         let _ = tx.send(buf);
     });
-    let reply = rx.recv_timeout(Duration::from_millis(250)).unwrap_or_default();
+    let reply = rx
+        .recv_timeout(Duration::from_millis(250))
+        .unwrap_or_default();
     let _ = crossterm::terminal::disable_raw_mode();
     parse_osc11(&reply)
         .or_else(from_colorfgbg)
@@ -213,21 +217,17 @@ fn parse_osc11(reply: &[u8]) -> Option<md::theme::Mode> {
     let text = String::from_utf8_lossy(reply);
     let rest = text.split("]11;").nth(1)?;
     let rest = rest.strip_prefix("rgb:")?;
-    let mut chan = rest
-        .split(['\x1b', '\x07'])
-        .next()?
-        .split('/')
-        .map(|h| {
-            // scale any width to 8 bits from its leading digits
-            let h = h.trim();
-            let n = u32::from_str_radix(h, 16).ok()?;
-            let bits = 4 * h.len() as u32;
-            match bits {
-                4 => Some((n * 17) as u8),
-                8 | 12 | 16 => Some((n >> (bits - 8)) as u8),
-                _ => None,
-            }
-        });
+    let mut chan = rest.split(['\x1b', '\x07']).next()?.split('/').map(|h| {
+        // scale any width to 8 bits from its leading digits
+        let h = h.trim();
+        let n = u32::from_str_radix(h, 16).ok()?;
+        let bits = 4 * h.len() as u32;
+        match bits {
+            4 => Some((n * 17) as u8),
+            8 | 12 | 16 => Some((n >> (bits - 8)) as u8),
+            _ => None,
+        }
+    });
     let (r, g, b) = (chan.next()??, chan.next()??, chan.next()??);
     Some(md::theme::mode_of_background(r, g, b))
 }
@@ -312,7 +312,10 @@ mod tests {
             Some(Mode::Dark)
         );
         // 8-bit channels too
-        assert_eq!(parse_osc11(b"\x1b]11;rgb:ff/ff/ff\x1b\\"), Some(Mode::Light));
+        assert_eq!(
+            parse_osc11(b"\x1b]11;rgb:ff/ff/ff\x1b\\"),
+            Some(Mode::Light)
+        );
         // no colour reply, only the status report
         assert_eq!(parse_osc11(b"\x1b[0n"), None);
         assert_eq!(parse_osc11(b""), None);

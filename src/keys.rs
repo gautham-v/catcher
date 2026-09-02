@@ -33,6 +33,7 @@ pub enum Action {
     NavBack,
     NavForward,
     Peek,
+    DailyNote,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -128,6 +129,14 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         Some("alt+P"),
         "peek at the [[wikilink]] under the cursor",
     ),
+    // alt, like peek: every ctrl letter near it is spoken for. Capital for
+    // the same round-trip reason as ⌥P.
+    (
+        Action::DailyNote,
+        "key_daily",
+        Some("alt+D"),
+        "today's note, made from the template if new",
+    ),
 ];
 
 /// A settings key that used to go by another name: the old spelling is still
@@ -142,7 +151,10 @@ const ALIASES: &[(&str, &str)] = &[("key_help", "key_shortcuts")];
 const SUPERSEDED: &[(&str, &[&str])] = &[
     ("key_help", &["^G"]),
     ("key_back", &["⌥←", "alt+left", "ctrl+⌥←", "ctrl+alt+left"]),
-    ("key_forward", &["⌥→", "alt+right", "ctrl+⌥→", "ctrl+alt+right"]),
+    (
+        "key_forward",
+        &["⌥→", "alt+right", "ctrl+⌥→", "ctrl+alt+right"],
+    ),
 ];
 
 fn superseded(key: &str, spec: &str) -> bool {
@@ -356,7 +368,10 @@ impl Keymap {
     pub fn from_settings(lookup: impl Fn(&str) -> Option<String>) -> Keymap {
         let mut map = Keymap::default();
         for (action, key, _, _) in ACTIONS {
-            let old = ALIASES.iter().find(|(new, _)| new == key).map(|(_, old)| *old);
+            let old = ALIASES
+                .iter()
+                .find(|(new, _)| new == key)
+                .map(|(_, old)| *old);
             let spec = lookup(key).or_else(|| old.and_then(&lookup));
             if let Some(spec) = spec.filter(|s| !superseded(key, s)) {
                 // an unreadable spec unbinds rather than silently keeping the
@@ -527,19 +542,38 @@ mod tests {
                 "ctrl+{c}"
             );
         }
-        assert_eq!(map.action(&ev(KeyCode::F(1), KeyModifiers::NONE)), Some(Action::Help));
+        assert_eq!(
+            map.action(&ev(KeyCode::F(1), KeyModifiers::NONE)),
+            Some(Action::Help)
+        );
         // the old key is free
-        assert_eq!(map.action(&ev(KeyCode::Char('g'), KeyModifiers::CONTROL)), None);
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            None
+        );
         // plain _ and 7 still type
-        assert_eq!(map.action(&ev(KeyCode::Char('_'), KeyModifiers::NONE)), None);
-        assert_eq!(map.action(&ev(KeyCode::Char('7'), KeyModifiers::NONE)), None);
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('_'), KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('7'), KeyModifiers::NONE)),
+            None
+        );
         // hints show the short one, the card and settings show both
         assert_eq!(map.label(Action::Help), "^/");
         assert_eq!(map.labels(Action::Help), "^/ F1");
-        let row = map.settings_rows().into_iter().find(|(k, _, _)| *k == "key_help").unwrap();
+        let row = map
+            .settings_rows()
+            .into_iter()
+            .find(|(k, _, _)| *k == "key_help")
+            .unwrap();
         assert_eq!(row.1, "^/ F1");
         // and the spelling the settings writer emits reads back to the same keys
-        assert_eq!(Keymap::from_settings(|k| (k == "key_help").then(|| row.1.clone())), map);
+        assert_eq!(
+            Keymap::from_settings(|k| (k == "key_help").then(|| row.1.clone())),
+            map
+        );
     }
 
     #[test]
@@ -549,12 +583,24 @@ mod tests {
             "key_back" => Some("ctrl+⌥←".to_string()),
             _ => None,
         });
-        assert_eq!(map.action(&ev(KeyCode::F(1), KeyModifiers::NONE)), Some(Action::Help));
-        assert_eq!(map.action(&ev(KeyCode::Char('g'), KeyModifiers::CONTROL)), None);
-        assert_eq!(map.action(&ev(KeyCode::Char('b'), KeyModifiers::CONTROL)), Some(Action::NavBack));
+        assert_eq!(
+            map.action(&ev(KeyCode::F(1), KeyModifiers::NONE)),
+            Some(Action::Help)
+        );
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            Some(Action::NavBack)
+        );
         // a key the user chose on purpose still wins
         let map = Keymap::from_settings(|k| (k == "key_help").then(|| "^H".to_string()));
-        assert_eq!(map.action(&ev(KeyCode::Char('h'), KeyModifiers::CONTROL)), Some(Action::Help));
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('h'), KeyModifiers::CONTROL)),
+            Some(Action::Help)
+        );
     }
 
     #[test]
@@ -573,7 +619,10 @@ mod tests {
     fn the_old_key_shortcuts_name_still_binds_help() {
         // (^G itself is a superseded default and would be ignored, so ^H)
         let map = Keymap::from_settings(|k| (k == "key_shortcuts").then(|| "^H".to_string()));
-        assert_eq!(map.action(&ev(KeyCode::Char('h'), KeyModifiers::CONTROL)), Some(Action::Help));
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('h'), KeyModifiers::CONTROL)),
+            Some(Action::Help)
+        );
         assert_eq!(map.action(&ev(KeyCode::F(1), KeyModifiers::NONE)), None);
         // the new name wins when both are present
         let map = Keymap::from_settings(|k| match k {
@@ -581,11 +630,20 @@ mod tests {
             "key_shortcuts" => Some("^H".to_string()),
             _ => None,
         });
-        assert_eq!(map.action(&ev(KeyCode::F(2), KeyModifiers::NONE)), Some(Action::Help));
-        assert_eq!(map.action(&ev(KeyCode::Char('h'), KeyModifiers::CONTROL)), None);
+        assert_eq!(
+            map.action(&ev(KeyCode::F(2), KeyModifiers::NONE)),
+            Some(Action::Help)
+        );
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('h'), KeyModifiers::CONTROL)),
+            None
+        );
         // and the settings writer emits the new name, never the old
         assert!(map.settings_rows().iter().any(|(k, _, _)| *k == "key_help"));
-        assert!(!map.settings_rows().iter().any(|(k, _, _)| *k == "key_shortcuts"));
+        assert!(!map
+            .settings_rows()
+            .iter()
+            .any(|(k, _, _)| *k == "key_shortcuts"));
     }
 
     #[test]
@@ -596,11 +654,41 @@ mod tests {
         assert_eq!(b.label(), "⌥←");
         assert_eq!(Binding::parse(&b.label()), Some(b));
         let map = Keymap::default();
-        assert_eq!(map.action(&ev(KeyCode::Char('b'), KeyModifiers::CONTROL)), Some(Action::NavBack));
-        assert_eq!(map.action(&ev(KeyCode::Char('f'), KeyModifiers::CONTROL)), Some(Action::NavForward));
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            Some(Action::NavBack)
+        );
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            Some(Action::NavForward)
+        );
         // every modifier + arrow stays with the editor (or the window manager)
         assert_eq!(map.action(&ev(KeyCode::Left, KeyModifiers::ALT)), None);
-        assert_eq!(map.action(&ev(KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::ALT)), None);
+        assert_eq!(
+            map.action(&ev(
+                KeyCode::Left,
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn the_daily_note_answers_to_alt_d_and_leaves_plain_d_typing() {
+        let map = Keymap::default();
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('d'), KeyModifiers::ALT)),
+            Some(Action::DailyNote)
+        );
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('d'), KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(map.label(Action::DailyNote), "⌥D");
+        assert!(map
+            .settings_rows()
+            .iter()
+            .any(|(k, _, _)| *k == "key_daily"));
     }
 
     #[test]
