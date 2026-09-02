@@ -11,7 +11,7 @@ A minimal note-taking app for the terminal. Local-first, no accounts, no sync: y
 ## Install
 
 ```
-brew install tinycomputer-io/tap/catcher
+brew install gautham-v/tap/catcher
 ```
 
 or `cargo install catcher`. Then run `catcher`.
