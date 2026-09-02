@@ -693,7 +693,11 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let rect = overlay_rect_wide(f, shown + chrome, 100);
     app.overlay_rect = rect;
     f.render_widget(Clear, rect);
-    let block = panel(app);
+    let mut block = panel(app);
+    // a tag's list is titled with the tag, so the box says what it is a list of
+    if let Some((tag, _)) = app.tag_filter.as_ref().filter(|_| quick) {
+        block = block.title(Span::styled(format!(" #{tag} "), theme::state()));
+    }
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -708,6 +712,8 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let prompt = if app.query.is_empty() {
         let hint = if browse {
             "browse folders — tab returns to search"
+        } else if quick && app.tag_filter.is_some() {
+            "notes carrying this tag — type to narrow"
         } else if quick {
             "open a note — any folder, most recent first"
         } else if app.overlay == Overlay::MoveFile {

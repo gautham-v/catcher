@@ -21,6 +21,7 @@ or `cargo install catcher`. Then run `catcher`.
 - **^N** makes a note. The filename follows its first line until you rename the file yourself.
 - **^P** flips between the live-preview editor and the rendered page. Images draw inline in Ghostty, kitty and iTerm2.
 - `[[wikilinks]]` work like Obsidian's. **⌥⏎** follows one, **⌥P** peeks at it, **^B** / **^F** go back and forward. The reading view lists the notes that link here at the bottom.
+- `#tags` are coloured, inline or as front matter `tags:`. **⌥⏎** or a click on one opens **^O** cut to the notes that carry it.
 - A ` ```mermaid ` fence is drawn as text: flowcharts and sequence diagrams, in box-drawing characters, no images and no network. Other kinds keep their source under a label.
 - Callouts, front matter, tables wider than the page (they pan sideways), checkboxes and `==highlights==` all render.
 - Notes autosave. Mouse works: click, drag to select and copy, scroll. **^V** pastes a clipboard image as a PNG.
@@ -47,7 +48,7 @@ catcher --keys           show what your terminal sends for each key
 | `^S` | Save now |
 | `^Z` / `^Y` | Undo / redo |
 | `^C` `^X` `^V` | Copy / cut / paste |
-| `⌥⏎` / `⌥P` | Follow / peek at the `[[wikilink]]` under the cursor |
+| `⌥⏎` / `⌥P` | Follow / peek at the `[[wikilink]]` under the cursor (`⌥⏎` follows a `#tag` too) |
 | `^B` / `^F` | Back / forward |
 | `^/` or `F1` | Help card |
 | `^,` | Settings |
@@ -57,7 +58,7 @@ Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, 
 
 ## Settings
 
-**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes and attachments folders, theme (`auto`, `dark`, `light`) and colours, page width, borders, status bar, autosave delay, tab width, front matter, table style, wikilinks, linked mentions, how far **^O** looks, and every key binding. Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
+**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes and attachments folders, theme (`auto`, `dark`, `light`) and colours, page width, borders, status bar, autosave delay, tab width, front matter, table style, wikilinks, tags, linked mentions, how far **^O** looks, and every key binding. Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
 
 ## Development
 

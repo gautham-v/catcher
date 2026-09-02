@@ -149,7 +149,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("click, drag", "place the cursor, select (drag copies)"),
             (
                 "⌥click  ^click",
-                "open the link or [[wikilink]] under the pointer",
+                "open the link, [[wikilink]] or #tag under the pointer",
             ),
             ("wheel", "scroll without moving the cursor"),
             (
@@ -247,6 +247,9 @@ pub struct App {
     index_rx: Option<std::sync::mpsc::Receiver<Vec<index::Entry>>>,
     /// True while ^O is showing the folder tree instead of the ranked list.
     pub browse: bool,
+    /// ^O opened by following a `#tag`: the tag, and which index entries
+    /// carry it. The list is cut to those and the query narrows within them.
+    pub tag_filter: Option<(String, Vec<usize>)>,
     /// Which folders the tree has unfolded. Session only, and deliberately not
     /// in the settings note: which folders are open is where you are in a
     /// session, not something you configure. A `BTreeSet` rather than a hash
@@ -469,6 +472,7 @@ impl App {
             open_index: Vec::new(),
             index_rx: None,
             browse: false,
+            tag_filter: None,
             tree_open: BTreeSet::new(),
             overlay_rect: Rect::default(),
             hover: None,
@@ -941,7 +945,7 @@ impl App {
                 Some(e) => e.path.clone(),
                 None => self.notes[best_title_match(&self.notes, &t)?].path.clone(),
             },
-            md::LinkTarget::Url(_) => return None,
+            md::LinkTarget::Url(_) | md::LinkTarget::Tag(_) => return None,
         };
         // an open note may have edits the disk has not seen yet
         let content = match self.notes.iter().find(|n| n.path == path) {
@@ -1070,6 +1074,7 @@ impl App {
     fn open_quick_open(&mut self) {
         self.query.clear();
         self.selected = 0;
+        self.tag_filter = None;
         // before `enter_browse`, which reads the index it builds
         self.refresh_index();
         self.overlay = Overlay::QuickOpen;
@@ -1083,11 +1088,16 @@ impl App {
     /// index order — most recently opened first, then most recently modified —
     /// which is the whole point of having a second list beside the palette.
     pub fn open_items(&self) -> Vec<Item> {
+        let pool: Vec<usize> = match &self.tag_filter {
+            Some((_, hits)) => hits.clone(),
+            None => (0..self.open_index.len()).collect(),
+        };
         if self.query.is_empty() {
-            return (0..self.open_index.len()).map(Item::Entry).collect();
+            return pool.into_iter().map(Item::Entry).collect();
         }
-        // a path that exists is not a guess, so it leads the list outright
-        if let Some(path) = self.typed_path() {
+        // a path that exists is not a guess, so it leads the list outright —
+        // unless the list is a tag's, which a path is no part of
+        if let Some(path) = self.typed_path().filter(|_| self.tag_filter.is_none()) {
             let mut rows = vec![Item::Path(path.clone())];
             rows.extend(
                 self.open_index
@@ -1101,7 +1111,8 @@ impl App {
         }
         let n = self.open_index.len().max(1) as i64;
         let mut scored: Vec<(i64, usize)> = Vec::new();
-        for (i, e) in self.open_index.iter().enumerate() {
+        for i in pool {
+            let e = &self.open_index[i];
             // the filename is what the list shows, so it is what people
             // search by; the title is a second chance, and the folder path a
             // weaker third, so "applications/log" finds it too
@@ -1129,6 +1140,10 @@ impl App {
     /// survives the swap both ways — typing `log` and then wanting to see
     /// *where* the log notes live is the whole reason to have this.
     fn toggle_browse(&mut self) {
+        // a tag's list is one list; the tree has no filtered view of itself
+        if self.tag_filter.is_some() {
+            return;
+        }
         self.browse = !self.browse;
         if self.browse {
             self.enter_browse();
@@ -2018,7 +2033,26 @@ impl App {
             // the app drew this one from a file it had already found, so there
             // is nothing left to resolve
             md::LinkTarget::Note(p) => self.open_path(Path::new(&p)),
+            md::LinkTarget::Tag(t) => self.open_tag(&t),
         }
+    }
+
+    /// Following a `#tag`: ^O, cut to the notes that carry it. Saved first,
+    /// because the tag scan reads files and the note on screen may have just
+    /// gained the tag being followed.
+    fn open_tag(&mut self, tag: &str) {
+        self.save_now();
+        self.refresh_index();
+        let hits = index::with_tag(&self.open_index, tag);
+        if hits.is_empty() {
+            self.flash(format!("no notes tagged #{tag}"));
+            return;
+        }
+        self.query.clear();
+        self.selected = 0;
+        self.tag_filter = Some((tag.to_string(), hits));
+        self.browse = false;
+        self.overlay = Overlay::QuickOpen;
     }
 
     /// ⌥⏎: the link under the cursor, from the keyboard. Plain enter has to go

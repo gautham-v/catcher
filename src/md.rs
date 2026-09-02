@@ -313,6 +313,11 @@ pub mod theme {
             .fg(palette().grey)
             .add_modifier(Modifier::CROSSED_OUT)
     }
+    /// An inline `#tag`: the accent, like a heading, because a tag is a
+    /// heading of sorts — it names what the note is about.
+    pub fn tag() -> Style {
+        Style::new().fg(palette().accent)
+    }
     /// Status-bar state, panel titles: catcher talking about itself.
     pub fn state() -> Style {
         Style::new().fg(palette().accent)
@@ -1007,6 +1012,17 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
         return Some(end);
     }
 
+    // #tag — after the URL check, so a fragment is never mistaken for one
+    if c == '#' && tags::enabled() {
+        if let Some(end) = tag_at(b.src, i) {
+            let style = base.patch(theme::tag());
+            for k in i..end {
+                b.keep(k, style);
+            }
+            return Some(end);
+        }
+    }
+
     // paired two-character markers
     for (m, style) in [
         ('*', base.add_modifier(Modifier::BOLD)),
@@ -1069,6 +1085,13 @@ pub fn link_at(line: &str, col: usize) -> Option<LinkTarget> {
     let src: Vec<char> = line.chars().collect();
     let mut i = 0;
     while i < src.len() {
+        // a code span is literal, the way the styling already draws it
+        if src[i] == '`' {
+            if let Some(end) = find(&src, i + 1, '`') {
+                i = end + 1;
+                continue;
+            }
+        }
         // [[wikilink]] first: the `[text](url)` scan below does not recognise
         // one, and would walk into the middle of it looking for a `(`
         if src[i] == '[' && src.get(i + 1) == Some(&'[') && links::enabled() {
@@ -1111,6 +1134,15 @@ pub fn link_at(line: &str, col: usize) -> Option<LinkTarget> {
             i = end.max(i + 1);
             continue;
         }
+        if src[i] == '#' && tags::enabled() {
+            if let Some(end) = tag_at(&src, i) {
+                if (i..end).contains(&col) {
+                    return Some(LinkTarget::Tag(src[i + 1..end].iter().collect()));
+                }
+                i = end;
+                continue;
+            }
+        }
         i += 1;
     }
     None
@@ -1129,6 +1161,114 @@ fn find(src: &[char], from: usize, ch: char) -> Option<usize> {
 
 fn find_pair(src: &[char], from: usize, ch: char) -> Option<usize> {
     (from..src.len().saturating_sub(1)).find(|&k| src[k] == ch && src[k + 1] == ch)
+}
+
+// ---------------------------------------------------------------------------
+// Tags
+//
+// `#tag` is Obsidian's other way of joining notes up: not a link to one note
+// but a name several notes share. The grammar lives here with the rest of
+// the inline syntax; which notes carry a tag is index.rs's business.
+
+/// Where the `#tag` starting at column `i` ends, or `None` when `#` is not
+/// opening one there. A tag is a `#` on a word boundary, then a letter, then
+/// letters, digits, `-`, `_` or `/`. The boundary is what keeps `a#b` and a
+/// URL fragment out; the letter is what keeps `#1`, `##` and a heading's
+/// `# ` out.
+pub fn tag_at(src: &[char], i: usize) -> Option<usize> {
+    if src.get(i) != Some(&'#') || !tag_boundary(i.checked_sub(1).map(|k| src[k])) {
+        return None;
+    }
+    if !src.get(i + 1).is_some_and(|c| c.is_alphabetic()) {
+        return None;
+    }
+    let mut end = i + 2;
+    while end < src.len() && is_tag_char(src[end]) {
+        end += 1;
+    }
+    Some(end)
+}
+
+/// Can a tag start after `prev`? Start of line, whitespace, or an opener —
+/// `(#tag)` and `"#tag"` are how tags turn up in prose.
+pub fn tag_boundary(prev: Option<char>) -> bool {
+    match prev {
+        None => true,
+        Some(c) => c.is_whitespace() || matches!(c, '(' | '[' | '{' | '"' | '\''),
+    }
+}
+
+fn is_tag_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '-' | '_' | '/')
+}
+
+/// Every `#tag` on a source line, as (start, end) columns, `#` included.
+/// Code spans, `[text](url)` and bare URLs are stepped over, the same things
+/// the styling steps over, so what is drawn as a tag and what the index
+/// counts as one are the same set.
+pub fn tags_in(line: &str) -> Vec<(usize, usize)> {
+    let src: Vec<char> = line.chars().collect();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < src.len() {
+        match src[i] {
+            '`' => {
+                if let Some(end) = find(&src, i + 1, '`') {
+                    i = end + 1;
+                    continue;
+                }
+            }
+            '[' => {
+                if let Some(close) = find(&src, i + 1, ']') {
+                    if src.get(close + 1) == Some(&'(') {
+                        if let Some(paren) = find(&src, close + 2, ')') {
+                            i = paren + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            '#' => {
+                if let Some(end) = tag_at(&src, i) {
+                    found.push((i, end));
+                    i = end;
+                    continue;
+                }
+            }
+            _ if starts_url(&src, i) => {
+                while i < src.len() && !src[i].is_whitespace() {
+                    i += 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    found
+}
+
+/// The form a tag is matched in: lower-case, no `#`. `#Work` and `#work`
+/// are one tag, as they are in Obsidian.
+pub fn tag_key(tag: &str) -> String {
+    tag.trim().trim_start_matches('#').to_ascii_lowercase()
+}
+
+/// The `tags` setting. Process-wide for the reason [`links`] is.
+pub mod tags {
+    use std::sync::RwLock;
+
+    static ON: RwLock<bool> = RwLock::new(true);
+
+    pub fn set_enabled(on: bool) {
+        if let Ok(mut w) = ON.write() {
+            *w = on;
+        }
+    }
+
+    pub fn enabled() -> bool {
+        ON.read().map(|b| *b).unwrap_or(true)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,6 +1414,9 @@ pub const NOTE_SCHEME: &str = "note:";
 /// way out, so it reaches the desktop opener spelled exactly as it was typed.
 pub const URL_SCHEME: &str = "url:";
 
+/// A `#tag`, on its way from a drawn row to the picker it opens.
+pub const TAG_SCHEME: &str = "tag:";
+
 /// What a click or ⌥click landed on: a URL for the desktop, or a wikilink for
 /// the vault. The distinction has to survive, because handing `wikilink:spec`
 /// to `open`/`xdg-open` would be nonsense.
@@ -1295,6 +1438,8 @@ pub enum LinkTarget {
     /// An exact file, by path. Nothing a reader types produces one of these —
     /// only the app, for a row it drew from a file it had already found.
     Note(String),
+    /// A `#tag`, without its `#`: not a note but a list of them.
+    Tag(String),
 }
 
 impl LinkTarget {
@@ -1303,12 +1448,17 @@ impl LinkTarget {
             // a URL that reads as one of the app's own schemes is wrapped in
             // `url:` so it comes back out of `parse` as the URL it is, rather
             // than as an instruction to open a file by path
-            LinkTarget::Url(u) if u.starts_with(NOTE_SCHEME) || u.starts_with(URL_SCHEME) => {
+            LinkTarget::Url(u)
+                if u.starts_with(NOTE_SCHEME)
+                    || u.starts_with(URL_SCHEME)
+                    || u.starts_with(TAG_SCHEME) =>
+            {
                 format!("{URL_SCHEME}{u}")
             }
             LinkTarget::Url(u) => u.clone(),
             LinkTarget::Wiki(t) => format!("{WIKI_SCHEME}{t}"),
             LinkTarget::Note(p) => format!("{NOTE_SCHEME}{p}"),
+            LinkTarget::Tag(t) => format!("{TAG_SCHEME}{t}"),
         }
     }
 
@@ -1320,6 +1470,9 @@ impl LinkTarget {
         }
         if let Some(t) = href.strip_prefix(WIKI_SCHEME) {
             return LinkTarget::Wiki(t.to_string());
+        }
+        if let Some(t) = href.strip_prefix(TAG_SCHEME) {
+            return LinkTarget::Tag(t.to_string());
         }
         match href.strip_prefix(NOTE_SCHEME) {
             Some(p) => LinkTarget::Note(p.to_string()),
@@ -2513,12 +2666,89 @@ mod tests {
     }
 
     #[test]
+    fn a_tag_is_a_hash_on_a_word_boundary_then_a_letter() {
+        let ends = |line: &str| -> Vec<String> {
+            let chars: Vec<char> = line.chars().collect();
+            tags_in(line)
+                .into_iter()
+                .map(|(s, e)| chars[s..e].iter().collect())
+                .collect()
+        };
+        assert_eq!(ends("a #work note"), vec!["#work"]);
+        assert_eq!(ends("#top of line"), vec!["#top"]);
+        assert_eq!(ends("(#paren) \"#quoted\""), vec!["#paren", "#quoted"]);
+        assert_eq!(ends("#a-b_c/d9 tail"), vec!["#a-b_c/d9"]);
+        // a tag ends at the first character that cannot be in one
+        assert_eq!(ends("#done."), vec!["#done"]);
+        // a heading marker, a number and a bare hash are not tags
+        assert!(ends("# Heading").is_empty());
+        assert!(ends("## Heading").is_empty());
+        assert!(ends("#1 and # and #").is_empty());
+        // nor is anything glued to the word before it
+        assert!(ends("a#b c&#d").is_empty());
+    }
+
+    #[test]
+    fn a_tag_inside_code_a_link_or_a_url_is_not_one() {
+        assert!(tags_in("`#code` [t](http://x.y/#frag)").is_empty());
+        assert!(tags_in("https://x.y/p#frag").is_empty());
+        assert!(tags_in("see `a #b` c").is_empty());
+        // but one beside them still is
+        assert_eq!(tags_in("`x` #tag https://a.b#c"), vec![(4, 8)]);
+    }
+
+    #[test]
+    fn a_tag_is_drawn_in_the_accent_and_kept_whole() {
+        tags::set_enabled(true);
+        let l = style_line("note #work here");
+        assert_eq!(text(&l), "note #work here");
+        assert_eq!(l.cells[5].style.fg, theme::tag().fg);
+        assert_eq!(l.cells[9].style.fg, theme::tag().fg);
+        assert_eq!(l.cells[10].style, theme::PLAIN);
+        // a heading's marker is a marker, and a tag in the heading is a tag
+        let h = style_line("# Title #work");
+        assert_eq!(text(&h), "Title #work");
+        assert_eq!(h.cells[6].style.fg, theme::tag().fg);
+        // a fragment is part of its link
+        let u = style_line("https://x.y/#frag");
+        assert_eq!(u.cells[12].style.fg, theme::link().fg);
+    }
+
+    #[test]
+    fn link_at_finds_a_tag_and_steps_over_code() {
+        tags::set_enabled(true);
+        let line = "see `#no` and #yes now";
+        assert_eq!(link_at(line, 5), None);
+        assert_eq!(link_at(line, 14), Some(LinkTarget::Tag("yes".to_string())));
+        assert_eq!(link_at(line, 17), Some(LinkTarget::Tag("yes".to_string())));
+        assert_eq!(link_at(line, 18), None);
+    }
+
+    #[test]
+    fn tag_key_drops_the_hash_and_the_case() {
+        assert_eq!(tag_key("#Work/Q3"), "work/q3");
+        assert_eq!(tag_key(" work "), "work");
+    }
+
+    #[test]
+    fn a_tag_href_round_trips_through_the_scheme() {
+        let t = LinkTarget::Tag("work".to_string());
+        assert_eq!(t.href(), "tag:work");
+        assert_eq!(LinkTarget::parse(&t.href()), t);
+        let url = LinkTarget::Url("tag:x".to_string());
+        assert_eq!(LinkTarget::parse(&url.href()), url);
+    }
+
+    #[test]
     fn every_wikilink_on_a_line_is_found_once_and_in_order() {
         let found = wikilinks("see [[a]] and [[b|bee]] and [[unclosed");
         let targets: Vec<&str> = found.iter().map(|w| w.target.as_str()).collect();
         assert_eq!(targets, vec!["a", "b"]);
         // and the spans are the whole `[[…]]`, so nothing is scanned twice
-        assert_eq!(&"see [[a]] and [[b|bee]] and [[unclosed"[found[0].start..found[0].end], "[[a]]");
+        assert_eq!(
+            &"see [[a]] and [[b|bee]] and [[unclosed"[found[0].start..found[0].end],
+            "[[a]]"
+        );
         assert!(wikilinks("nothing here at all").is_empty());
     }
 
@@ -2569,6 +2799,9 @@ mod tests {
         // its own ground and so cannot
         let c = theme::code();
         assert!(c.bg.is_some());
-        assert!(c.fg.is_some(), "code without a foreground is unreadable on a terminal whose ink matches code_bg");
+        assert!(
+            c.fg.is_some(),
+            "code without a foreground is unreadable on a terminal whose ink matches code_bg"
+        );
     }
 }
