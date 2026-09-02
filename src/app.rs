@@ -1734,10 +1734,18 @@ impl App {
     fn open_daily(&mut self) {
         self.save_now();
         let (dir, template) = (self.config.daily_dir(), self.config.daily_template());
-        match crate::daily::ensure(&dir, &template, crate::dates::today()) {
+        let today = crate::dates::today();
+        let made = !crate::daily::path(&dir, today).exists();
+        match crate::daily::ensure(&dir, &template, today) {
             Ok(path) => {
                 self.open_path(&path);
                 self.view = View::Edit;
+                // a file that was not there a moment ago: the same re-walk a
+                // note made from a link gets, so a `[[link]]` to today stops
+                // being grey and the template's own links count as mentions
+                if made {
+                    self.reindex();
+                }
             }
             Err(e) => self.flash(format!("daily note: {e}")),
         }
