@@ -1505,10 +1505,25 @@ impl App {
     fn enter_contents(&mut self) {
         self.contents = true;
         self.selected = 0;
+        // a note this session holds is searched as it stands in memory: the
+        // file may be an autosave behind, and a hit's line number has to be
+        // right for the buffer it opens into
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let open: Vec<(PathBuf, &str)> = self
+            .notes
+            .iter()
+            .map(|n| (canon(&n.path), n.content.as_str()))
+            .collect();
         self.contents_bodies = self
             .open_index
             .iter()
-            .map(|e| crate::contents::body_of(&e.path))
+            .map(|e| {
+                let here = canon(&e.path);
+                match open.iter().find(|(p, _)| *p == here) {
+                    Some((_, body)) => Some(body.to_string()),
+                    None => crate::contents::body_of(&e.path),
+                }
+            })
             .collect();
     }
 
