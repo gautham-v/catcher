@@ -291,6 +291,13 @@ pub struct App {
     /// Preview hit regions from the last draw: link spans, checkbox lines, and
     /// every row's source line (for click → edit at the same place).
     pub preview_links: Vec<(Rect, String)>,
+    /// The pictures on screen in the last preview draw, for a click to zoom.
+    pub preview_images: Vec<(Rect, String)>,
+    /// Every picture in the rendered page, in order, so the zoom can step
+    /// from one to the next whether or not it is scrolled into view.
+    pub preview_image_urls: Vec<String>,
+    /// The picture taking the whole terminal, if one is: its URL as written.
+    pub zoom: Option<String>,
     pub preview_checkboxes: Vec<(Rect, usize)>,
     /// Every drawn row, its source line, and the cells it drew. The source
     /// line is `None` for a row the renderer invented — a blank line between
@@ -571,6 +578,9 @@ impl App {
             edit_rows: Vec::new(),
             palette_rows: Vec::new(),
             preview_links: Vec::new(),
+            preview_images: Vec::new(),
+            preview_image_urls: Vec::new(),
+            zoom: None,
             preview_checkboxes: Vec::new(),
             preview_rows: Vec::new(),
             dragging: false,
@@ -2108,6 +2118,16 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        // a zoomed picture takes every key: the arrows step between the
+        // note's pictures, anything else puts it away
+        if self.zoom.is_some() {
+            match key.code {
+                KeyCode::Left | KeyCode::Up | KeyCode::PageUp => self.zoom_step(-1),
+                KeyCode::Right | KeyCode::Down | KeyCode::PageDown => self.zoom_step(1),
+                _ => self.unzoom(),
+            }
+            return;
+        }
         // the arrows and page keys read the peek; any other key puts it away
         // (the peek action itself opens a new one)
         if let Some(peek) = self.peek.as_mut() {
@@ -2637,6 +2657,13 @@ impl App {
             self.toggle_checkbox(row);
             return;
         }
+        // a picture takes the whole terminal until the next key or click
+        if let Some((_, url)) = self.preview_images.iter().find(|(r, _)| r.contains(at)) {
+            self.zoom = Some(url.clone());
+            self.peek = None;
+            self.hover = None;
+            return;
+        }
         // a heading row folds and unfolds, the way ⌥← and ⌥→ do on it; a
         // link on the heading was answered above, so only the text is left
         let heading = self
@@ -2654,6 +2681,27 @@ impl App {
         }
         self.preview_sel = self.preview_point(x, y).map(|p| (p, p));
         self.preview_dragging = true;
+    }
+
+    /// Step the zoomed picture to the previous or next one in the note,
+    /// stopping at either end rather than wrapping.
+    fn zoom_step(&mut self, delta: isize) {
+        let Some(url) = self.zoom.as_ref() else {
+            return;
+        };
+        let urls = &self.preview_image_urls;
+        let Some(i) = urls.iter().position(|u| u == url) else {
+            return;
+        };
+        let j = (i as isize + delta).clamp(0, urls.len() as isize - 1) as usize;
+        if j != i {
+            self.zoom = Some(urls[j].clone());
+        }
+    }
+
+    fn unzoom(&mut self) {
+        self.zoom = None;
+        self.images.unzoom();
     }
 
     /// The old behaviour, kept behind `preview_click: edit`: land in the
@@ -2934,6 +2982,17 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
+        // over a zoomed picture the wheel steps between pictures and a click
+        // closes it; the pointer moving is nothing
+        if self.zoom.is_some() {
+            match ev.kind {
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft => self.zoom_step(-1),
+                MouseEventKind::ScrollDown | MouseEventKind::ScrollRight => self.zoom_step(1),
+                MouseEventKind::Down(_) => self.unzoom(),
+                _ => {}
+            }
+            return;
+        }
         // the wheel over an open peek turns its pages, not the one beneath
         if let (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown, Some(peek)) =
             (ev.kind, self.peek.as_mut())
