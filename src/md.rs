@@ -1688,9 +1688,13 @@ fn is_table_row(line: &str) -> bool {
     line.trim().starts_with('|') && line.trim().chars().count() > 1
 }
 
-/// `![alt](url)` and nothing else on the line — split into (alt, url).
+/// `![alt](url)` or an Obsidian `![[url]]` embed, and nothing else on the
+/// line — split into (alt, url).
 pub fn image_line(line: &str) -> Option<(String, String)> {
     let t = line.trim();
+    if let Some(found) = embed_line(t) {
+        return Some(found);
+    }
     let rest = t.strip_prefix("![")?;
     let close = rest.find("](")?;
     let alt = &rest[..close];
@@ -1699,6 +1703,44 @@ pub fn image_line(line: &str) -> Option<(String, String)> {
         return None;
     }
     Some((alt.to_string(), url.to_string()))
+}
+
+/// An Obsidian embed alone on a line: `![[picture.png]]` or
+/// `![[picture.png|alt]]`, split into (alt, url). Only pictures: an embed of
+/// another note (`![[plan]]`) is not one, and stays the text it was typed as.
+/// Obsidian also reads a bare number after the pipe as a width; here it is
+/// dropped rather than shown as alt text.
+pub fn embed_line(line: &str) -> Option<(String, String)> {
+    let t = line.trim();
+    let body = t.strip_prefix("![[")?.strip_suffix("]]")?;
+    if body.contains('[') || body.contains(']') || body.contains('\n') {
+        return None;
+    }
+    let (url, alt) = match body.split_once('|') {
+        Some((u, a)) => (u.trim(), a.trim()),
+        None => (body.trim(), ""),
+    };
+    if url.is_empty() || !is_image_path(url) {
+        return None;
+    }
+    let alt = if alt.chars().all(|c| c.is_ascii_digit()) {
+        ""
+    } else {
+        alt
+    };
+    Some((alt.to_string(), url.to_string()))
+}
+
+/// Whether a path names a picture the preview could draw, by extension.
+pub fn is_image_path(path: &str) -> bool {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    matches!(
+        ext.as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff")
+    )
 }
 
 /// Every block in the buffer, in order and never overlapping.
@@ -2267,6 +2309,31 @@ mod tests {
 
     fn buf(s: &str) -> Vec<String> {
         s.lines().map(String::from).collect()
+    }
+
+    #[test]
+    fn an_obsidian_embed_alone_on_a_line_is_an_image() {
+        assert_eq!(
+            embed_line("![[attachments/hero.jpg]]"),
+            Some((String::new(), "attachments/hero.jpg".into()))
+        );
+        assert_eq!(
+            image_line("  ![[a.png|a cat]]  "),
+            Some(("a cat".into(), "a.png".into()))
+        );
+        // a bare number after the pipe is Obsidian's width, not alt text
+        assert_eq!(
+            image_line("![[a.png|300]]"),
+            Some((String::new(), "a.png".into()))
+        );
+        // a note embed is not a picture, and neither is anything malformed
+        assert_eq!(embed_line("![[plan]]"), None);
+        assert_eq!(embed_line("![[a.png]] tail"), None);
+        assert_eq!(embed_line("![[]]"), None);
+        assert_eq!(embed_line("[[a.png]]"), None);
+        assert!(blocks(&["![[a.png]]".to_string()])
+            .iter()
+            .any(|b| b.kind == BlockKind::Image));
     }
 
     #[test]
