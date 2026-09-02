@@ -653,6 +653,11 @@ impl App {
         self.folds.is_folded(&self.notes[self.active].path, row)
     }
 
+    /// The folded headings of the open note, in order.
+    pub fn folded_lines(&self) -> Vec<usize> {
+        self.folds.of(&self.notes[self.active].path)
+    }
+
     /// What a folded heading says at its right edge.
     pub fn fold_label(&self, row: usize) -> Option<String> {
         if !self.folded_here(row) {
@@ -669,40 +674,118 @@ impl App {
         crate::fold::heading_at(self.editor.lines(), &self.blocks(), self.editor.cursor.0).is_some()
     }
 
-    /// Does this key fold rather than move? Only in the editor, only on a
-    /// heading, and never while a selection is being extended: ⇧⌥← is a
-    /// motion wherever the cursor is.
+    /// Does this key fold rather than move? In the editor only on a heading,
+    /// and never while a selection is being extended: ⇧⌥← is a motion
+    /// wherever the cursor is. The reading view has nothing for the arrows
+    /// to move, so there they always fold.
     fn fold_key_applies(&self, key: &KeyEvent) -> bool {
-        self.view == View::Edit
-            && self.overlay == Overlay::None
-            && fold_key_takes(key, self.on_heading())
+        self.overlay == Overlay::None
+            && match self.view {
+                View::Edit => fold_key_takes(key, self.on_heading()),
+                View::Preview => !key.modifiers.contains(KeyModifiers::SHIFT),
+            }
+    }
+
+    /// The line the fold keys act on: the cursor's in the editor. The reading
+    /// view has no cursor, so there it is the heading the selection starts
+    /// on, or failing that the first heading on screen.
+    fn fold_target(&self) -> Option<usize> {
+        match self.view {
+            View::Edit => Some(self.editor.cursor.0),
+            View::Preview => {
+                let blocks = self.blocks();
+                let heading = |line: usize| {
+                    crate::fold::heading_at(self.editor.lines(), &blocks, line).is_some()
+                };
+                let at_sel = self.preview_span().and_then(|((row, _), _)| {
+                    let i = self
+                        .preview_page_rows
+                        .iter()
+                        .position(|(r, _, _)| *r == row)?;
+                    self.preview_rows.get(i)?.1.filter(|&l| heading(l))
+                });
+                at_sel.or_else(|| {
+                    self.preview_rows
+                        .iter()
+                        .filter_map(|(_, l, _)| *l)
+                        .find(|&l| heading(l))
+                })
+            }
+        }
+    }
+
+    /// A fold changed under the reading view: its rows are about to mean
+    /// other lines, so a selection anchored to them is dropped.
+    fn folds_changed(&mut self) {
+        self.refresh_visible();
+        if self.view == View::Preview {
+            self.preview_sel = None;
+        }
     }
 
     fn fold_section(&mut self) {
+        let Some(row) = self.fold_target() else {
+            self.flash("no heading on screen".to_string());
+            return;
+        };
+        self.fold_line(row);
+    }
+
+    /// Fold the section under `row`, saying why when it cannot.
+    fn fold_line(&mut self, row: usize) {
         let path = self.notes[self.active].path.clone();
         let blocks = self.blocks();
-        let row = self.editor.cursor.0;
+        let is_heading = crate::fold::heading_at(self.editor.lines(), &blocks, row).is_some();
         match self.folds.fold(&path, self.editor.lines(), &blocks, row) {
-            Some(_) => self.refresh_visible(),
-            None if self.on_heading() => self.flash("nothing under this heading".to_string()),
+            Some(_) => self.folds_changed(),
+            None if is_heading => self.flash("nothing under this heading".to_string()),
             None => self.flash("not on a heading".to_string()),
         }
     }
 
     fn unfold_section(&mut self) {
+        let Some(row) = self.fold_target() else {
+            self.flash("no heading on screen".to_string());
+            return;
+        };
+        self.unfold_line(row);
+    }
+
+    /// Open the fold on `row`, saying so when there is none.
+    fn unfold_line(&mut self, row: usize) {
         let path = self.notes[self.active].path.clone();
-        if self.folds.unfold(&path, self.editor.cursor.0) {
-            self.refresh_visible();
+        if self.folds.unfold(&path, row) {
+            self.folds_changed();
         } else {
             self.flash("nothing folded here".to_string());
         }
+    }
+
+    /// A click on a heading in the reading view: open its fold, or close it.
+    /// Whether anything changed — a heading with nothing under it is left to
+    /// the click's other meanings.
+    fn toggle_fold(&mut self, row: usize) -> bool {
+        if self.folded_here(row) {
+            self.unfold_line(row);
+            return true;
+        }
+        let path = self.notes[self.active].path.clone();
+        let blocks = self.blocks();
+        let folded = self
+            .folds
+            .fold(&path, self.editor.lines(), &blocks, row)
+            .is_some();
+        if folded {
+            self.folds_changed();
+        }
+        folded
     }
 
     fn fold_all(&mut self) {
         let path = self.notes[self.active].path.clone();
         let blocks = self.blocks();
         let n = self.folds.fold_all(&path, self.editor.lines(), &blocks);
-        self.refresh_visible();
+        self.folds_changed();
         // the cursor may have been inside a section that just closed
         let row = self.editor.cursor.0;
         self.leave_folds(row);
@@ -712,7 +795,7 @@ impl App {
     fn unfold_all(&mut self) {
         let path = self.notes[self.active].path.clone();
         let n = self.folds.unfold_all(&path);
-        self.refresh_visible();
+        self.folds_changed();
         self.flash(format!("opened {n} folds"));
     }
 
@@ -2552,6 +2635,17 @@ impl App {
         if let Some((_, row)) = self.preview_checkboxes.iter().find(|(r, _)| r.contains(at)) {
             let row = *row;
             self.toggle_checkbox(row);
+            return;
+        }
+        // a heading row folds and unfolds, the way ⌥← and ⌥→ do on it; a
+        // link on the heading was answered above, so only the text is left
+        let heading = self
+            .preview_rows
+            .iter()
+            .find(|(r, _, _)| r.contains(at))
+            .and_then(|(_, line, _)| *line)
+            .filter(|&l| crate::fold::heading_at(self.editor.lines(), &self.blocks(), l).is_some());
+        if heading.is_some_and(|row| self.toggle_fold(row)) {
             return;
         }
         if self.config.preview_click == PreviewClick::Edit {
