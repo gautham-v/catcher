@@ -267,12 +267,25 @@ pub mod theme {
     pub const PLAIN: Style = Style::new();
 
     /// Headings fall off into the ramp rather than each taking a hue: the
-    /// accent leads, then grey, then weight alone.
+    /// accent leads, then the second step, then weight alone.
     pub fn heading(level: usize) -> Style {
         match level {
             1 => Style::new().fg(palette().accent).add_modifier(bold()),
-            2 => Style::new().fg(palette().grey).add_modifier(bold()),
+            2 => Style::new().fg(second_step()).add_modifier(bold()),
             _ => Style::new().add_modifier(bold()),
+        }
+    }
+
+    /// The colour an `##` heading takes. On a light ground grey is darker
+    /// than the prose and reads as a heading; on a dark ground the same grey
+    /// is *dimmer* than the prose and read as an aside, so there the heading
+    /// takes the bright step instead. Decided from the ground actually in
+    /// force, so a custom palette gets the same treatment as the built-in.
+    fn second_step() -> Color {
+        let p = palette();
+        match p.ground {
+            Color::Rgb(r, g, b) if mode_of_background(r, g, b) == Mode::Dark => p.bright,
+            _ => p.grey,
         }
     }
 
@@ -1910,6 +1923,15 @@ mod tests {
     }
 
     #[test]
+    fn a_second_level_heading_is_bright_on_dark_and_grey_on_light() {
+        theme::set_palette(theme::DARK);
+        assert_eq!(theme::heading(2).fg, Some(theme::DARK.bright));
+        theme::set_palette(theme::LIGHT);
+        assert_eq!(theme::heading(2).fg, Some(theme::LIGHT.grey));
+        theme::set_palette(theme::DARK);
+    }
+
+    #[test]
     fn heading_marker_is_hidden_and_styled() {
         let l = style_line("## Title");
         assert_eq!(text(&l), "Title");
@@ -2518,7 +2540,10 @@ mod tests {
         let targets: Vec<&str> = found.iter().map(|w| w.target.as_str()).collect();
         assert_eq!(targets, vec!["a", "b"]);
         // and the spans are the whole `[[…]]`, so nothing is scanned twice
-        assert_eq!(&"see [[a]] and [[b|bee]] and [[unclosed"[found[0].start..found[0].end], "[[a]]");
+        assert_eq!(
+            &"see [[a]] and [[b|bee]] and [[unclosed"[found[0].start..found[0].end],
+            "[[a]]"
+        );
         assert!(wikilinks("nothing here at all").is_empty());
     }
 
@@ -2569,6 +2594,9 @@ mod tests {
         // its own ground and so cannot
         let c = theme::code();
         assert!(c.bg.is_some());
-        assert!(c.fg.is_some(), "code without a foreground is unreadable on a terminal whose ink matches code_bg");
+        assert!(
+            c.fg.is_some(),
+            "code without a foreground is unreadable on a terminal whose ink matches code_bg"
+        );
     }
 }
