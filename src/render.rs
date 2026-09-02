@@ -738,6 +738,46 @@ impl Ren {
         ))
     }
 
+    /// An Obsidian embed, `![[picture.png]]`, whose `!` is at byte offset
+    /// `off` and which has its line to itself, as (alt, url, byte offset just
+    /// past the end of the line). Everything pulldown goes on to emit for the
+    /// line is skipped the way the rest of a wikilink is.
+    fn embed_here(&self, off: usize) -> Option<(String, String, usize)> {
+        if !crate::md::links::enabled() || !self.src[off..].starts_with("![[") {
+            return None;
+        }
+        let line_start = self.src[..off].rfind('\n').map_or(0, |n| n + 1);
+        let line_end = self.src[off..]
+            .find('\n')
+            .map_or(self.src.len(), |n| off + n);
+        let line = &self.src[line_start..line_end];
+        if line.trim_start().len() != line_end - off {
+            return None; // the embed is not the first thing on its line
+        }
+        let (alt, url) = crate::md::embed_line(line)?;
+        Some((alt, url, line_end))
+    }
+
+    /// One picture on a line of its own: the `🖼 alt (url)` label that stands
+    /// in for it, tagged with the image it stands for.
+    fn emit_image(&mut self, alt: String, url: String) {
+        self.flush();
+        let idx = self.out.images.len();
+        self.out.images.push(ImageSpec {
+            alt: alt.clone(),
+            url: url.clone(),
+        });
+        let label = if alt.is_empty() {
+            format!("🖼 {url}")
+        } else {
+            format!("🖼 {alt} ({url})")
+        };
+        self.push(&label, theme::marker(), None);
+        let cells = std::mem::take(&mut self.cells);
+        let src_line = self.src_line;
+        self.emit_wrapped(cells, None, Some(idx), src_line, 0);
+    }
+
     /// Text from the document: scan for `==highlight==` and bare URLs.
     /// `off` is the source byte offset of `text`, when it is a verbatim slice.
     fn emit_text(&mut self, text: &str, off: Option<usize>) {
@@ -1053,21 +1093,7 @@ impl Ren {
             }
             Event::End(TagEnd::Image) => {
                 if let Some((alt, url)) = self.image_alt.take() {
-                    self.flush();
-                    let idx = self.out.images.len();
-                    self.out.images.push(ImageSpec {
-                        alt: alt.clone(),
-                        url: url.clone(),
-                    });
-                    let label = if alt.is_empty() {
-                        format!("🖼 {url}")
-                    } else {
-                        format!("🖼 {alt} ({url})")
-                    };
-                    self.push(&label, theme::marker(), None);
-                    let cells = std::mem::take(&mut self.cells);
-                    let src_line = self.src_line;
-                    self.emit_wrapped(cells, None, Some(idx), src_line, 0);
+                    self.emit_image(alt, url);
                 }
             }
             // tables
@@ -1145,6 +1171,11 @@ impl Ren {
                         let src_line = self.src_line;
                         self.emit_wrapped(cells, None, None, src_line, 2);
                     }
+                } else if let Some((alt, url, end)) = self.embed_here(range.start) {
+                    // `![[picture.png]]` on a line of its own is a picture,
+                    // the same as `![](picture.png)`; pulldown sees only text
+                    self.emit_image(alt, url);
+                    self.wiki_until = end;
                 } else if let Some((end, target, ls, le)) = self.wikilink_here(range.start) {
                     // the label keeps its own source bytes, so `push_at` gives
                     // every cell its true (line, column) and a preview click
@@ -2193,6 +2224,33 @@ mod tests {
         let cell = r.lines[0].cells.iter().find(|c| c.link.is_some()).unwrap();
         assert_eq!(cell.ch, 'l');
         assert_eq!(cell.src, Some((0, "see [[note|".len())));
+    }
+
+    #[test]
+    fn an_obsidian_embed_is_an_image_in_the_reading_view() {
+        let r = render("before\n\n![[attachments/hero.jpg|the hero]]\n\nafter\n");
+        let line = r.lines.iter().find(|l| l.image.is_some()).unwrap();
+        assert_eq!(
+            r.images[line.image.unwrap()],
+            ImageSpec {
+                alt: "the hero".into(),
+                url: "attachments/hero.jpg".into(),
+            }
+        );
+        assert_eq!(line.text(), "🖼 the hero (attachments/hero.jpg)");
+        // nothing of the source syntax leaks out after the picture
+        let all: String = r
+            .lines
+            .iter()
+            .map(|l| l.text())
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(!all.contains("]]") && !all.contains("![["), "{all}");
+        assert!(all.contains("after"));
+        // a note embed and a mid-sentence embed stay text
+        let r = render("![[plan]]\n");
+        assert!(r.lines.iter().all(|l| l.image.is_none()));
+        assert!(r.lines.iter().any(|l| l.text().contains("![[plan]]")));
     }
 
     #[test]
