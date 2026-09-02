@@ -63,6 +63,8 @@ pub enum Overlay {
     /// A wikilink that resolves to nothing: enter makes the note it names.
     ConfirmCreate,
     RenameFile,
+    /// Move the open note to another folder under the session root.
+    MoveFile,
     Help,
 }
 
@@ -72,17 +74,19 @@ pub enum Command {
     QuickOpen,
     DeleteNote,
     RenameFile,
+    MoveFile,
     TogglePreview,
     Shortcuts,
     OpenSettings,
     Quit,
 }
 
-const COMMANDS: [Command; 8] = [
+const COMMANDS: [Command; 9] = [
     Command::NewNote,
     Command::QuickOpen,
     Command::DeleteNote,
     Command::RenameFile,
+    Command::MoveFile,
     Command::TogglePreview,
     Command::Shortcuts,
     Command::OpenSettings,
@@ -94,6 +98,8 @@ impl Command {
     /// which is how the palette knows what key to show beside it.
     pub fn action(&self) -> Option<Action> {
         Some(match self {
+            // palette-only: a move is rare enough that it earns no key
+            Command::MoveFile => return None,
             Command::NewNote => Action::NewNote,
             Command::QuickOpen => Action::QuickOpen,
             Command::DeleteNote => Action::DeleteNote,
@@ -111,6 +117,7 @@ impl Command {
             Command::QuickOpen => ("Open note", "any folder, recent first"),
             Command::DeleteNote => ("Delete note", "delete the file on disk"),
             Command::RenameFile => ("Rename file", "change the name on disk"),
+            Command::MoveFile => ("Move to folder", "another folder under this one"),
             Command::TogglePreview => ("Reading view", "the page, rendered"),
             Command::Shortcuts => ("Help", "every key, on one card"),
             Command::OpenSettings => ("Settings", "edit them here, as a note"),
@@ -174,7 +181,6 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
 
 #[derive(Clone, PartialEq)]
 pub enum Item {
-    Note(usize),
     /// A file from the quick-open index, which may live in another folder and
     /// may not be loaded into this session at all yet.
     Entry(usize),
@@ -184,6 +190,8 @@ pub enum Item {
     /// folds or unfolds it — a folder is not somewhere to go, so the overlay
     /// stays exactly where it was.
     Folder(String),
+    /// A folder the open note can be moved into, from the move picker.
+    MoveTo(PathBuf),
     Command(Command),
 }
 
@@ -687,7 +695,14 @@ impl App {
         };
         match target {
             Some(path) => self.open_path(&path),
-            None => self.flash(if back { "nothing to go back to" } else { "nothing ahead" }.to_string()),
+            None => self.flash(
+                if back {
+                    "nothing to go back to"
+                } else {
+                    "nothing ahead"
+                }
+                .to_string(),
+            ),
         }
     }
 
@@ -1206,6 +1221,7 @@ impl App {
                 })
                 .collect(),
             Overlay::QuickOpen => self.open_items(),
+            Overlay::MoveFile => self.move_items(),
             _ => Vec::new(),
         }
     }
@@ -1253,32 +1269,76 @@ impl App {
         self.flash(format!("deleted “{title}”"));
     }
 
-    /// Palette rows for the current query: commands and notes, best first.
+    /// Palette rows for the current query: commands only, best first. Notes
+    /// live behind ^O, the way Obsidian keeps them out of its palette too.
     pub fn palette_items(&self) -> Vec<Item> {
         let mut scored: Vec<(i64, Item)> = Vec::new();
         for c in COMMANDS {
             if let Some(s) = search::fuzzy(&self.query, c.label().0) {
-                // with no query, commands lead; with a query, notes outrank them slightly
-                let bias = if self.query.is_empty() { 1000 } else { 0 };
-                scored.push((s + bias, Item::Command(c)));
+                scored.push((s, Item::Command(c)));
             }
         }
-        for (i, n) in self.notes.iter().enumerate() {
-            if let Some(s) = search::score_note(&self.query, &n.name(), &n.title(), &n.content) {
-                scored.push((s, Item::Note(i)));
+        scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+        scored.into_iter().map(|(_, it)| it).collect()
+    }
+
+    /// Every folder under the session root the open note could move to,
+    /// the root itself first, the rest in path order. Hidden folders and the
+    /// attachments folder are skipped; so is the folder the note is in now.
+    pub fn move_targets(&self) -> Vec<(PathBuf, usize)> {
+        fn walk(dir: &Path, skip: &Path, out: &mut Vec<(PathBuf, usize)>) {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
+            let mut notes = 0;
+            let mut subs = Vec::new();
+            for e in rd.flatten() {
+                let p = e.path();
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    continue;
+                }
+                if p.is_dir() {
+                    if p != skip {
+                        subs.push(p);
+                    }
+                } else if p.extension().is_some_and(|x| x == "md") {
+                    notes += 1;
+                }
+            }
+            out.push((dir.to_path_buf(), notes));
+            subs.sort();
+            for s in subs {
+                walk(&s, skip, out);
             }
         }
-        // everything ^O can reach that is not loaded yet — a note in a
-        // subfolder, or in another root — scored the way ^O scores it; the
-        // sort is stable, so with no query these trail the loaded notes
-        let loaded: std::collections::HashSet<&Path> =
-            self.notes.iter().map(|n| n.path.as_path()).collect();
-        for (i, e) in self.open_index.iter().enumerate() {
-            if loaded.contains(e.path.as_path()) {
-                continue;
-            }
-            if let Some(s) = search::score_entry(&self.query, &e.name(), &e.title, &e.rel) {
-                scored.push((s, Item::Entry(i)));
+        let mut out = Vec::new();
+        walk(&self.dir, &self.config.attachments_dir, &mut out);
+        let here = self
+            .active_note()
+            .path
+            .parent()
+            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+        out.retain(|(d, _)| Some(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone())) != here);
+        out
+    }
+
+    /// What a move target is called in the picker: `/` for the root, the
+    /// path below it for anything else.
+    pub fn move_label(&self, dir: &Path) -> String {
+        match dir.strip_prefix(&self.dir) {
+            Ok(rel) if rel.as_os_str().is_empty() => "/".to_string(),
+            Ok(rel) => format!("{}/", rel.display()),
+            Err(_) => crate::index::short(dir),
+        }
+    }
+
+    /// Move-picker rows for the current query, best first.
+    pub fn move_items(&self) -> Vec<Item> {
+        let mut scored: Vec<(i64, Item)> = Vec::new();
+        for (dir, _) in self.move_targets() {
+            if let Some(s) = search::fuzzy(&self.query, &self.move_label(&dir)) {
+                scored.push((s, Item::MoveTo(dir)));
             }
         }
         scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
@@ -1295,7 +1355,6 @@ impl App {
         }
         self.overlay = Overlay::None;
         match item {
-            Item::Note(i) => self.switch_to(i),
             Item::Entry(i) => {
                 if let Some(path) = self.open_index.get(i).map(|e| e.path.clone()) {
                     self.open_path(&path);
@@ -1320,6 +1379,35 @@ impl App {
                 self.overlay = Overlay::ConfirmDelete;
             }
             Item::Command(Command::RenameFile) => self.open_rename(),
+            Item::Command(Command::MoveFile) => self.open_move(),
+            Item::MoveTo(dir) => self.commit_move(&dir),
+        }
+    }
+
+    fn open_move(&mut self) {
+        self.save_now();
+        self.query.clear();
+        self.selected = 0;
+        self.overlay = Overlay::MoveFile;
+    }
+
+    /// Move the open note into `dir`. The filename comes along (made unique
+    /// if the folder already has one by that name); the title is untouched.
+    fn commit_move(&mut self, dir: &Path) {
+        let label = self.move_label(dir);
+        match notes::move_file(&mut self.notes[self.active], dir) {
+            Ok(path) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                // the note is somewhere else now: the index, the recents and
+                // the history all named the old path
+                self.reindex();
+                self.remember_active();
+                self.flash(format!("moved → {label}{name}"));
+            }
+            Err(e) => self.flash(format!("move failed: {e}")),
         }
     }
 
@@ -1382,8 +1470,6 @@ impl App {
     fn open_palette(&mut self) {
         self.query.clear();
         self.selected = 0;
-        // the palette lists what ^O lists, so it walks what ^O walks
-        self.refresh_index();
         self.overlay = Overlay::Palette;
     }
 
@@ -1440,7 +1526,7 @@ impl App {
                     }
                 }
             }
-            Overlay::Palette | Overlay::QuickOpen => self.on_palette_key(key),
+            Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile => self.on_palette_key(key),
             Overlay::ConfirmDelete => match key.code {
                 KeyCode::Enter => {
                     self.overlay = Overlay::None;
@@ -2109,21 +2195,25 @@ impl App {
             (ev.kind, self.peek.as_mut())
         {
             if peek.contains(ev.column, ev.row) {
-                let d = if ev.kind == MouseEventKind::ScrollUp { -2 } else { 2 };
+                let d = if ev.kind == MouseEventKind::ScrollUp {
+                    -2
+                } else {
+                    2
+                };
                 peek.scroll_by(d);
                 return;
             }
         }
         match ev.kind {
             MouseEventKind::ScrollUp => match (self.overlay, self.view) {
-                (Overlay::Palette | Overlay::QuickOpen, _) => {
+                (Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile, _) => {
                     self.selected = self.selected.saturating_sub(1)
                 }
                 (_, View::Preview) => self.preview_scroll = self.preview_scroll.saturating_sub(2),
                 (_, View::Edit) => self.editor.scroll_by(-2),
             },
             MouseEventKind::ScrollDown => match (self.overlay, self.view) {
-                (Overlay::Palette | Overlay::QuickOpen, _) => {
+                (Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile, _) => {
                     let count = self.overlay_items().len();
                     if count > 0 && self.selected + 1 < count {
                         self.selected += 1;
@@ -2144,7 +2234,10 @@ impl App {
                 }
                 self.peek = None;
                 self.hover = None;
-                if matches!(self.overlay, Overlay::Palette | Overlay::QuickOpen) {
+                if matches!(
+                    self.overlay,
+                    Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile
+                ) {
                     if let Some((_, item)) = self
                         .palette_rows
                         .iter()
@@ -2510,7 +2603,11 @@ mod tests {
             rect: super::Rect::default(),
         };
         p.ensure_rendered(30, crate::config::TableStyle::default());
-        assert!(p.rows.len() > 2, "expected wrapped rows, got {}", p.rows.len());
+        assert!(
+            p.rows.len() > 2,
+            "expected wrapped rows, got {}",
+            p.rows.len()
+        );
         for row in &p.rows {
             assert!(row.width() <= 30, "row wider than 30: {:?}", row);
         }
@@ -2524,7 +2621,9 @@ mod tests {
             name: String::new(),
             body: String::new(),
             anchor: super::Rect::default(),
-            rows: (0..20).map(|i| ratatui::text::Line::from(i.to_string())).collect(),
+            rows: (0..20)
+                .map(|i| ratatui::text::Line::from(i.to_string()))
+                .collect(),
             rows_width: 10,
             scroll: 0,
             view_rows: 5,
@@ -2752,10 +2851,7 @@ mod tests {
         // matter, both open at the only place they can
         let plain: Vec<String> = vec!["# Title".to_string()];
         assert_eq!(opening_row(&plain, FrontMatter::Hide), 0);
-        let only: Vec<String> = "---\ntags: work\n---"
-            .lines()
-            .map(String::from)
-            .collect();
+        let only: Vec<String> = "---\ntags: work\n---".lines().map(String::from).collect();
         assert_eq!(opening_row(&only, FrontMatter::Hide), 2);
     }
 

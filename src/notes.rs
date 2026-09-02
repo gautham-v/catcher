@@ -20,15 +20,6 @@ impl Note {
         title_of(&self.content)
     }
 
-    /// The file's own name, without the `.md`: what the palette shows, so a
-    /// note is found under the name it has on disk.
-    pub fn name(&self) -> String {
-        self.path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    }
-
     /// The file's own name, when it is no longer tracking the title — that is,
     /// when the user renamed the file by hand and the two have diverged.
     /// `None` while the filename still follows the title, where showing it
@@ -287,6 +278,24 @@ pub fn rename_file(note: &mut Note, stem: &str) -> Result<PathBuf> {
     Ok(note.path.clone())
 }
 
+/// Move a note into another folder, keeping its filename — or the nearest
+/// free one, if that folder already has a note by the name.
+pub fn move_file(note: &mut Note, dir: &Path) -> Result<PathBuf> {
+    let stem = note
+        .path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled".to_string());
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let target = free_path(dir, &stem, Some(&note.path));
+    if target != note.path {
+        fs::rename(&note.path, &target)
+            .with_context(|| format!("moving to {}", target.display()))?;
+        note.path = target;
+    }
+    Ok(note.path.clone())
+}
+
 pub fn delete(note: &Note) -> Result<()> {
     fs::remove_file(&note.path)?;
     Ok(())
@@ -502,6 +511,26 @@ mod tests {
         // renaming to its own name is a no-op, not a -2
         rename_file(&mut n, "taken-2").unwrap();
         assert_eq!(n.path, dir.join("taken-2.md"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_move_keeps_the_filename_and_dodges_a_collision() {
+        let dir = tmpdir("move");
+        let work = dir.join("work");
+        let mut n = note_at(&dir, "spec.md", "# Spec\n");
+        // the folder need not exist yet
+        move_file(&mut n, &work).unwrap();
+        assert_eq!(n.path, work.join("spec.md"));
+        assert!(!dir.join("spec.md").exists());
+        assert_eq!(fs::read_to_string(&n.path).unwrap(), "# Spec\n");
+        // moving back beside a note of the same name takes the next free name
+        fs::write(dir.join("spec.md"), "other").unwrap();
+        move_file(&mut n, &dir).unwrap();
+        assert_eq!(n.path, dir.join("spec-2.md"));
+        // moving into the folder it is already in is a no-op
+        move_file(&mut n, &dir).unwrap();
+        assert_eq!(n.path, dir.join("spec-2.md"));
         let _ = fs::remove_dir_all(&dir);
     }
 

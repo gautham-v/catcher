@@ -11,7 +11,7 @@
 
 use crate::config::TableStyle;
 use crate::md::theme;
-use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -325,6 +325,11 @@ struct Ren {
     hang: usize,
     list_depth: usize,
     in_code_block: bool,
+    /// Inside a ```mermaid fence: the body accumulated so far, and the source
+    /// byte offset it started at. The whole body is held back until the
+    /// closing fence, because whether it is drawn at all is only known once
+    /// there is a diagram to draw.
+    mermaid: Option<(String, usize)>,
     table: Option<Table>,
     /// How a table wider than the page is drawn.
     tables: TableStyle,
@@ -371,6 +376,7 @@ impl Ren {
             hang: 0,
             list_depth: 0,
             in_code_block: false,
+            mermaid: None,
             table: None,
             tables,
             width,
@@ -711,6 +717,72 @@ impl Ren {
         self.push_at(&run, base, link, at(run_start));
     }
 
+    /// A ```mermaid fence: the picture when catcher can draw one, and the
+    /// source under a label saying what it is when it cannot. Both answers
+    /// are honest — a diagram kind we have never heard of degrades to exactly
+    /// what a fence looked like yesterday, with a word about why.
+    fn emit_mermaid(&mut self, src: &str, off: usize) {
+        match crate::mermaid::render(src, self.inner_width()) {
+            Some(d) => self.emit_diagram(&d),
+            None => self.emit_fence_label(src, off),
+        }
+    }
+
+    /// Put a drawn diagram on the page, one row per row.
+    ///
+    /// Split out from `emit_mermaid` so it can be driven by a diagram built by
+    /// hand: what the reading view owns here is the styling, the `wide` flag
+    /// and the decoration `emit_line` adds, none of which care what drew the
+    /// rows. A row wider than the page is marked `wide` and the page pans
+    /// across it exactly as it pans a wide table.
+    fn emit_diagram(&mut self, d: &crate::mermaid::Rendered) {
+        for row in &d.rows {
+            let mut cells: Vec<PCell> = Vec::new();
+            for run in row {
+                cells.extend(str_cells(&run.text, crate::md::mermaid_style(run.role)));
+            }
+            let wide = cells_width(&cells) > self.width;
+            self.emit_line(PLine {
+                cells,
+                checkbox: None,
+                image: None,
+                src_line: self.src_line,
+                wide,
+            });
+        }
+    }
+
+    /// The fallback: a label naming the diagram kind, then the fence's own
+    /// source drawn exactly as a code block is — same indent, same colour and,
+    /// above all, the same source offsets. Keeping the offsets is what leaves
+    /// a click in a diagram catcher could not draw landing on the character it
+    /// was aimed at.
+    ///
+    /// A label and not a box: the callout card is the app's one boxed
+    /// construct, and a fence that could not be drawn has no business
+    /// competing with it. The marker colour keeps it chrome — never the
+    /// accent, which the note spends on its headings.
+    fn emit_fence_label(&mut self, src: &str, off: usize) {
+        let label = match crate::mermaid::kind_word(src) {
+            Some(word) => format!("◇ mermaid · {word}"),
+            None => "◇ mermaid".to_string(),
+        };
+        self.push(&label, theme::marker(), None);
+        self.flush();
+        let mut off = off;
+        // split_inclusive, not lines(), for the same reason the code-block arm
+        // uses it: the line ending is counted as it is in the file
+        for raw in src.split_inclusive('\n') {
+            let l = raw.trim_end_matches('\n').trim_end_matches('\r');
+            self.push("  ", theme::code(), None);
+            self.push_at(l, theme::code(), None, Some(off));
+            off += raw.len();
+            let cells = std::mem::take(&mut self.cells);
+            let src_line = self.src_line;
+            self.emit_wrapped(cells, None, None, src_line, 2);
+        }
+    }
+
     fn run(&mut self, markdown: &str) {
         for (event, range) in Parser::new_ext(markdown, options()).into_offset_iter() {
             // file-absolute, like `pos_of`: this is the number a preview click
@@ -826,12 +898,18 @@ impl Ren {
                     self.done_item = true;
                 }
             }
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) => {
                 self.blank();
                 self.src_line = Some(src_line);
                 self.in_code_block = true;
+                if matches!(&kind, CodeBlockKind::Fenced(info) if crate::mermaid::is_mermaid(info)) {
+                    self.mermaid = Some((String::new(), 0));
+                }
             }
             Event::End(TagEnd::CodeBlock) => {
+                if let Some((src, off)) = self.mermaid.take() {
+                    self.emit_mermaid(&src, off);
+                }
                 self.in_code_block = false;
                 self.flush();
             }
@@ -940,6 +1018,13 @@ impl Ren {
             Event::Text(text) => {
                 if let Some((alt, _)) = self.image_alt.as_mut() {
                     alt.push_str(&text);
+                } else if let Some((buf, off)) = self.mermaid.as_mut() {
+                    // held back, not drawn: the fence is a diagram until the
+                    // close proves otherwise, and a diagram is drawn whole
+                    if buf.is_empty() {
+                        *off = range.start;
+                    }
+                    buf.push_str(&text);
                 } else if self.in_code_block {
                     let mut off = range.start;
                     // split_inclusive, not lines(): the line ending has to be
@@ -1398,6 +1483,133 @@ mod tests {
                         let at = src_lines[l].chars().nth(col);
                         assert_eq!(at, Some(c.ch), "{md:?} at ({l},{col})");
                     }
+                }
+            }
+        }
+    }
+
+    /// The whole path, from a fence to a picture on the page.
+    #[test]
+    fn a_flowchart_fence_reaches_the_page_as_rows_and_not_as_code() {
+        let md = "```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```\n";
+        let flat = flat(&render_wide(md, 60));
+        assert!(!flat.contains("◇ mermaid"), "{flat}");
+        assert!(flat.contains("Start") && flat.contains("End"), "{flat}");
+        assert!(flat.contains('╭'), "{flat}");
+    }
+
+    /// A diagram built by hand, drawn onto a page of `width` columns.
+    ///
+    /// The flow and sequence builders are their own piece of work; the reading
+    /// view's share is the styling, the `wide` flag and the decoration a quote
+    /// or a callout puts around a row, and none of the three care what drew the
+    /// rows. `boxed` puts the page inside a callout card.
+    fn page_of(d: &crate::mermaid::Rendered, width: usize, boxed: bool) -> Rendered {
+        let mut r = Ren::new("", 0, width, TableStyle::default());
+        if boxed {
+            r.boxed = true;
+            r.box_w = width;
+        }
+        r.emit_diagram(d);
+        r.finish()
+    }
+
+    #[test]
+    fn a_mermaid_fence_is_drawn_as_a_picture_in_the_reading_view() {
+        use crate::mermaid::{Rendered as Diagram, Role, Run};
+        let d = Diagram::new(vec![
+            vec![Run::new("╭───────╮", Role::Line)],
+            vec![
+                Run::new("│ ", Role::Line),
+                Run::new("Start", Role::Node),
+                Run::new(" │", Role::Line),
+            ],
+        ]);
+        let page = page_of(&d, 40, false);
+        assert_eq!(flat(&page), "╭───────╮\n│ Start │");
+        // the palette, through the one mapping both views share: the words the
+        // author wrote in the body colour, the scaffolding in the marker one
+        let start = page.lines[1].cells.iter().find(|c| c.ch == 'S').unwrap();
+        assert_eq!(start.style, theme::PLAIN);
+        assert_eq!(page.lines[0].cells[0].style, theme::marker());
+        // and never the accent, which the note spends on its headings
+        assert!(page
+            .lines
+            .iter()
+            .all(|l| l.cells.iter().all(|c| c.style != theme::state())));
+        assert!(page.lines.iter().all(|l| !l.wide));
+    }
+
+    #[test]
+    fn a_mermaid_fence_catcher_cannot_draw_keeps_its_source_under_a_label() {
+        let r = render_wide("```mermaid\ngantt\n  title Ship it\n```\n", 40);
+        let flat = flat(&r);
+        assert!(flat.contains("◇ mermaid"), "{flat}");
+        // the source is still there, indented the way any code block is
+        assert!(flat.contains("  gantt"), "{flat}");
+        assert!(flat.contains("    title Ship it"), "{flat}");
+        // a label, not a card: the callout box is the app's one boxed
+        // construct, and the label is chrome rather than accent
+        assert!(!flat.contains('╭'));
+        let label = r.lines.iter().find(|l| l.text().contains('◇')).unwrap();
+        assert!(label.cells.iter().all(|c| c.style == theme::marker()));
+    }
+
+    #[test]
+    fn the_label_names_the_diagram_kind_and_not_just_mermaid() {
+        assert!(flat(&render_wide("```mermaid\ngantt\n```\n", 40)).contains("◇ mermaid · gantt"));
+        // a comment above the header does not hide what the diagram is
+        let commented = "```mermaid\n%% mine\nclassDiagram\n```\n";
+        assert!(flat(&render_wide(commented, 40)).contains("◇ mermaid · classDiagram"));
+        // and a fence with nothing in it to name says only what it is
+        let empty = flat(&render_wide("```mermaid\n\n```\n", 40));
+        assert!(empty.contains("◇ mermaid"));
+        assert!(!empty.contains('·'));
+    }
+
+    #[test]
+    fn a_diagram_wider_than_the_page_is_marked_wide_so_the_page_pans() {
+        use crate::mermaid::{Rendered as Diagram, Role, Run};
+        let d = Diagram::new(vec![
+            vec![Run::new("─".repeat(60), Role::Line)],
+            vec![Run::new("short", Role::Node)],
+        ]);
+        let page = page_of(&d, 20, false);
+        // nothing is cut and nothing is wrapped: the row is left whole and the
+        // page pans across it, exactly as it does for a wide table
+        assert!(page.lines[0].wide);
+        assert_eq!(cells_width(&page.lines[0].cells), 60);
+        assert!(!page.lines[1].wide);
+    }
+
+    #[test]
+    fn a_diagram_inside_a_callout_keeps_its_rail() {
+        use crate::mermaid::{Rendered as Diagram, Role, Run};
+        let d = Diagram::new(vec![vec![Run::new("A ─▶ B", Role::Line)]]);
+        let page = page_of(&d, 20, true);
+        assert_eq!(flat(&page), "│ A ─▶ B           │");
+        // a wide row is left bare instead: its edges would pan off with it
+        let wide = Diagram::new(vec![vec![Run::new("─".repeat(40), Role::Line)]]);
+        assert_eq!(flat(&page_of(&wide, 20, true)), "─".repeat(40));
+    }
+
+    #[test]
+    fn a_fence_that_only_looks_like_mermaid_is_still_code() {
+        let flat = flat(&render_wide("```mermaidjs\ngraph TD\n```\n", 40));
+        assert!(!flat.contains('◇'), "{flat}");
+        assert!(flat.contains("  graph TD"), "{flat}");
+    }
+
+    #[test]
+    fn an_undrawn_diagram_keeps_the_source_columns_a_click_needs() {
+        let md = "# T\n\n```mermaid\ngantt\n  title Ship it\n```\n";
+        let src_lines: Vec<&str> = md.lines().collect();
+        for line in &render_wide(md, 40).lines {
+            for c in &line.cells {
+                // every mapped cell still points at its own character, so a
+                // click in a diagram we did not draw lands where it was aimed
+                if let Some((l, col)) = c.src {
+                    assert_eq!(src_lines[l].chars().nth(col), Some(c.ch), "at ({l},{col})");
                 }
             }
         }

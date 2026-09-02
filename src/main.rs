@@ -9,6 +9,7 @@ mod index;
 mod keys;
 mod md;
 mod mentions;
+mod mermaid;
 mod notes;
 mod render;
 mod search;

@@ -43,7 +43,7 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         Action::Palette,
         "key_palette",
         Some("^K"),
-        "command palette — search notes, run commands",
+        "command palette — run a command",
     ),
     (
         Action::QuickOpen,

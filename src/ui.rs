@@ -68,7 +68,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     match app.overlay {
-        Overlay::Palette | Overlay::QuickOpen => draw_palette(f, app),
+        Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile => draw_palette(f, app),
         Overlay::ConfirmDelete => draw_confirm(f, app),
         Overlay::ConfirmCreate => draw_create(f, app),
         Overlay::RenameFile => draw_rename(f, app),
@@ -710,8 +710,10 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             "browse folders — tab returns to search"
         } else if quick {
             "open a note — any folder, most recent first"
+        } else if app.overlay == Overlay::MoveFile {
+            "move this note to a folder"
         } else {
-            "search notes or run a command"
+            "run a command"
         };
         Line::from(vec![caret, Span::styled(hint, dim())])
     } else {
@@ -933,13 +935,6 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
             let (n, d) = c.label();
             (n.to_string(), d.to_string(), "")
         }
-        Item::Note(idx) => {
-            let n = &app.notes[*idx];
-            // the filename, as in the open picker: the search ranks it first,
-            // then the title, then the body. Beside it, where the note lives:
-            // empty at the root, `work/airstream` below it, `~/…` outside
-            (n.name(), folder_or_root(crate::index::folder_of(&n.path, &app.dir), app), "note")
-        }
         // a typed path that exists — labelled so it is clear this is the file
         // on disk and not a search hit
         Item::Path(path) => (
@@ -958,6 +953,21 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
         // a folder row writes its own text in `palette_rows`, where the tree
         // around it is still in hand; it never reaches here
         Item::Folder(_) => (String::new(), String::new(), ""),
+        Item::MoveTo(dir) => {
+            let notes = std::fs::read_dir(dir)
+                .map(|rd| {
+                    rd.flatten()
+                        .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+                        .count()
+                })
+                .unwrap_or(0);
+            let detail = match notes {
+                0 => "empty".to_string(),
+                1 => "1 note".to_string(),
+                n => format!("{n} notes"),
+            };
+            (app.move_label(dir), detail, "")
+        }
     }
 }
 
@@ -1006,14 +1016,19 @@ fn draw_peek(f: &mut Frame, app: &mut App) {
         return;
     };
     let screen = f.area();
-    let width = 80.min(screen.width.saturating_sub(4)).max(10).min(screen.width);
+    let width = 80
+        .min(screen.width.saturating_sub(4))
+        .max(10)
+        .min(screen.width);
     let inner_w = width.saturating_sub(2) as usize;
     peek.ensure_rendered(inner_w, table_style);
 
     // as tall as the note needs, up to a share of the screen
     let cap = (screen.height * crate::app::PEEK_MAX_HEIGHT_PCT / 100).max(5);
     let total = peek.rows.len().max(1);
-    let height = ((total as u16).saturating_add(2)).min(cap).min(screen.height);
+    let height = ((total as u16).saturating_add(2))
+        .min(cap)
+        .min(screen.height);
     peek.view_rows = height.saturating_sub(2) as usize;
     peek.clamp();
 

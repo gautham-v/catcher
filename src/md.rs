@@ -1411,6 +1411,23 @@ pub fn wiki_style(base: Style, target: &str) -> Style {
     }
 }
 
+/// What a run of a mermaid diagram is drawn in. The diagram module deals in
+/// roles and never in colour, so the mapping lives here, next to the palette,
+/// and both views ask for it rather than each deciding for itself what a box
+/// edge looks like.
+///
+/// No accent anywhere in it: a diagram is chrome the note draws around the
+/// words the author typed, and the note spends its one hue on headings.
+pub fn mermaid_style(role: crate::mermaid::Role) -> Style {
+    use crate::mermaid::Role;
+    match role {
+        Role::Line => theme::marker(),
+        Role::Node => theme::PLAIN,
+        Role::Label => theme::grey(),
+        Role::Bright => theme::bright(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Block awareness
 //
@@ -1426,6 +1443,9 @@ pub fn wiki_style(base: Style, target: &str) -> Style {
 pub enum BlockKind {
     /// A ```-fenced code block, fences included.
     Fence,
+    /// A fence whose info string names mermaid: the same block, drawn as a
+    /// picture rather than as code when there is room for one.
+    Mermaid,
     /// `---` / `***` / `___` alone on a line.
     Rule,
     /// A pipe table with its separator row.
@@ -1454,6 +1474,12 @@ impl Block {
 
 fn is_fence(line: &str) -> bool {
     line.trim_start().starts_with("```")
+}
+
+/// A fence line's info string: whatever follows its run of backticks or
+/// tildes. `` ```mermaid {theme: dark} `` gives `mermaid {theme: dark}`.
+fn fence_info(line: &str) -> &str {
+    line.trim_start().trim_start_matches(['`', '~']).trim()
 }
 
 /// `---`, `***` or `___` alone on a line.
@@ -1513,8 +1539,16 @@ pub fn blocks_from(lines: &[String], from: usize) -> Vec<Block> {
                 j += 1;
             }
             let end = j.min(lines.len() - 1);
+            // naming mermaid changes only how the block is drawn: it still
+            // swallows every line to its close, so a table or a rule inside a
+            // diagram is part of the diagram and not markdown
+            let kind = if crate::mermaid::is_mermaid(fence_info(&lines[i])) {
+                BlockKind::Mermaid
+            } else {
+                BlockKind::Fence
+            };
             out.push(Block {
-                kind: BlockKind::Fence,
+                kind,
                 start: i,
                 end,
             });
@@ -1562,6 +1596,9 @@ pub fn style_block_line(lines: &[String], block: &Block, row: usize, width: usiz
     let src = lines.get(row).map(String::as_str).unwrap_or("");
     match block.kind {
         BlockKind::Fence => fence_line(src, row == block.start || row == block.end),
+        BlockKind::Mermaid => {
+            mermaid_line(&lines[block.start..=block.end], row - block.start, width)
+        }
         BlockKind::Rule => rule_line(src, width),
         BlockKind::Image => image_fallback_line(src),
         BlockKind::FrontMatter => front_matter_line(src),
@@ -1612,6 +1649,54 @@ fn fence_line(src: &str, cap: bool) -> RLine {
         })
         .collect();
     done(cells, src)
+}
+
+/// A ```mermaid fence with the cursor elsewhere: the picture when it fits the
+/// fence that holds it, and the fence's own source when it does not.
+///
+/// The editor draws exactly one display line per source line — `app::view_line`
+/// and the table path both lean on that for clicks, selection and scrolling —
+/// and a diagram is nearly always taller than the handful of lines that
+/// describe it. So a diagram is only drawn here when it is short enough to sit
+/// inside its own fence; a taller one stays the code it was, and is read as a
+/// picture in the full page, which is one **^P** away.
+fn mermaid_line(rows: &[String], row: usize, width: usize) -> RLine {
+    let src = rows.get(row).map(String::as_str).unwrap_or("");
+    if rows.len() > 2 {
+        // the caps are the fence, not the diagram
+        let body = rows[1..rows.len() - 1].join("\n");
+        if let Some(line) = crate::mermaid::render(&body, width)
+            .and_then(|d| diagram_line(&d, rows.len(), row, src))
+        {
+            return line;
+        }
+    }
+    fence_line(src, row == 0 || row + 1 == rows.len())
+}
+
+/// Row `row` of a fence `rows` source lines tall, drawn as one row of `d`
+/// centred in it — or `None` when the diagram is taller than the fence and
+/// there is nowhere to put the rest of it.
+///
+/// Every cell maps back to source column 0, so a click anywhere on the picture
+/// puts the cursor at the start of the source line it was drawn on; the block
+/// then reveals itself and the caret is already in the text that made the
+/// picture. Click the diagram, edit the diagram.
+fn diagram_line(d: &crate::mermaid::Rendered, rows: usize, row: usize, src: &str) -> Option<RLine> {
+    if d.height() > rows {
+        return None;
+    }
+    let top = (rows - d.height()) / 2;
+    let drawn = row.checked_sub(top).and_then(|i| d.rows.get(i));
+    let cells = drawn
+        .into_iter()
+        .flatten()
+        .flat_map(|run| {
+            let style = mermaid_style(run.role);
+            run.text.chars().map(move |ch| Cell { ch, style, src: 0 })
+        })
+        .collect();
+    Some(done(cells, src))
 }
 
 /// A line of front matter: exactly what was typed, only quiet. Deliberately
@@ -2099,6 +2184,97 @@ mod tests {
         assert_eq!(text(&l), "tags: work");
         assert_eq!(l.one_row().display_to_source(5), 5);
         assert!(l.cells.iter().all(|c| c.style == theme::marker()));
+    }
+
+    /// A diagram built by hand. The flow and sequence builders are their own
+    /// piece of work; what the editor owns is the fitting, the styling and the
+    /// click mapping, and none of the three care what drew the rows.
+    fn drawn(rows: &[&str]) -> crate::mermaid::Rendered {
+        use crate::mermaid::{Role, Run};
+        crate::mermaid::Rendered::new(
+            rows.iter()
+                .map(|r| vec![Run::new(*r, Role::Node)])
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_mermaid_fence_is_its_own_block_kind() {
+        let lines = buf("```mermaid\nflowchart LR\n  A --> B\n```\n");
+        assert_eq!(
+            blocks(&lines),
+            vec![Block {
+                kind: BlockKind::Mermaid,
+                start: 0,
+                end: 3,
+            }]
+        );
+        // the info string is read however the fence spells it
+        assert_eq!(
+            blocks(&buf("```Mermaid {theme: dark}\nx\n```\n"))[0].kind,
+            BlockKind::Mermaid
+        );
+        // and a fence that only looks like one is still code
+        assert_eq!(
+            blocks(&buf("```mermaidjs\nx\n```\n"))[0].kind,
+            BlockKind::Fence
+        );
+    }
+
+    #[test]
+    fn the_editor_draws_a_diagram_that_fits_its_fence() {
+        // five source lines, three drawn rows: centred, blank above and below
+        let d = drawn(&["╭───╮", "│ A │", "╰───╯"]);
+        let row = |r| text(&diagram_line(&d, 5, r, "  A --> B").unwrap());
+        assert_eq!(row(0), "");
+        assert_eq!(row(1), "╭───╮");
+        assert_eq!(row(2), "│ A │");
+        assert_eq!(row(3), "╰───╯");
+        assert_eq!(row(4), "");
+    }
+
+    #[test]
+    fn a_diagram_taller_than_its_fence_falls_back_to_the_fence() {
+        // one display line per source line is the rule the editor lives by, so
+        // a picture with nowhere to put its extra rows is not drawn at all
+        let d = drawn(&["a", "b", "c", "d"]);
+        assert!(diagram_line(&d, 3, 0, "```mermaid").is_none());
+        // and a kind catcher does not draw is the code it always was
+        let lines = buf("```mermaid\ngantt\n  title Ship it\n```\n");
+        let block = Block {
+            kind: BlockKind::Mermaid,
+            start: 0,
+            end: 3,
+        };
+        assert_eq!(text(&style_block_line(&lines, &block, 1, 80)), "gantt");
+        assert_eq!(
+            text(&style_block_line(&lines, &block, 2, 80)),
+            "  title Ship it"
+        );
+    }
+
+    #[test]
+    fn every_source_line_of_a_mermaid_block_is_exactly_one_display_line() {
+        let lines = buf("```mermaid\nflowchart LR\n  A --> B\n  B --> C\n```\n");
+        let bs = blocks(&lines);
+        let block = &bs[0];
+        for row in block.start..=block.end {
+            // whatever is drawn on it, the row still stands for its own source
+            // line and for the whole of it — that is what a click maps through
+            let l = style_block_line(&lines, block, row, 60);
+            assert_eq!(l.src_len, lines[row].chars().count());
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_drawn_diagram_lands_on_its_own_source_line() {
+        let d = drawn(&["│ A │"]);
+        let l = diagram_line(&d, 1, 0, "  A --> B").unwrap();
+        // every cell of the picture maps to the start of the line it was drawn
+        // on, so the click reveals the fence with the caret in the text
+        assert!(l.cells.iter().all(|c| c.src == 0));
+        assert_eq!(l.one_row().display_to_source(3), 0);
+        assert_eq!(l.src_len, "  A --> B".chars().count());
     }
 
     #[test]
