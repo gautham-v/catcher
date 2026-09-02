@@ -1344,6 +1344,25 @@ fn draw_rename(f: &mut Frame, app: &mut App) {
     ));
 }
 
+/// Cut from the left, with a leading `…`: for a path, whose end is the part
+/// worth keeping.
+fn truncate_left(text: &str, width: usize) -> String {
+    if crate::md::str_width(text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for c in text.chars().rev() {
+        let cw = crate::md::str_width(&c.to_string());
+        if w + cw + 1 > width {
+            break;
+        }
+        out.insert(0, c);
+        w += cw;
+    }
+    format!("…{out}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1417,23 +1436,4 @@ mod tests {
         assert_eq!(*len, 4);
         assert_eq!(url, "http://x.y");
     }
-}
-
-/// Cut from the left, with a leading `…`: for a path, whose end is the part
-/// worth keeping.
-fn truncate_left(text: &str, width: usize) -> String {
-    if crate::md::str_width(text) <= width {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    let mut w = 0;
-    for c in text.chars().rev() {
-        let cw = crate::md::str_width(&c.to_string());
-        if w + cw + 1 > width {
-            break;
-        }
-        out.insert(0, c);
-        w += cw;
-    }
-    format!("…{out}")
 }
