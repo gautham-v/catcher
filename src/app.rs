@@ -221,6 +221,8 @@ pub struct App {
     pub quit: bool,
     dirty: bool,
     last_edit: Instant,
+    /// When the open note's file was last compared with what is on disk.
+    disk_checked: Instant,
     // rects cached from the last draw, for mouse hit-testing
     pub editor_area: Rect,
     /// The screen band each *display row* of the editor occupied in the last
@@ -458,6 +460,7 @@ impl App {
             quit: false,
             last_title: None,
             dirty: false,
+            disk_checked: Instant::now(),
             last_edit: Instant::now(),
             editor_area: Rect::default(),
             edit_rows: Vec::new(),
@@ -577,6 +580,12 @@ impl App {
         if !self.dirty {
             return;
         }
+        // never write over what another program put there since we last
+        // looked: disk wins, and the buffer catches up instead
+        if notes::check_disk(&self.notes[self.active]) == notes::Disk::Changed {
+            self.reload_from_disk();
+            return;
+        }
         let path = self.notes[self.active].path.clone();
         let allow_rename = self.may_rename(&path);
         // the note's own folder, not the session's: quick-open reaches into
@@ -616,7 +625,47 @@ impl App {
         self.status = Some((msg, Instant::now()));
     }
 
+    /// Every half second, ask whether another program has touched the open
+    /// note's file. A change is taken as it stands; a deletion is announced
+    /// once and the buffer kept, so the next save puts the file back.
+    fn watch_disk(&mut self) {
+        if self.disk_checked.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        self.disk_checked = Instant::now();
+        match notes::check_disk(&self.notes[self.active]) {
+            notes::Disk::Unchanged => {}
+            notes::Disk::Changed => self.reload_from_disk(),
+            notes::Disk::Gone => {
+                // forget the stamp so this is said once, and so the file
+                // coming back reads as a change
+                self.notes[self.active].stamp = None;
+                self.flash("deleted on disk".to_string());
+            }
+        }
+    }
+
+    /// Replace the buffer with the file as another program left it. One undo
+    /// step, so ^Z brings back what was on screen — edits that had not made
+    /// it to disk included.
+    fn reload_from_disk(&mut self) {
+        let dropped = self.dirty;
+        if let Err(e) = notes::reload(&mut self.notes[self.active]) {
+            self.flash(format!("reload failed: {e}"));
+            return;
+        }
+        self.editor.replace_all(&self.notes[self.active].content);
+        self.dirty = false;
+        self.mentions.invalidate();
+        self.flash(if dropped {
+            "reloaded: changed on disk, your last edits were dropped".to_string()
+        } else {
+            "reloaded: changed on disk".to_string()
+        });
+    }
+
     pub fn tick(&mut self) {
+        self.watch_disk();
         self.maybe_autosave();
         self.follow_system_theme();
         self.poll_index_scan();

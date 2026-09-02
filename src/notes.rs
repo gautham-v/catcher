@@ -13,6 +13,57 @@ pub struct Note {
     /// the two diverge and the automatic rename stops for good. Nothing is
     /// stored beside the file: the check is the filename against the content.
     pub disk_title: String,
+    /// What the file looked like the last time catcher read or wrote it, so a
+    /// change made by another program shows up as a stamp that no longer
+    /// matches. `None` when the file is not on disk at all.
+    pub stamp: Option<Stamp>,
+}
+
+/// A file's mtime and length together: the length catches an edit that
+/// landed inside the same mtime tick, which a coarse filesystem clock allows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    pub modified: SystemTime,
+    pub len: u64,
+}
+
+/// The file's stamp as it stands now, or `None` when there is no file.
+pub fn stamp_of(path: &Path) -> Option<Stamp> {
+    let meta = fs::metadata(path).ok()?;
+    Some(Stamp {
+        modified: meta.modified().ok()?,
+        len: meta.len(),
+    })
+}
+
+/// How the file behind a note compares with what catcher last saw of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Disk {
+    Unchanged,
+    /// Another program wrote it — or put it back after deleting it.
+    Changed,
+    /// It was there when catcher last looked and is not now.
+    Gone,
+}
+
+pub fn check_disk(note: &Note) -> Disk {
+    match (stamp_of(&note.path), note.stamp) {
+        (None, None) => Disk::Unchanged,
+        (None, Some(_)) => Disk::Gone,
+        (Some(now), then) if Some(now) == then => Disk::Unchanged,
+        (Some(_), _) => Disk::Changed,
+    }
+}
+
+/// Take what is on disk: re-read the content and the stamp. The disk title
+/// follows too, since the file now tracks whatever its writer called it.
+pub fn reload(note: &mut Note) -> Result<()> {
+    let content = fs::read_to_string(&note.path)
+        .with_context(|| format!("reading {}", note.path.display()))?;
+    note.disk_title = title_of(&content);
+    note.content = content;
+    note.stamp = stamp_of(&note.path);
+    Ok(())
 }
 
 impl Note {
@@ -186,6 +237,7 @@ pub fn load_all(dir: &Path) -> Result<Vec<Note>> {
             .unwrap_or(SystemTime::UNIX_EPOCH);
         notes.push(Note {
             disk_title: title_of(&content),
+            stamp: stamp_of(&path),
             path,
             content,
             modified,
@@ -206,6 +258,7 @@ pub fn load_one(path: &Path) -> Result<Note> {
         .unwrap_or(SystemTime::UNIX_EPOCH);
     Ok(Note {
         disk_title: title_of(&content),
+        stamp: stamp_of(path),
         path: path.to_path_buf(),
         content,
         modified,
@@ -255,6 +308,7 @@ pub fn save(dir: &Path, note: &mut Note, allow_rename: bool) -> Result<PathBuf> 
             note.path = target;
         }
     }
+    note.stamp = stamp_of(&note.path);
     Ok(note.path.clone())
 }
 
@@ -319,6 +373,7 @@ pub fn create_named(dir: &Path, stem: &str, content: String) -> Result<Note> {
     fs::write(&path, &content).with_context(|| format!("writing {}", path.display()))?;
     Ok(Note {
         disk_title: title_of(&content),
+        stamp: stamp_of(&path),
         path,
         content,
         modified: SystemTime::now(),
@@ -331,6 +386,7 @@ pub fn create_with(dir: &Path, content: String) -> Result<Note> {
     let path = unique_path(dir, &title, None);
     fs::write(&path, &content).with_context(|| format!("writing {}", path.display()))?;
     Ok(Note {
+        stamp: stamp_of(&path),
         path,
         content,
         modified: SystemTime::now(),
@@ -456,6 +512,7 @@ mod tests {
         let path = dir.join(name);
         fs::write(&path, content).unwrap();
         Note {
+            stamp: stamp_of(&path),
             path,
             content: content.to_string(),
             modified: SystemTime::now(),
@@ -553,6 +610,7 @@ mod tests {
             content: "# Groceries\n".into(),
             modified: SystemTime::now(),
             disk_title: "Groceries".into(),
+            stamp: None,
         };
         assert_eq!(n.detached_name(), None);
         // the collision suffix is still tracking
@@ -572,6 +630,7 @@ mod tests {
             content: "# Groceries and more\n".into(),
             modified: SystemTime::now(),
             disk_title: "Groceries".into(),
+            stamp: None,
         };
         assert_eq!(n.detached_name(), None);
     }
@@ -597,6 +656,86 @@ mod tests {
         assert_eq!(a.path, dir.join("Story Matrix.md"));
         assert_eq!(b.path, dir.join("Story Matrix-2.md"));
         assert_eq!(fs::read_to_string(&a.path).unwrap(), "# One\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_untouched_since_it_was_read_is_unchanged() {
+        let dir = tmpdir("disk-same");
+        let n = note_at(&dir, "a.md", "# A\n");
+        assert_eq!(check_disk(&n), Disk::Unchanged);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_another_program_wrote_reads_as_changed_and_reloads() {
+        let dir = tmpdir("disk-changed");
+        let mut n = note_at(&dir, "a.md", "# A\n");
+        // a longer write is caught by the length even when the mtime tick is
+        // too coarse to have moved
+        fs::write(&n.path, "# A\nmore\n").unwrap();
+        assert_eq!(check_disk(&n), Disk::Changed);
+        reload(&mut n).unwrap();
+        assert_eq!(n.content, "# A\nmore\n");
+        assert_eq!(n.disk_title, "A");
+        assert_eq!(check_disk(&n), Disk::Unchanged);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_same_length_write_with_a_later_mtime_reads_as_changed() {
+        let dir = tmpdir("disk-mtime");
+        let mut n = note_at(&dir, "a.md", "# A\n");
+        fs::write(&n.path, "# B\n").unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(5);
+        fs::File::options()
+            .write(true)
+            .open(&n.path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(check_disk(&n), Disk::Changed);
+        reload(&mut n).unwrap();
+        assert_eq!(n.content, "# B\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_deleted_behind_the_note_is_gone_until_a_save_puts_it_back() {
+        let dir = tmpdir("disk-gone");
+        let mut n = note_at(&dir, "a.md", "# A\n");
+        fs::remove_file(&n.path).unwrap();
+        assert_eq!(check_disk(&n), Disk::Gone);
+        // once noted as missing, it stays quiet …
+        n.stamp = None;
+        assert_eq!(check_disk(&n), Disk::Unchanged);
+        // … a save recreates it and stamps it afresh
+        save(&dir, &mut n, true).unwrap();
+        assert!(n.path.exists());
+        assert!(n.stamp.is_some());
+        assert_eq!(check_disk(&n), Disk::Unchanged);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_put_back_after_a_delete_reads_as_changed() {
+        let dir = tmpdir("disk-back");
+        let mut n = note_at(&dir, "a.md", "# A\n");
+        n.stamp = None;
+        fs::write(&n.path, "# A again\n").unwrap();
+        assert_eq!(check_disk(&n), Disk::Changed);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_save_stamps_the_file_it_wrote_even_after_a_rename() {
+        let dir = tmpdir("disk-stamp");
+        let mut n = note_at(&dir, "groceries.md", "# Groceries\n");
+        n.content = "# Shopping\n".into();
+        save(&dir, &mut n, true).unwrap();
+        assert_eq!(n.path, dir.join("shopping.md"));
+        assert_eq!(n.stamp, stamp_of(&n.path));
+        assert_eq!(check_disk(&n), Disk::Unchanged);
         let _ = fs::remove_dir_all(&dir);
     }
 
