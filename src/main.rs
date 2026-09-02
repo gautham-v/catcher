@@ -1,6 +1,7 @@
 mod app;
 mod cli;
 mod clipboard;
+mod commands;
 mod config;
 mod contents;
 mod daily;
@@ -254,6 +255,8 @@ fn tui(launch: cli::Launch) -> Result<()> {
     // a terminal whose background matches the system appearance is taken to
     // follow it, and the palette then follows too — see `follow_system_theme`
     md::theme::set_follows_system(md::theme::system_mode() == Some(detected));
+    // shells out to `date` once, so it runs before raw mode
+    dates::init();
     let mut app = app::App::launch(launch)?;
     let mut terminal = ratatui::init();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;

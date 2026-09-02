@@ -21,6 +21,7 @@ or `cargo install catcher`. Then run `catcher`.
 - **⇧^F** searches in all files: every line that has every word you type, grouped by note. **⏎** opens the note at that line.
 - **^N** makes a note. The filename follows its first line until you rename the file yourself. Either way, `[[links]]` to the old name in other notes are rewritten to the new one.
 - **⌥D** opens today's note, `journal/2026-09-01.md`, made from `journal/template.md` the first time (`{{title}}`, `{{date}}`, `{{yesterday}}`, `{{tomorrow}}`) and never rewritten after.
+- The palette also has editing commands, unbound until you give them a key: toggle checkbox (`- item` → `- [ ]` → `- [x]` → `- item`, numbered lists too), move line up / down, toggle heading (`#`, `##`, `###`, none), insert today's date, copy path, reveal in Finder. Each takes the selection when there is one, and undoes as one step.
 - **^P** flips between the live-preview editor and the rendered page. Images draw inline in Ghostty, kitty and iTerm2.
 - `[[wikilinks]]` work like Obsidian's. **⌥⏎** follows one, **⌥P** peeks at it, **^B** / **^F** go back and forward. A link to a note that does not exist yet is grey; following it makes the note beside the one you are in. The reading view lists the notes that link here at the bottom.
 - `#tags` are coloured, inline or as front matter `tags:`. **⌥⏎** or a click on one opens **^O** cut to the notes that carry it.
@@ -60,7 +61,7 @@ catcher --keys           show what your terminal sends for each key
 | `^,` | Settings |
 | `^Q` | Quit |
 
-Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, `⇧` to extend a selection, `⌘A` select all. Every key is rebindable in the settings; `^K` answers to ctrl or cmd. `⇧^F` needs a terminal that tells shift+ctrl apart (Ghostty, kitty, WezTerm); elsewhere it arrives as `^F` and the palette is the way in.
+Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, `⇧` to extend a selection, `⌘A` select all. Every key is rebindable in the settings; `^K` answers to ctrl or cmd. `⇧^F` needs a terminal that tells shift+ctrl apart (Ghostty, kitty, WezTerm); elsewhere it arrives as `^F` and the palette is the way in. The editing commands ship with no key: `key_checkbox`, `key_line_up`, `key_line_down`, `key_heading`, `key_date`, `key_copy_path`, `key_reveal` bind them.
 
 ## Settings
 

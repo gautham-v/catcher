@@ -253,6 +253,60 @@ impl Editor {
         self.scroll = self.scroll.min(self.lines.len().saturating_sub(1));
     }
 
+    /// The rows a line-wise command acts on: the selection's rows, or the
+    /// cursor's. A selection that ends at column 0 of a row stops short of
+    /// that row — dragging down to the start of the next line has not
+    /// selected it.
+    pub fn selected_rows(&self) -> (usize, usize) {
+        match self.selection() {
+            Some(((sr, _), (er, ec))) if ec == 0 && er > sr => (sr, er - 1),
+            Some(((sr, _), (er, _))) => (sr, er),
+            None => (self.cursor.0, self.cursor.0),
+        }
+    }
+
+    /// Rewrite every selected row (or the cursor row) with `f`, as one undo
+    /// step. The cursor and anchor stay on their rows, clamped to whatever
+    /// length the rows have afterwards.
+    pub fn map_selected_lines(&mut self, f: impl Fn(&str) -> String) {
+        let (from, to) = self.selected_rows();
+        self.record(EditKind::Other);
+        for row in from..=to {
+            let new = f(&self.lines[row]);
+            self.lines[row] = new;
+        }
+        self.cursor = self.clamp(self.cursor);
+        self.anchor = self.anchor.map(|a| self.clamp(a));
+        self.follow_cursor = true;
+    }
+
+    /// Swap the selected rows (or the cursor row) with the line beyond them,
+    /// carrying the cursor and the selection along. False at either edge.
+    pub fn move_selected_lines(&mut self, down: bool) -> bool {
+        let (from, to) = self.selected_rows();
+        let can = if down {
+            to + 1 < self.lines.len()
+        } else {
+            from > 0
+        };
+        if !can {
+            return false;
+        }
+        self.record(EditKind::Other);
+        if down {
+            let line = self.lines.remove(to + 1);
+            self.lines.insert(from, line);
+        } else {
+            let line = self.lines.remove(from - 1);
+            self.lines.insert(to, line);
+        }
+        let by = if down { 1 } else { -1 };
+        self.cursor.0 = self.cursor.0.wrapping_add_signed(by);
+        self.anchor = self.anchor.map(|(r, c)| (r.wrapping_add_signed(by), c));
+        self.follow_cursor = true;
+        true
+    }
+
     pub fn clear_selection(&mut self) {
         self.anchor = None;
     }
@@ -729,6 +783,66 @@ mod tests {
         e.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         e.scroll_into_view(5);
         assert_eq!(e.scroll, e.cursor.0);
+    }
+
+    #[test]
+    fn line_wise_commands_take_the_selection_s_rows_or_the_cursor_s() {
+        let mut e = ed();
+        e.set_cursor((1, 2));
+        assert_eq!(e.selected_rows(), (1, 1));
+        e.anchor = Some((0, 1));
+        e.cursor = (2, 1);
+        assert_eq!(e.selected_rows(), (0, 2));
+        // a selection ending at the start of a row has not taken that row
+        e.cursor = (2, 0);
+        assert_eq!(e.selected_rows(), (0, 1));
+    }
+
+    #[test]
+    fn mapping_lines_is_one_undo_step_and_keeps_the_selection() {
+        let mut e = ed();
+        e.anchor = Some((0, 0));
+        e.cursor = (1, 3);
+        e.map_selected_lines(|l| format!("- {l}"));
+        assert_eq!(e.text(), "- one\n- two\nthree");
+        assert_eq!(e.selection(), Some(((0, 0), (1, 3))));
+        assert!(e.undo());
+        assert_eq!(e.text(), "one\ntwo\nthree");
+        // a line that shrinks pulls the cursor back onto it
+        let mut e = Editor::new("abcdef");
+        e.set_cursor((0, 6));
+        e.map_selected_lines(|_| "ab".to_string());
+        assert_eq!(e.cursor, (0, 2));
+    }
+
+    #[test]
+    fn moving_lines_carries_the_cursor_and_stops_at_the_edges() {
+        let mut e = ed();
+        e.set_cursor((0, 2));
+        assert!(!e.move_selected_lines(false));
+        assert!(e.move_selected_lines(true));
+        assert_eq!(e.text(), "two\none\nthree");
+        assert_eq!(e.cursor, (1, 2));
+        assert!(e.move_selected_lines(true));
+        assert_eq!(e.text(), "two\nthree\none");
+        assert!(!e.move_selected_lines(true));
+        assert!(e.undo());
+        assert_eq!(e.text(), "two\none\nthree");
+        assert_eq!(e.cursor, (1, 2));
+    }
+
+    #[test]
+    fn a_selection_moves_as_a_block() {
+        let mut e = Editor::new("a\nb\nc\nd");
+        e.anchor = Some((1, 0));
+        e.cursor = (2, 1);
+        assert!(e.move_selected_lines(false));
+        assert_eq!(e.text(), "b\nc\na\nd");
+        assert_eq!(e.selection(), Some(((0, 0), (1, 1))));
+        assert!(e.move_selected_lines(true));
+        assert!(e.move_selected_lines(true));
+        assert_eq!(e.text(), "a\nd\nb\nc");
+        assert_eq!(e.selection(), Some(((2, 0), (3, 1))));
     }
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {

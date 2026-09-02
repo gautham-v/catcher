@@ -35,6 +35,13 @@ pub enum Action {
     Peek,
     SearchAll,
     DailyNote,
+    ToggleCheckbox,
+    MoveLineUp,
+    MoveLineDown,
+    ToggleHeading,
+    InsertDate,
+    CopyPath,
+    RevealFile,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -147,6 +154,50 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_daily",
         Some("alt+D"),
         "today's note, made from the template if new",
+    ),
+    // the editing commands ship unbound: any default chord collides with
+    // somebody's terminal, and the palette reaches them until they get a key
+    (
+        Action::ToggleCheckbox,
+        "key_checkbox",
+        None,
+        "item → [ ] → [x] → item, on the line or selection",
+    ),
+    (
+        Action::MoveLineUp,
+        "key_line_up",
+        None,
+        "move the line or selection up",
+    ),
+    (
+        Action::MoveLineDown,
+        "key_line_down",
+        None,
+        "move the line or selection down",
+    ),
+    (
+        Action::ToggleHeading,
+        "key_heading",
+        None,
+        "cycle the line through #, ##, ### and none",
+    ),
+    (
+        Action::InsertDate,
+        "key_date",
+        None,
+        "insert today's date, 2026-09-01 style",
+    ),
+    (
+        Action::CopyPath,
+        "key_copy_path",
+        None,
+        "copy the note's path to the clipboard",
+    ),
+    (
+        Action::RevealFile,
+        "key_reveal",
+        None,
+        "show the file in Finder (or the file manager)",
     ),
 ];
 
@@ -741,6 +792,36 @@ mod tests {
             .settings_rows()
             .iter()
             .any(|(k, _, _)| *k == "key_daily"));
+    }
+
+    #[test]
+    fn the_editing_commands_ship_unbound_and_take_a_key() {
+        let map = Keymap::default();
+        assert_eq!(map.label(Action::ToggleCheckbox), "");
+        assert_eq!(map.label(Action::InsertDate), "");
+        let map = Keymap::from_settings(|k| (k == "key_checkbox").then(|| "^L".to_string()));
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+            Some(Action::ToggleCheckbox)
+        );
+        // an unbound action stays off the help card
+        assert!(!map
+            .card_rows()
+            .iter()
+            .any(|(_, w)| w.contains("today's date")));
+    }
+
+    #[test]
+    fn no_two_defaults_share_a_key() {
+        let map = Keymap::default();
+        let mut seen: Vec<String> = Vec::new();
+        for (a, _, _, _) in ACTIONS {
+            for b in map.bindings(*a) {
+                let l = b.label();
+                assert!(!seen.contains(&l), "{l} bound twice");
+                seen.push(l);
+            }
+        }
     }
 
     #[test]

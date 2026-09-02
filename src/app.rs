@@ -1,3 +1,4 @@
+use crate::commands;
 use crate::config::{Config, FrontMatter, PreviewClick};
 use crate::editor::{Editor, Pos};
 use crate::images::Images;
@@ -79,9 +80,16 @@ pub enum Command {
     Shortcuts,
     OpenSettings,
     Quit,
+    ToggleCheckbox,
+    MoveLineUp,
+    MoveLineDown,
+    ToggleHeading,
+    InsertDate,
+    CopyPath,
+    RevealFile,
 }
 
-const COMMANDS: [Command; 11] = [
+const COMMANDS: [Command; 18] = [
     Command::NewNote,
     Command::DailyNote,
     Command::QuickOpen,
@@ -93,6 +101,13 @@ const COMMANDS: [Command; 11] = [
     Command::Shortcuts,
     Command::OpenSettings,
     Command::Quit,
+    Command::ToggleCheckbox,
+    Command::MoveLineUp,
+    Command::MoveLineDown,
+    Command::ToggleHeading,
+    Command::InsertDate,
+    Command::CopyPath,
+    Command::RevealFile,
 ];
 
 impl Command {
@@ -112,6 +127,13 @@ impl Command {
             Command::Shortcuts => Action::Help,
             Command::OpenSettings => Action::Settings,
             Command::Quit => Action::Quit,
+            Command::ToggleCheckbox => Action::ToggleCheckbox,
+            Command::MoveLineUp => Action::MoveLineUp,
+            Command::MoveLineDown => Action::MoveLineDown,
+            Command::ToggleHeading => Action::ToggleHeading,
+            Command::InsertDate => Action::InsertDate,
+            Command::CopyPath => Action::CopyPath,
+            Command::RevealFile => Action::RevealFile,
         })
     }
 
@@ -128,6 +150,13 @@ impl Command {
             Command::Shortcuts => ("Help", "every key, on one card"),
             Command::OpenSettings => ("Settings", "edit them here, as a note"),
             Command::Quit => ("Quit", "save and exit"),
+            Command::ToggleCheckbox => ("Toggle checkbox", "item → [ ] → [x] → item"),
+            Command::MoveLineUp => ("Move line up", "the line or selection, one up"),
+            Command::MoveLineDown => ("Move line down", "the line or selection, one down"),
+            Command::ToggleHeading => ("Toggle heading", "#, ##, ###, then none"),
+            Command::InsertDate => ("Insert today's date", "2026-09-01, at the cursor"),
+            Command::CopyPath => ("Copy path", "the note's path, to the clipboard"),
+            Command::RevealFile => ("Reveal in Finder", "show the file on disk"),
         }
     }
 }
@@ -1670,6 +1699,12 @@ impl App {
             }
             Item::Command(Command::RenameFile) => self.open_rename(),
             Item::Command(Command::MoveFile) => self.open_move(),
+            // the rest are plain actions: one path, whether by key or palette
+            Item::Command(c) => {
+                if let Some(a) = c.action() {
+                    self.run_action(a);
+                }
+            }
             Item::MoveTo(dir) => self.commit_move(&dir),
         }
     }
@@ -1973,6 +2008,78 @@ impl App {
                 self.overlay = Overlay::None;
                 self.open_daily();
             }
+            Action::ToggleCheckbox => self.edit_lines(commands::toggle_checkbox),
+            Action::ToggleHeading => self.edit_lines(commands::cycle_heading),
+            Action::MoveLineUp => self.move_lines(false),
+            Action::MoveLineDown => self.move_lines(true),
+            Action::InsertDate => {
+                self.enter_edit_view();
+                let (y, m, d) = crate::dates::today();
+                self.editor.insert_str(&crate::dates::iso(y, m, d));
+                self.sync_editor_to_note();
+            }
+            Action::CopyPath => self.copy_path(),
+            Action::RevealFile => self.reveal_file(),
+        }
+    }
+
+    /// The editing commands act on the buffer, so like undo they land in the
+    /// edit view whichever one was showing.
+    fn enter_edit_view(&mut self) {
+        self.overlay = Overlay::None;
+        self.view = View::Edit;
+    }
+
+    /// Rewrite the cursor line or the selection with `f`, as one undo step.
+    fn edit_lines(&mut self, f: fn(&str) -> String) {
+        self.enter_edit_view();
+        self.editor.map_selected_lines(f);
+        self.sync_editor_to_note();
+    }
+
+    fn move_lines(&mut self, down: bool) {
+        self.enter_edit_view();
+        if self.editor.move_selected_lines(down) {
+            self.sync_editor_to_note();
+        } else {
+            self.flash("nowhere to move".to_string());
+        }
+    }
+
+    fn copy_path(&mut self) {
+        self.overlay = Overlay::None;
+        let path = self.active_note().path.clone();
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        if crate::clipboard::copy(&path.to_string_lossy()) {
+            self.flash("path copied".to_string());
+        } else {
+            self.flash("copy failed".to_string());
+        }
+    }
+
+    /// Show the file in Finder — or, elsewhere, open its folder, since there
+    /// is no portable way to select a file.
+    fn reveal_file(&mut self) {
+        self.overlay = Overlay::None;
+        self.save_now();
+        let path = self.active_note().path.clone();
+        let mut cmd = if cfg!(target_os = "macos") {
+            let mut c = std::process::Command::new("open");
+            c.arg("-R").arg(&path);
+            c
+        } else {
+            let mut c = std::process::Command::new("xdg-open");
+            c.arg(path.parent().unwrap_or(&path));
+            c
+        };
+        match cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => {}
+            Err(e) => self.flash(format!("reveal failed: {e}")),
         }
     }
 

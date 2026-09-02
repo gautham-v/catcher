@@ -97,6 +97,13 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     ((y + i64::from(m <= 2)) as i32, m, d)
 }
 
+/// Work out the offset before the terminal goes raw: it costs a process, and
+/// a child spawned under raw mode inherits a terminal it does not expect.
+/// `today` finds it anyway if this was never called.
+pub fn init() {
+    local_offset();
+}
+
 /// Seconds east of UTC, found once and kept: the answer costs a process.
 fn local_offset() -> i32 {
     static OFFSET: OnceLock<i32> = OnceLock::new();
