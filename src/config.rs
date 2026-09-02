@@ -283,15 +283,17 @@ impl Config {
         }
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let config = Config::from_str(&text);
         // A settings file written by an older catcher is missing whatever has
         // been added since, and a setting you cannot see is a setting you do
         // not have. Rewriting is safe because the document is generated from
-        // the config the file was just parsed into: every value survives.
-        if !covers_every_setting(&text, &config) {
-            let _ = write_settings(&path, &config);
+        // the config the file was just parsed into: every value survives —
+        // parsed *without* the environment, or a `CATCHER_DIR=/tmp/x` run
+        // would write /tmp/x into the file as the notes folder for good.
+        let on_disk = Config::from_file_text(&text);
+        if !covers_every_setting(&text, &on_disk) {
+            let _ = write_settings(&path, &on_disk);
         }
-        Ok(config)
+        Ok(Config::from_str(&text))
     }
 
     /// Push everything this config decides into the places that read it
@@ -303,20 +305,30 @@ impl Config {
         crate::md::tags::set_enabled(self.tags);
     }
 
+    /// The file plus the environment: `CATCHER_DIR` wins over `notes_dir`,
+    /// which is how a one-off session is pointed elsewhere. A named
+    /// `attachments_dir` still stands, as before.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Config {
+        let mut c = Config::from_file_text(text);
+        if let Some(d) =
+            std::env::var_os("CATCHER_DIR").or_else(|| std::env::var_os("TINYNOTE_DIR"))
+        {
+            c.notes_dir = PathBuf::from(d);
+            if value(text, "attachments_dir").is_none() {
+                c.attachments_dir = c.notes_dir.join("attachments");
+            }
+        }
+        c
+    }
+
+    /// The file alone, as it would be written back.
+    fn from_file_text(text: &str) -> Config {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let mut c = Config::default();
 
         if let Some(v) = value(text, "notes_dir") {
             c.notes_dir = expand(&v, &home);
-            c.attachments_dir = c.notes_dir.join("attachments");
-        }
-        // the environment wins: it is how a one-off session is pointed elsewhere
-        if let Some(d) =
-            std::env::var_os("CATCHER_DIR").or_else(|| std::env::var_os("TINYNOTE_DIR"))
-        {
-            c.notes_dir = PathBuf::from(d);
             c.attachments_dir = c.notes_dir.join("attachments");
         }
         if let Some(v) = value(text, "attachments_dir") {
@@ -926,6 +938,16 @@ mod tests {
         if std::env::var_os("CATCHER_DIR").is_none() {
             assert_eq!(back, c);
         }
+    }
+
+    #[test]
+    fn the_environment_points_the_session_elsewhere_but_is_never_written_back() {
+        let text = "- notes_dir: /a/b\n";
+        let on_disk = Config::from_file_text(text);
+        assert_eq!(on_disk.notes_dir, PathBuf::from("/a/b"));
+        // the document is generated from the file's own parse, so whatever
+        // CATCHER_DIR says in this process, the file keeps its folder
+        assert!(on_disk.to_document().contains("notes_dir: /a/b"));
     }
 
     #[test]
