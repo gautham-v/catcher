@@ -287,6 +287,98 @@ fn rank(entry: &Entry, want: &str) -> Option<u8> {
     None
 }
 
+/// The tags a note carries: its front matter `tags:` and every `#tag` in
+/// its body, each once, in the form [`crate::md::tag_key`] matches on.
+/// Fenced code is stepped over, as the styling steps over it.
+pub fn tags_of(content: &str) -> Vec<String> {
+    let mut tags = front_matter_tags(content);
+    let mut fence = false;
+    for line in crate::notes::body_after_front_matter(content).lines() {
+        if line.trim_start().starts_with("```") {
+            fence = !fence;
+            continue;
+        }
+        if fence {
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        for (s, e) in crate::md::tags_in(line) {
+            tags.push(crate::md::tag_key(&chars[s..e].iter().collect::<String>()));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    tags.retain(|t| seen.insert(t.clone()));
+    tags
+}
+
+/// The `tags:` a note's front matter declares, either inline — `tags: a, b`,
+/// with or without brackets — or as a YAML list on the lines under it.
+/// Only a top-level `tags:` counts; an indented one belongs to some other key.
+pub fn front_matter_tags(content: &str) -> Vec<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let Some(end) = crate::notes::front_matter_end(lines.iter().copied()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut i = 1;
+    while i < end {
+        let Some(rest) = lines[i].strip_prefix("tags:") else {
+            i += 1;
+            continue;
+        };
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            push_tags(&mut out, rest.trim_start_matches('[').trim_end_matches(']'));
+            i += 1;
+            continue;
+        }
+        // a list: `- a` rows, indented or not, until the next key
+        i += 1;
+        while i < end {
+            let line = lines[i];
+            match line.trim_start().strip_prefix('-') {
+                Some(item) => push_tags(&mut out, item),
+                None if line.starts_with([' ', '\t']) => {}
+                None => break,
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Split a comma- or space-separated run of tags, shedding the quotes and
+/// the `#` people write out of habit.
+fn push_tags(out: &mut Vec<String>, text: &str) {
+    for t in text.split(|c: char| c == ',' || c.is_whitespace()) {
+        let key = crate::md::tag_key(t.trim_matches(|c| c == '"' || c == '\''));
+        if !key.is_empty() {
+            out.push(key);
+        }
+    }
+}
+
+/// The tags of the note on disk at `path`. The whole file, unlike
+/// [`title_at`]: a tag can sit on the last line.
+pub fn tags_at(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .map(|c| tags_of(&c))
+        .unwrap_or_default()
+}
+
+/// Which entries carry `tag`, as indices into `entries` in their order.
+/// Reads every file, which is what the linked-mentions scan does too, and
+/// only when a tag is actually followed.
+pub fn with_tag(entries: &[Entry], tag: &str) -> Vec<usize> {
+    let want = crate::md::tag_key(tag);
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| tags_at(&e.path).contains(&want))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// How many paths the recents file keeps. Long enough to cover a week of
 /// hopping about, short enough to stay a file you could read yourself.
 const MAX_RECENT: usize = 100;
@@ -537,6 +629,48 @@ mod tests {
     fn a_file_dated_in_the_future_reads_as_today_rather_than_panicking() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(86_400);
         assert_eq!(age(now + Duration::from_secs(3600), now), "today");
+    }
+
+    #[test]
+    fn front_matter_tags_come_inline_bracketed_or_as_a_list() {
+        assert_eq!(front_matter_tags("---\ntags: a, b\n---\n"), vec!["a", "b"]);
+        assert_eq!(
+            front_matter_tags("---\ntags: [A, \"b\"]\n---\n"),
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            front_matter_tags("---\ntags:\n  - a\n  - '#b'\nother: x\n---\n"),
+            vec!["a", "b"]
+        );
+        assert_eq!(front_matter_tags("---\ntags:\n- a\n---\n"), vec!["a"]);
+        // an indented `tags:` is some other key's, and no block means none
+        assert!(front_matter_tags("---\nmeta:\n  tags: a\n---\n").is_empty());
+        assert!(front_matter_tags("tags: a\n").is_empty());
+        assert!(front_matter_tags("---\ntags:\n---\n").is_empty());
+    }
+
+    #[test]
+    fn a_notes_tags_are_its_front_matter_and_its_body_each_once() {
+        let tags = tags_of(
+            "---\ntags: work\n---\n# T #Work\n\n```\n#fenced\n```\nsee #home and `#code`\n",
+        );
+        assert_eq!(tags, vec!["work", "home"]);
+    }
+
+    #[test]
+    fn the_notes_carrying_a_tag_are_picked_out_of_the_index() {
+        let dir = tmpdir("tags");
+        fs::write(dir.join("a.md"), "# A\n#work\n").unwrap();
+        fs::write(dir.join("b.md"), "---\ntags: [home, work]\n---\n# B\n").unwrap();
+        fs::write(dir.join("c.md"), "# C\nnothing\n").unwrap();
+        let mut found = scan(std::slice::from_ref(&dir), &[]);
+        found.sort_by(|a, b| a.rel.cmp(&b.rel));
+        let names =
+            |idx: Vec<usize>| -> Vec<String> { idx.iter().map(|i| found[*i].name()).collect() };
+        assert_eq!(names(with_tag(&found, "Work")), vec!["a", "b"]);
+        assert_eq!(names(with_tag(&found, "#home")), vec!["b"]);
+        assert!(with_tag(&found, "none").is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

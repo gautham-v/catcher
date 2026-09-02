@@ -23,6 +23,7 @@ or `cargo install catcher`. Then run `catcher`.
 - **⌥D** opens today's note, `journal/2026-09-01.md`, made from `journal/template.md` the first time (`{{title}}`, `{{date}}`, `{{yesterday}}`, `{{tomorrow}}`) and never rewritten after.
 - **^P** flips between the live-preview editor and the rendered page. Images draw inline in Ghostty, kitty and iTerm2.
 - `[[wikilinks]]` work like Obsidian's. **⌥⏎** follows one, **⌥P** peeks at it, **^B** / **^F** go back and forward. A link to a note that does not exist yet is grey; following it makes the note beside the one you are in. The reading view lists the notes that link here at the bottom.
+- `#tags` are coloured, inline or as front matter `tags:`. **⌥⏎** or a click on one opens **^O** cut to the notes that carry it.
 - A ` ```mermaid ` fence is drawn as text: flowcharts and sequence diagrams, in box-drawing characters, no images and no network. Other kinds keep their source under a label.
 - Callouts, front matter, tables wider than the page (they pan sideways), checkboxes and `==highlights==` all render.
 - Notes autosave. Edit a note in another program and catcher takes what is on disk: the buffer reloads, the cursor stays on its line, and **^Z** brings the old buffer back. A file deleted from under it is said so in the status bar and recreated on the next save.
@@ -53,7 +54,7 @@ catcher --keys           show what your terminal sends for each key
 | `^S` | Save now |
 | `^Z` / `^Y` | Undo / redo |
 | `^C` `^X` `^V` | Copy / cut / paste |
-| `⌥⏎` / `⌥P` | Follow / peek at the `[[wikilink]]` under the cursor (a missing note is created) |
+| `⌥⏎` / `⌥P` | Follow / peek at the `[[wikilink]]` under the cursor (a missing note is created; `⌥⏎` follows a `#tag` too) |
 | `^B` / `^F` | Back / forward |
 | `^/` or `F1` | Help card |
 | `^,` | Settings |

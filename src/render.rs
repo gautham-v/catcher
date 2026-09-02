@@ -712,6 +712,29 @@ impl Ren {
                 run_start = i;
                 continue;
             }
+            // #tag, when not inside a link. The first char of an event has no
+            // char before it in `chars`, so the boundary is read off the
+            // source: pulldown splits `x#y` and `` `x`#y `` into events that
+            // both start at the `#`, and only the source tells them apart
+            if link.is_none() && chars[i] == '#' && crate::md::tags::enabled() {
+                let prev = match i {
+                    0 => at(0).and_then(|o| self.src[..o].chars().next_back()),
+                    _ => Some(chars[i - 1]),
+                };
+                if crate::md::tag_boundary(prev) {
+                    if let Some(end) = crate::md::tag_at(&chars, i) {
+                        let name: String = chars[i + 1..end].iter().collect();
+                        self.push_at(&std::mem::take(&mut run), base, None, at(run_start));
+                        let idx = self.out.urls.len();
+                        self.out.urls.push(crate::md::LinkTarget::Tag(name).href());
+                        let shown: String = chars[i..end].iter().collect();
+                        self.push_at(&shown, base.patch(theme::tag()), Some(idx), at(i));
+                        i = end;
+                        run_start = i;
+                        continue;
+                    }
+                }
+            }
             if run.is_empty() {
                 run_start = i;
             }
@@ -1965,6 +1988,30 @@ mod tests {
             .unwrap();
         assert_eq!(r.url(bare.link.unwrap()), Some("https://z.example/p"));
         assert!(line.text().contains("https://z.example/p"));
+    }
+
+    #[test]
+    fn a_tag_is_drawn_in_the_accent_and_records_a_tag_target() {
+        crate::md::tags::set_enabled(true);
+        let r = render("see #work now\n");
+        assert_eq!(flat(&r).trim(), "see #work now");
+        let cell = r.lines[0].cells.iter().find(|c| c.link.is_some()).unwrap();
+        assert_eq!(cell.ch, '#');
+        assert_eq!(cell.style.fg, theme::tag().fg);
+        assert_eq!(r.url(cell.link.unwrap()), Some("tag:work"));
+    }
+
+    #[test]
+    fn a_tag_in_code_a_heading_marker_or_a_url_is_not_recorded() {
+        crate::md::tags::set_enabled(true);
+        let r = render("# Title\n\n`#code` and https://x.y/#frag and x#y\n\n```\n#fence\n```\n");
+        assert!(r.urls.iter().all(|u| !u.starts_with("tag:")), "{:?}", r.urls);
+        // and the one right after a code span is not one either: the char
+        // before it is a backtick, whatever pulldown split the events on
+        let r = render("`x`#glued\n");
+        assert!(r.urls.is_empty());
+        let r = render("`x` #free\n");
+        assert_eq!(r.urls, vec!["tag:free"]);
     }
 
     #[test]

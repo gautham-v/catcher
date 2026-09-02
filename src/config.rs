@@ -170,6 +170,8 @@ pub struct Config {
     /// Whether `[[wikilinks]]` are links. Off leaves them as the literal text
     /// a reader without Obsidian sees.
     pub wikilinks: bool,
+    /// Whether `#tags` are coloured and followable. Off leaves them as text.
+    pub tags: bool,
     /// Whether the reading view lists the notes that link to this one. It
     /// costs a pass over every note body, so it is a setting and not simply
     /// how the app behaves.
@@ -217,6 +219,7 @@ impl Default for Config {
             preview_click: PreviewClick::Select,
             front_matter: FrontMatter::Dim,
             wikilinks: true,
+            tags: true,
             linked_mentions: true,
             quick_open_recursive: true,
             quick_open_browse: false,
@@ -297,6 +300,7 @@ impl Config {
         theme::set_palette(self.palette);
         theme::set_bold_headings(self.bold_headings);
         crate::md::links::set_enabled(self.wikilinks);
+        crate::md::tags::set_enabled(self.tags);
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -368,6 +372,7 @@ impl Config {
         c.rename_files = flag(text, "rename_files", c.rename_files);
         c.update_links = flag(text, "update_links", c.update_links);
         c.wikilinks = flag(text, "wikilinks", c.wikilinks);
+        c.tags = flag(text, "tags", c.tags);
         c.quick_open_recursive = match value(text, "quick_open").as_deref() {
             Some("folder") => false,
             Some("recursive") => true,
@@ -601,6 +606,11 @@ impl Config {
             "select · edit",
         );
         d.row("wikilinks", yn(self.wikilinks), "[[links]] open notes");
+        d.row(
+            "tags",
+            yn(self.tags),
+            "#tags coloured; follow one to list its notes",
+        );
         d.row(
             "linked_mentions",
             yn(self.linked_mentions),
@@ -970,6 +980,17 @@ mod tests {
             ..Default::default()
         };
         assert!(!Config::from_str(&c.to_document()).wikilinks);
+    }
+
+    #[test]
+    fn tags_can_be_turned_off() {
+        assert!(Config::default().tags);
+        assert!(!Config::from_str("- tags: no\n").tags);
+        let c = Config {
+            tags: false,
+            ..Default::default()
+        };
+        assert!(!Config::from_str(&c.to_document()).tags);
     }
 
     #[test]
