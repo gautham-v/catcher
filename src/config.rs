@@ -183,6 +183,12 @@ pub struct Config {
     /// Folders quick-open searches besides the notes dir — another vault, a
     /// work folder. Empty by default.
     pub quick_open_dirs: Vec<PathBuf>,
+    /// Where daily notes go, under the notes dir unless absolute. Kept as
+    /// written so the settings file reads back the way it was typed.
+    pub daily_dir: PathBuf,
+    /// The template a new daily note is filled from; a heading when the
+    /// file is missing.
+    pub daily_template: PathBuf,
     /// What every key does, defaults included.
     pub keys: Keymap,
 }
@@ -215,6 +221,8 @@ impl Default for Config {
             quick_open_recursive: true,
             quick_open_browse: false,
             quick_open_dirs: Vec::new(),
+            daily_dir: PathBuf::from("journal"),
+            daily_template: PathBuf::from("journal/template.md"),
             keys: Keymap::default(),
         }
     }
@@ -394,6 +402,12 @@ impl Config {
             .filter(|v| !v.is_empty())
             .map(|v| expand(&v, &home))
             .collect();
+        if let Some(v) = value(text, "daily_dir") {
+            c.daily_dir = expand(&v, &home);
+        }
+        if let Some(v) = value(text, "daily_template") {
+            c.daily_template = expand(&v, &home);
+        }
         c.keys = Keymap::from_settings(|key| value(text, key));
         c.preview_click = match value(text, "preview_click").as_deref() {
             Some("edit") => PreviewClick::Edit,
@@ -415,6 +429,16 @@ impl Config {
         fs::create_dir_all(&self.notes_dir)
             .with_context(|| format!("creating notes_dir {}", self.notes_dir.display()))?;
         Ok(())
+    }
+
+    /// The folder today's note goes in, resolved against the notes dir.
+    pub fn daily_dir(&self) -> PathBuf {
+        crate::daily::resolve(&self.notes_dir, &self.daily_dir)
+    }
+
+    /// The daily template file, resolved against the notes dir.
+    pub fn daily_template(&self) -> PathBuf {
+        crate::daily::resolve(&self.notes_dir, &self.daily_template)
     }
 
     /// How an attachment should be written into a note: relative when it sits
@@ -453,6 +477,18 @@ impl Config {
             "attachments_dir",
             short(&self.attachments_dir),
             "where pasted images go",
+        );
+
+        d.section("Daily note");
+        d.row(
+            "daily_dir",
+            short(&self.daily_dir),
+            "one note a day, YYYY-MM-DD.md, under notes_dir unless absolute",
+        );
+        d.row(
+            "daily_template",
+            short(&self.daily_template),
+            "{{title}} {{date}} {{yesterday}} {{tomorrow}}; a heading if missing",
         );
 
         d.section("Appearance");
@@ -1038,6 +1074,28 @@ mod tests {
             let c = Config::from_str("- notes_dir: /vault\n- attachments_dir: /pics\n");
             assert_eq!(c.attachments_dir, PathBuf::from("/pics"));
         }
+    }
+
+    #[test]
+    fn the_daily_note_settings_default_to_journal_and_round_trip() {
+        let c = Config::default();
+        assert_eq!(c.daily_dir, PathBuf::from("journal"));
+        assert_eq!(c.daily_template, PathBuf::from("journal/template.md"));
+        assert_eq!(c.daily_dir(), c.notes_dir.join("journal"));
+        assert_eq!(c.daily_template(), c.notes_dir.join("journal/template.md"));
+        let c = Config {
+            daily_dir: PathBuf::from("/vault/daily"),
+            daily_template: PathBuf::from("templates/day.md"),
+            ..Default::default()
+        };
+        assert_eq!(c.daily_dir(), PathBuf::from("/vault/daily"));
+        let back = Config::from_str(&c.to_document());
+        assert_eq!(back.daily_dir, c.daily_dir);
+        assert_eq!(back.daily_template, c.daily_template);
+        // a hand-typed value reads back, tilde and all
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let c = Config::from_str("- daily_dir: ~/days\n");
+        assert_eq!(c.daily_dir, home.join("days"));
     }
 
     #[test]

@@ -34,6 +34,7 @@ pub enum Action {
     NavForward,
     Peek,
     SearchAll,
+    DailyNote,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -138,6 +139,14 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         // capital for the same reason as ⌥P: the label writes it as ⇧F
         Some("ctrl+shift+F"),
         "search in all files",
+    ),
+    // alt, like peek: every ctrl letter near it is spoken for. Capital for
+    // the same round-trip reason as ⌥P.
+    (
+        Action::DailyNote,
+        "key_daily",
+        Some("alt+D"),
+        "today's note, made from the template if new",
     ),
 ];
 
@@ -714,6 +723,24 @@ mod tests {
         let b = Binding::parse("ctrl+shift+F").unwrap();
         assert_eq!(b.label(), "ctrl+⇧F");
         assert_eq!(Binding::parse(&b.label()), Some(b));
+    }
+
+    #[test]
+    fn the_daily_note_answers_to_alt_d_and_leaves_plain_d_typing() {
+        let map = Keymap::default();
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('d'), KeyModifiers::ALT)),
+            Some(Action::DailyNote)
+        );
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('d'), KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(map.label(Action::DailyNote), "⌥D");
+        assert!(map
+            .settings_rows()
+            .iter()
+            .any(|(k, _, _)| *k == "key_daily"));
     }
 
     #[test]

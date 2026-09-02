@@ -20,6 +20,7 @@ or `cargo install catcher`. Then run `catcher`.
 - **^O** opens a note: every folder, most recently opened first, fuzzy-searched by filename. **Tab** steps through its tabs: recent, a folder tree, and contents.
 - **⇧^F** searches in all files: every line that has every word you type, grouped by note. **⏎** opens the note at that line.
 - **^N** makes a note. The filename follows its first line until you rename the file yourself. Either way, `[[links]]` to the old name in other notes are rewritten to the new one.
+- **⌥D** opens today's note, `journal/2026-09-01.md`, made from `journal/template.md` the first time (`{{title}}`, `{{date}}`, `{{yesterday}}`, `{{tomorrow}}`) and never rewritten after.
 - **^P** flips between the live-preview editor and the rendered page. Images draw inline in Ghostty, kitty and iTerm2.
 - `[[wikilinks]]` work like Obsidian's. **⌥⏎** follows one, **⌥P** peeks at it, **^B** / **^F** go back and forward. A link to a note that does not exist yet is grey; following it makes the note beside the one you are in. The reading view lists the notes that link here at the bottom.
 - A ` ```mermaid ` fence is drawn as text: flowcharts and sequence diagrams, in box-drawing characters, no images and no network. Other kinds keep their source under a label.
@@ -32,6 +33,7 @@ or `cargo install catcher`. Then run `catcher`.
 ```
 catcher                  open the note you last had open
 catcher groceries        open the note that best matches; create it if none does
+catcher today            open today's note in `journal/`, creating it from the template
 catcher add "buy milk"   write a new note and print its path
 catcher ~/vault          open the TUI rooted at that folder
 catcher path             print the notes directory
@@ -46,6 +48,7 @@ catcher --keys           show what your terminal sends for each key
 | `^O` | Open a note (`Tab` for the folder tree, again for contents) |
 | `⇧^F` | Search in all files |
 | `^N` | New note |
+| `⌥D` | Today's note |
 | `^P` | Reading view |
 | `^S` | Save now |
 | `^Z` / `^Y` | Undo / redo |
@@ -60,7 +63,7 @@ Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, 
 
 ## Settings
 
-**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes and attachments folders, theme (`auto`, `dark`, `light`) and colours, page width, borders, status bar, autosave delay, tab width, front matter, table style, wikilinks, whether a rename updates links, linked mentions, how far **^O** looks, and every key binding. Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
+**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes and attachments folders, the daily note's folder and template, theme (`auto`, `dark`, `light`) and colours, page width, borders, status bar, autosave delay, tab width, front matter, table style, wikilinks, whether a rename updates links, linked mentions, how far **^O** looks, and every key binding. Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
 
 ## Development
 

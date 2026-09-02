@@ -69,6 +69,7 @@ pub enum Overlay {
 #[derive(Clone, PartialEq)]
 pub enum Command {
     NewNote,
+    DailyNote,
     QuickOpen,
     SearchAll,
     DeleteNote,
@@ -80,8 +81,9 @@ pub enum Command {
     Quit,
 }
 
-const COMMANDS: [Command; 10] = [
+const COMMANDS: [Command; 11] = [
     Command::NewNote,
+    Command::DailyNote,
     Command::QuickOpen,
     Command::SearchAll,
     Command::DeleteNote,
@@ -101,6 +103,7 @@ impl Command {
             // palette-only: a move is rare enough that it earns no key
             Command::MoveFile => return None,
             Command::NewNote => Action::NewNote,
+            Command::DailyNote => Action::DailyNote,
             Command::QuickOpen => Action::QuickOpen,
             Command::SearchAll => Action::SearchAll,
             Command::DeleteNote => Action::DeleteNote,
@@ -115,6 +118,7 @@ impl Command {
     pub fn label(&self) -> (&'static str, &'static str) {
         match self {
             Command::NewNote => ("New note", "an empty note, ready to type"),
+            Command::DailyNote => ("Today's note", "one note a day, made if missing"),
             Command::QuickOpen => ("Open note", "any folder, recent first"),
             Command::SearchAll => ("Search in all files", "type to search note contents"),
             Command::DeleteNote => ("Delete note", "delete the file on disk"),
@@ -423,6 +427,14 @@ impl App {
         let (dir, want): (PathBuf, Option<Want>) = match &launch {
             Launch::Default => (config.notes_dir.clone(), None),
             Launch::Name(n) => (config.notes_dir.clone(), Some(Want::Title(n.clone()))),
+            Launch::Today => {
+                let path = crate::daily::ensure(
+                    &config.daily_dir(),
+                    &config.daily_template(),
+                    crate::dates::today(),
+                )?;
+                (config.notes_dir.clone(), Some(Want::Path(path)))
+            }
             Launch::Dir(d) => (std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()), None),
             Launch::File(f) => {
                 let f = std::fs::canonicalize(f).unwrap_or_else(|_| f.clone());
@@ -448,9 +460,15 @@ impl App {
         let mut all = notes::load_all(&dir)?;
         let mut active = 0;
         match want {
-            Some(Want::Path(p)) => {
-                active = all.iter().position(|n| n.path == p).unwrap_or(0);
-            }
+            Some(Want::Path(p)) => match all.iter().position(|n| n.path == p) {
+                Some(i) => active = i,
+                // the daily note may sit outside the notes dir; read it in
+                // the way ^O would
+                None => {
+                    all.insert(0, notes::load_one(&p)?);
+                    active = 0;
+                }
+            },
             Some(Want::Title(name)) => match best_title_match(&all, &name) {
                 Some(i) => active = i,
                 None => {
@@ -1476,6 +1494,20 @@ impl App {
         }
     }
 
+    /// Today's note, made from the template the first time and then simply
+    /// opened: an existing file is never rewritten.
+    fn open_daily(&mut self) {
+        self.save_now();
+        let (dir, template) = (self.config.daily_dir(), self.config.daily_template());
+        match crate::daily::ensure(&dir, &template, crate::dates::today()) {
+            Ok(path) => {
+                self.open_path(&path);
+                self.view = View::Edit;
+            }
+            Err(e) => self.flash(format!("daily note: {e}")),
+        }
+    }
+
     fn delete_active(&mut self) {
         let title = self.active_note().title();
         if let Err(e) = notes::delete(&self.notes[self.active]) {
@@ -1604,6 +1636,7 @@ impl App {
             // handled above, before the overlay was closed
             Item::Folder(_) | Item::Notice => {}
             Item::Command(Command::NewNote) => self.new_note(),
+            Item::Command(Command::DailyNote) => self.open_daily(),
             Item::Command(Command::QuickOpen) => self.open_quick_open(),
             Item::Command(Command::SearchAll) => self.open_search_all(),
             Item::Command(Command::TogglePreview) => self.toggle_preview(),
@@ -1919,6 +1952,10 @@ impl App {
                 } else {
                     self.open_search_all();
                 }
+            }
+            Action::DailyNote => {
+                self.overlay = Overlay::None;
+                self.open_daily();
             }
         }
     }

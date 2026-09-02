@@ -3,6 +3,8 @@ mod cli;
 mod clipboard;
 mod config;
 mod contents;
+mod daily;
+mod dates;
 mod editor;
 mod history;
 mod images;
