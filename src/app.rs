@@ -597,12 +597,17 @@ impl App {
             .unwrap_or_else(|| self.dir.clone());
         let was_settings = self.editing_settings();
         match notes::save(&dir, &mut self.notes[self.active], allow_rename) {
-            Ok(_) => {
+            Ok(now) => {
                 self.dirty = false;
                 // a save is the only way a body under the roots changes from
                 // inside catcher, and it is what makes a mention you have
                 // just typed turn up in the footer of the note it names
                 self.mentions.invalidate();
+                if now != path {
+                    if let Some(done) = self.update_links(&path, &now) {
+                        self.flash(format!("renamed · {done}"));
+                    }
+                }
             }
             Err(e) => {
                 self.flash(format!("save failed: {e}"));
@@ -612,6 +617,28 @@ impl App {
         if was_settings {
             self.reload_config();
         }
+    }
+
+    /// The note at `old` now lives at `new`: point every `[[wikilink]]` under
+    /// the roots at the new name, and refresh any of those notes this session
+    /// holds a copy of, so switching to one does not show the old text. What
+    /// was done, in words, or `None` when nothing was — or the setting is off.
+    fn update_links(&mut self, old: &Path, new: &Path) -> Option<String> {
+        if !self.config.update_links {
+            return None;
+        }
+        let report = crate::links::retarget(old, new, &self.index_roots());
+        for path in &report.notes {
+            let Some(i) = self.notes.iter().position(|n| {
+                std::fs::canonicalize(&n.path).unwrap_or_else(|_| n.path.clone()) == *path
+            }) else {
+                continue;
+            };
+            if let Ok(fresh) = notes::load_one(&self.notes[i].path) {
+                self.notes[i] = fresh;
+            }
+        }
+        report.describe()
     }
 
     pub fn maybe_autosave(&mut self) {
@@ -1480,17 +1507,26 @@ impl App {
             self.flash("rename cancelled — empty name".to_string());
             return;
         }
+        let old = self.active_note().path.clone();
         match notes::rename_file(&mut self.notes[self.active], &stem) {
             Ok(path) => {
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
+                let done = if path != old {
+                    self.update_links(&old, &path)
+                } else {
+                    None
+                };
                 // the filename is one of the names a `[[wikilink]]` reaches a
                 // note by, so a rename changes what resolves and what does not
                 self.reindex();
                 self.sync_title();
-                self.flash(format!("renamed → {name}"));
+                match done {
+                    Some(done) => self.flash(format!("renamed → {name} · {done}")),
+                    None => self.flash(format!("renamed → {name}")),
+                }
             }
             Err(e) => self.flash(format!("rename failed: {e}")),
         }

@@ -7,6 +7,7 @@ mod history;
 mod images;
 mod index;
 mod keys;
+mod links;
 mod md;
 mod mentions;
 mod mermaid;

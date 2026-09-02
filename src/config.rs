@@ -160,6 +160,9 @@ pub struct Config {
     /// Whether a filename follows its note's title. Off means catcher never
     /// renames a file for you.
     pub rename_files: bool,
+    /// Whether renaming a note's file rewrites the `[[wikilinks]]` in other
+    /// notes that pointed at the old name. Off leaves them to break.
+    pub update_links: bool,
     pub table_style: TableStyle,
     pub preview_click: PreviewClick,
     /// What the editor does with a note's front matter.
@@ -203,6 +206,7 @@ impl Default for Config {
             autosave_ms: 500,
             tab_width: 2,
             rename_files: true,
+            update_links: true,
             table_style: TableStyle::Auto,
             preview_click: PreviewClick::Select,
             front_matter: FrontMatter::Dim,
@@ -354,6 +358,7 @@ impl Config {
             c.status_bar_items = items;
         }
         c.rename_files = flag(text, "rename_files", c.rename_files);
+        c.update_links = flag(text, "update_links", c.update_links);
         c.wikilinks = flag(text, "wikilinks", c.wikilinks);
         c.quick_open_recursive = match value(text, "quick_open").as_deref() {
             Some("folder") => false,
@@ -521,6 +526,11 @@ impl Config {
             "rename_files",
             yn(self.rename_files),
             "filename follows title",
+        );
+        d.row(
+            "update_links",
+            yn(self.update_links),
+            "a rename fixes [[links]] to the note",
         );
         // an editor setting: the reading view has no choice to make, it never
         // shows front matter whatever this says
@@ -851,6 +861,7 @@ mod tests {
             autosave_ms: 1500,
             tab_width: 4,
             rename_files: false,
+            update_links: false,
             table_style: TableStyle::Cards,
             preview_click: PreviewClick::Edit,
             front_matter: FrontMatter::Hide,
@@ -897,6 +908,19 @@ mod tests {
             ..Default::default()
         };
         assert!(!Config::from_str(&c.to_document()).linked_mentions);
+    }
+
+    #[test]
+    fn update_links_is_on_by_default_and_can_be_turned_off() {
+        assert!(Config::default().update_links);
+        assert!(!Config::from_str("- update_links: no\n").update_links);
+        // and off survives being written out and read back, which is what
+        // `covers_every_setting` leans on
+        let c = Config {
+            update_links: false,
+            ..Default::default()
+        };
+        assert!(!Config::from_str(&c.to_document()).update_links);
     }
 
     #[test]

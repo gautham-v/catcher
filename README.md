@@ -18,7 +18,7 @@ or `cargo install catcher`. Then run `catcher`.
 
 - **^K** is the command palette: new, open, delete, rename, move to folder, reading view, help, settings, quit.
 - **^O** opens a note: every folder, most recently opened first, fuzzy-searched by filename. **Tab** flips it to a folder tree.
-- **^N** makes a note. The filename follows its first line until you rename the file yourself.
+- **^N** makes a note. The filename follows its first line until you rename the file yourself. Either way, `[[links]]` to the old name in other notes are rewritten to the new one.
 - **^P** flips between the live-preview editor and the rendered page. Images draw inline in Ghostty, kitty and iTerm2.
 - `[[wikilinks]]` work like Obsidian's. **⌥⏎** follows one, **⌥P** peeks at it, **^B** / **^F** go back and forward. The reading view lists the notes that link here at the bottom.
 - A ` ```mermaid ` fence is drawn as text: flowcharts and sequence diagrams, in box-drawing characters, no images and no network. Other kinds keep their source under a label.
@@ -58,7 +58,7 @@ Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, 
 
 ## Settings
 
-**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes and attachments folders, theme (`auto`, `dark`, `light`) and colours, page width, borders, status bar, autosave delay, tab width, front matter, table style, wikilinks, linked mentions, how far **^O** looks, and every key binding. Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
+**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes and attachments folders, theme (`auto`, `dark`, `light`) and colours, page width, borders, status bar, autosave delay, tab width, front matter, table style, wikilinks, whether a rename updates links, linked mentions, how far **^O** looks, and every key binding. Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
 
 ## Development
 
