@@ -17,6 +17,7 @@ or `cargo install catcher`. Then run `catcher`.
 ## Using it
 
 - **^K** is the command palette: new, open, delete, rename, move to folder, reading view, help, settings, quit.
+- The palette also has editing commands, unbound until you give them a key: toggle checkbox (`- item` → `- [ ]` → `- [x]` → `- item`, numbered lists too), move line up / down, toggle heading (`#`, `##`, `###`, none), insert today's date, copy path, reveal in Finder. Each takes the selection when there is one, and undoes as one step.
 - **^O** opens a note: every folder, most recently opened first, fuzzy-searched by filename. **Tab** flips it to a folder tree.
 - **^N** makes a note. The filename follows its first line until you rename the file yourself.
 - **^P** flips between the live-preview editor and the rendered page. Images draw inline in Ghostty, kitty and iTerm2.
@@ -53,7 +54,7 @@ catcher --keys           show what your terminal sends for each key
 | `^,` | Settings |
 | `^Q` | Quit |
 
-Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, `⇧` to extend a selection, `⌘A` select all. Every key is rebindable in the settings; `^K` answers to ctrl or cmd.
+Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, `⇧` to extend a selection, `⌘A` select all. Every key is rebindable in the settings; `^K` answers to ctrl or cmd. The editing commands ship with no key: `key_checkbox`, `key_line_up`, `key_line_down`, `key_heading`, `key_date`, `key_copy_path`, `key_reveal` bind them.
 
 ## Settings
 

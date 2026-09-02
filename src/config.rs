@@ -1136,6 +1136,27 @@ mod tests {
     }
 
     #[test]
+    fn the_editing_command_keys_are_written_unbound_and_read_back_bound() {
+        use crate::keys::Action;
+        let doc = Config::default().to_document();
+        for key in [
+            "key_checkbox",
+            "key_line_up",
+            "key_line_down",
+            "key_heading",
+            "key_date",
+            "key_copy_path",
+            "key_reveal",
+        ] {
+            assert!(doc.contains(&format!("- {key}: none")), "{key}");
+        }
+        let c = Config::from_str(&doc.replace("- key_date: none", "- key_date: ^D"));
+        assert_eq!(c.keys.label(Action::InsertDate), "^D");
+        // and the rewrite keeps it
+        assert!(c.to_document().contains("- key_date: ^D"));
+    }
+
+    #[test]
     fn switching_the_theme_moves_every_colour_the_user_has_not_pinned() {
         // the bug this guards: a settings file that spelled out all ten
         // colours made `theme: light` inert, because the dark hexes below it
