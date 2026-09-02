@@ -23,6 +23,9 @@ const MAX_ROWS: u16 = 20;
 /// source, so the source has to already be the size the whole band would be.
 struct Cached {
     protocol: StatefulProtocol,
+    /// The file as decoded, kept so a re-fit on a new page width is a scale
+    /// and not a read of the file from disk in the middle of a window drag.
+    source: image::DynamicImage,
     /// The original file's pixel size, for re-fitting when the page resizes.
     natural: (u32, u32),
     /// The pixel size the protocol was built at.
@@ -31,9 +34,27 @@ struct Cached {
     rows: u16,
 }
 
+/// What [`Images::zoom`] hands back: cells occupied, natural pixel size, and
+/// the protocol to draw with.
+pub type Zoom<'a> = ((u16, u16), (u32, u32), &'a mut StatefulProtocol);
+
+/// The one picture drawn over the whole terminal, when there is one. Kept
+/// apart from the band cache because it is fitted to the window rather than
+/// the page, and re-fitted when the window changes.
+struct Zoomed {
+    path: PathBuf,
+    /// The terminal area it was fitted to, in cells.
+    area: (u16, u16),
+    /// Cells the fitted picture occupies, centred inside that area.
+    size: (u16, u16),
+    natural: (u32, u32),
+    protocol: StatefulProtocol,
+}
+
 #[derive(Default)]
 pub struct Images {
     picker: Option<Picker>,
+    zoomed: Option<Zoomed>,
     /// The configured attachments directory, searched after the note's folder.
     attachments: PathBuf,
     /// Resolved path → decoded image; a `None` entry keeps the fallback line.
@@ -104,6 +125,7 @@ impl Images {
                 let (fit, rows) = fit_px(natural.0, natural.1, font_w, font_h, cols);
                 Cached {
                     protocol: picker.new_resize_protocol(scaled(&img, fit)),
+                    source: img,
                     natural,
                     fit,
                     rows,
@@ -117,15 +139,9 @@ impl Images {
         if fit != entry.fit {
             // the page changed width: re-fit, so a crop still takes its pixels
             // from a picture that is exactly the size of the whole band
-            let img = image::ImageReader::open(&path)
-                .ok()
-                .and_then(|r| r.with_guessed_format().ok())
-                .and_then(|r| r.decode().ok());
-            if let Some(img) = img {
-                entry.protocol = picker.new_resize_protocol(scaled(&img, fit));
-                entry.fit = fit;
-                entry.rows = rows;
-            }
+            entry.protocol = picker.new_resize_protocol(scaled(&entry.source, fit));
+            entry.fit = fit;
+            entry.rows = rows;
         }
         Some(entry.rows)
     }
@@ -134,6 +150,52 @@ impl Images {
     pub fn protocol(&mut self, url: &str, note_dir: &Path) -> Option<&mut StatefulProtocol> {
         let path = self.resolve(url, note_dir)?;
         self.cache.get_mut(&path)?.as_mut().map(|c| &mut c.protocol)
+    }
+
+    /// The picture fitted to a whole terminal area — as large as the area
+    /// allows, scaled up if it is smaller than the window — as the rectangle
+    /// it should be drawn in, centred, its natural pixel size, and the
+    /// protocol to draw it with. `None` when the terminal cannot draw
+    /// pictures or the file is not one.
+    pub fn zoom(&mut self, url: &str, note_dir: &Path, area: (u16, u16)) -> Option<Zoom<'_>> {
+        let picker = self.picker.as_ref()?;
+        let path = self.resolve(url, note_dir)?;
+        let fresh = self
+            .zoomed
+            .as_ref()
+            .is_some_and(|z| z.path == path && z.area == area);
+        if !fresh {
+            let img = image::ImageReader::open(&path)
+                .ok()
+                .and_then(|r| r.with_guessed_format().ok())
+                .and_then(|r| r.decode().ok())?;
+            let natural = img.dimensions();
+            let (font_w, font_h) = picker.font_size();
+            let (px, size) = fill_px(natural.0, natural.1, font_w, font_h, area);
+            self.zoomed = Some(Zoomed {
+                path,
+                area,
+                size,
+                natural,
+                protocol: picker.new_resize_protocol(scaled(&img, px)),
+            });
+        }
+        let z = self.zoomed.as_mut()?;
+        Some((z.size, z.natural, &mut z.protocol))
+    }
+
+    /// Whether pictures go through kitty's protocol, where a picture is sent
+    /// once and placed by the cells that name its rows — which is what lets a
+    /// band be drawn part by part without sending it again.
+    pub fn is_kitty(&self) -> bool {
+        self.picker
+            .as_ref()
+            .is_some_and(|p| p.protocol_type() == ratatui_image::picker::ProtocolType::Kitty)
+    }
+
+    /// Drop the whole-terminal picture; the band cache is untouched.
+    pub fn unzoom(&mut self) {
+        self.zoomed = None;
     }
 }
 
@@ -243,6 +305,27 @@ fn resolve_in(url: &str, note_dir: &Path, attachments: &Path) -> Option<PathBuf>
     candidates.into_iter().find(|p| p.is_file())
 }
 
+/// The pixel size that fills `area` cells as nearly as a picture's shape
+/// allows, up or down, and the cells that size occupies. Unlike [`fit_px`]
+/// this never keeps a small picture small: the point of the zoom is to see
+/// it as large as the window can show it.
+fn fill_px(w: u32, h: u32, font_w: u16, font_h: u16, area: (u16, u16)) -> ((u32, u32), (u16, u16)) {
+    let font_w = font_w.max(1) as f32;
+    let font_h = font_h.max(1) as f32;
+    let (wf, hf) = (w.max(1) as f32, h.max(1) as f32);
+    let (cols, rows) = (area.0.max(1) as f32, area.1.max(1) as f32);
+    let scale = (cols * font_w / wf).min(rows * font_h / hf);
+    let px = (
+        (wf * scale).round().max(1.0) as u32,
+        (hf * scale).round().max(1.0) as u32,
+    );
+    let size = (
+        ((px.0 as f32 / font_w).ceil() as u16).clamp(1, area.0.max(1)),
+        ((px.1 as f32 / font_h).ceil() as u16).clamp(1, area.1.max(1)),
+    );
+    (px, size)
+}
+
 /// Expand a leading `~/`; everything else is left alone.
 fn shellexpand(url: &str) -> String {
     match url.strip_prefix("~/") {
@@ -319,6 +402,22 @@ mod tests {
         assert_eq!(rows, MAX_ROWS);
         assert!(h <= MAX_ROWS as u32 * 20, "{h} px in {MAX_ROWS} rows");
         assert!(w >= 1);
+    }
+
+    #[test]
+    fn a_zoomed_picture_fills_the_window_on_its_long_side_and_is_scaled_up_if_small() {
+        // 10×10 cells, 10×20 px each: a 200×100 picture is width-bound
+        let (px, size) = fill_px(200, 100, 10, 20, (10, 10));
+        assert_eq!(px, (100, 50));
+        assert_eq!(size, (10, 3));
+        // a tall one is height-bound
+        let (px, size) = fill_px(100, 400, 10, 20, (10, 10));
+        assert_eq!(px, (50, 200));
+        assert_eq!(size, (5, 10));
+        // a tiny one grows to fill, which the band fit never does
+        let (px, _) = fill_px(20, 10, 10, 20, (10, 10));
+        assert_eq!(px, (100, 50));
+        assert_eq!(fit_px(20, 10, 10, 20, 10).0, (20, 10));
     }
 
     #[test]

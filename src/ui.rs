@@ -3,10 +3,11 @@ use crate::config::BorderStyle;
 use crate::md::theme;
 use crate::render::PCell;
 use crate::tree::RowKind;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, StatefulWidget};
 use ratatui::Frame;
 use ratatui_image::{CropOptions, Resize, StatefulImage};
 use std::time::SystemTime;
@@ -33,6 +34,10 @@ fn panel(app: &App) -> Block<'static> {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    if let Some(url) = app.zoom.clone() {
+        draw_zoom(f, app, &url);
+        return;
+    }
     let status_h = if app.config.status_bar { 1 } else { 0 };
     let [content, status] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(status_h)]).areas(f.area());
@@ -115,7 +120,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     // lay the visible rows out, giving drawable images the height they measured
     let top = app.editor.scroll.min(n.saturating_sub(1));
     // (source line, rows, image url) — one entry per source line
-    let mut plan: Vec<(usize, u16, Option<String>)> = Vec::new();
+    let mut plan: Vec<(usize, u16, Option<String>, u16)> = Vec::new();
     let mut used = 0u16;
     let mut row = top;
     while row < n && used < area.height {
@@ -127,6 +132,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
             Some(_) => crate::images::band_rows(natural, area.height),
             None => natural,
         };
+        let band = natural;
         // every drawn line gets at least one row; a hidden one gets none at
         // all, which is the only way a source line takes no space on screen
         let h = if natural == 0 {
@@ -134,16 +140,17 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             natural.min(area.height - used).max(1)
         };
-        plan.push((row, h, url));
+        plan.push((row, h, url, band));
         used += h;
         row += 1;
     }
 
     let mut lines: Vec<Line> = Vec::new();
-    let mut images: Vec<(Rect, String, bool)> = Vec::new();
+    // (rect on screen, url, rows of the whole band)
+    let mut images: Vec<(Rect, String, u16)> = Vec::new();
     app.edit_rows.clear();
     let mut y = area.y;
-    for (row, h, url) in &plan {
+    for (row, h, url, band) in &plan {
         match url {
             Some(url) => {
                 app.edit_rows.push(EditRow {
@@ -156,7 +163,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                 }
                 // a picture cut off by the bottom of the page is drawn cropped
                 // to the rows it did get, so it scrolls into view row by row
-                images.push((Rect::new(area.x, y, area.width, *h), url.clone(), false));
+                images.push((Rect::new(area.x, y, area.width, *h), url.clone(), *band));
             }
             None => {
                 let segs = app.wrapped(*row, &blocks, width);
@@ -182,10 +189,8 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     }
     f.render_widget(Paragraph::new(lines), area);
 
-    for (rect, url, clip_top) in images {
-        if let Some(protocol) = app.images.protocol(&url, &dir) {
-            f.render_stateful_widget(cropped(clip_top), rect, protocol);
-        }
+    for (rect, url, band) in images {
+        draw_band(f, app, &url, &dir, rect, band, 0);
     }
 
     if app.overlay == Overlay::None {
@@ -358,23 +363,28 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let top = app.preview_scroll as usize;
 
     app.preview_links.clear();
+    app.preview_images.clear();
+    app.preview_image_urls = rendered.images.iter().map(|i| i.url.clone()).collect();
     app.preview_checkboxes.clear();
     app.preview_rows.clear();
     app.preview_page_rows.clear();
     let span = app.preview_span();
 
     let mut lines: Vec<Line> = Vec::new();
-    let mut images: Vec<(Rect, usize, bool)> = Vec::new();
+    // (rect on screen, image index, rows of the whole band, rows of it above the top)
+    let mut images: Vec<(Rect, usize, u16, u16)> = Vec::new();
     // the chevrons go on the first wide row on screen, and only there
     let mut marked = false;
     for (start, h, idx) in &bands {
         // a band only partly on screen is drawn cropped to its visible slice,
         // so a picture scrolls in and out instead of popping into view whole
         if let Some(s) = crate::images::band_slice(*start, *h, top, area.height) {
+            let hidden = if s.clip_top { h - s.rows } else { 0 };
             images.push((
                 Rect::new(area.x, area.y + s.offset, area.width, s.rows),
                 *idx,
-                s.clip_top,
+                *h,
+                hidden,
             ));
         }
     }
@@ -427,12 +437,137 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     }
     f.render_widget(Paragraph::new(lines), area);
 
-    for (rect, idx, clip_top) in images {
+    for (rect, idx, band, hidden) in images {
         let url = rendered.images[idx].url.clone();
-        if let Some(protocol) = app.images.protocol(&url, &dir) {
-            f.render_stateful_widget(cropped(clip_top), rect, protocol);
+        if draw_band(f, app, &url, &dir, rect, band, hidden) {
+            app.preview_images.push((rect, url));
         }
     }
+}
+
+/// Draw the part of a picture that is on screen: `rect` is that part, the
+/// whole band is `band` rows tall and `hidden` of them are scrolled off the
+/// top. Returns whether anything was drawn.
+///
+/// Under kitty the band is drawn whole into a scratch buffer and only the
+/// visible rows are copied to the screen. Each placeholder row names its own
+/// row of the picture, so the slice is right wherever it lands, and since the
+/// area the picture was encoded for never changes, nothing is sent to the
+/// terminal again as the page scrolls. Every other protocol puts the whole
+/// picture in one cell and has to be cut and re-sent for each new slice.
+fn draw_band(
+    f: &mut Frame,
+    app: &mut App,
+    url: &str,
+    dir: &std::path::Path,
+    rect: Rect,
+    band: u16,
+    hidden: u16,
+) -> bool {
+    let kitty = app.images.is_kitty();
+    let Some(protocol) = app.images.protocol(url, dir) else {
+        return false;
+    };
+    if !kitty || band == 0 {
+        f.render_stateful_widget(cropped(hidden > 0), rect, protocol);
+        return true;
+    }
+    let whole = Rect::new(rect.x, 0, rect.width, band);
+    let mut scratch = Buffer::empty(whole);
+    StatefulImage::default()
+        .resize(Resize::Crop(None))
+        .render(whole, &mut scratch, protocol);
+    // the picture's data goes out with the first row the first time it is
+    // drawn; a first row that is scrolled off the top would take it with it,
+    // so that part of its cell is moved to the first row that does show
+    let carry = if hidden > 0 {
+        let sym = scratch[(whole.x, 0)].symbol();
+        sym.rfind("\x1b[s")
+            .filter(|&i| i > 0)
+            .map(|i| sym[..i].to_string())
+    } else {
+        None
+    };
+    let buf = f.buffer_mut();
+    for r in 0..rect.height {
+        let src_y = hidden + r;
+        if src_y >= band {
+            break;
+        }
+        for x in 0..rect.width {
+            let cell = scratch[(whole.x + x, src_y)].clone();
+            if let Some(dst) = buf.cell_mut((rect.x + x, rect.y + r)) {
+                *dst = cell;
+            }
+        }
+    }
+    if let Some(seq) = carry {
+        if let Some(dst) = buf.cell_mut((rect.x, rect.y)) {
+            let sym = format!("{seq}{}", dst.symbol());
+            dst.set_symbol(&sym);
+        }
+    }
+    true
+}
+
+/// A picture over the whole terminal: as large as the window allows, centred
+/// on the page's ground, with one row underneath naming the file and the way
+/// out. The page beneath is not drawn at all, so nothing of it can show
+/// through around a picture narrower than the window.
+fn draw_zoom(f: &mut Frame, app: &mut App, url: &str) {
+    let whole = f.area();
+    f.render_widget(Clear, whole);
+    let [content, status] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(whole);
+    let dir = app.note_dir();
+    let name = std::path::Path::new(url)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| url.to_string());
+    let left = match app.images.zoom(url, &dir, (content.width, content.height)) {
+        Some(((w, h), natural, protocol)) => {
+            let rect = Rect::new(
+                content.x + (content.width.saturating_sub(w)) / 2,
+                content.y + (content.height.saturating_sub(h)) / 2,
+                w.min(content.width),
+                h.min(content.height),
+            );
+            f.render_stateful_widget(cropped(false), rect, protocol);
+            format!("{name} · {}×{}", natural.0, natural.1)
+        }
+        None => {
+            let msg = format!("🖼 {url}");
+            let y = content.y + content.height / 2;
+            let x = content.x
+                + content
+                    .width
+                    .saturating_sub(crate::md::str_width(&msg) as u16)
+                    / 2;
+            let rect = Rect::new(x, y, content.width.saturating_sub(x - content.x), 1);
+            f.render_widget(Paragraph::new(Line::from(Span::styled(msg, dim()))), rect);
+            name
+        }
+    };
+    let count = app.preview_image_urls.len();
+    let right = if count > 1 {
+        let at = app
+            .preview_image_urls
+            .iter()
+            .position(|u| u == url)
+            .map_or(0, |i| i + 1);
+        format!("{at} of {count} · ← → next · esc close")
+    } else {
+        "esc close".to_string()
+    };
+    let gap = status
+        .width
+        .saturating_sub((crate::md::str_width(&left) + crate::md::str_width(&right)) as u16 + 2);
+    let line = Line::from(vec![
+        Span::styled(format!(" {left}"), dim()),
+        Span::raw(" ".repeat(gap as usize)),
+        Span::styled(format!("{right} "), dim()),
+    ]);
+    f.render_widget(Paragraph::new(line), status);
 }
 
 /// Overwrite one drawn cell with a continuation mark.

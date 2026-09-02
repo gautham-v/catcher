@@ -287,19 +287,36 @@ fn tui(launch: cli::Launch) -> Result<()> {
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Result<()> {
+    use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
     while !app.quit {
-        terminal.draw(|f| ui::draw(f, app))?;
+        // a frame goes to the terminal as one piece: ratatui clears the screen
+        // on a resize and paints it again, and without this the terminal
+        // shows the blank in between, which is the flicker a window drag had
+        let _ = crossterm::execute!(std::io::stdout(), BeginSynchronizedUpdate);
+        let drawn = terminal.draw(|f| ui::draw(f, app));
+        let _ = crossterm::execute!(std::io::stdout(), EndSynchronizedUpdate);
+        drawn?;
         if event::poll(Duration::from_millis(100))? {
-            match event::read()? {
-                Event::Key(k) if k.kind != event::KeyEventKind::Release => app.on_key(k),
-                Event::Mouse(m) => app.on_mouse(m),
-                _ => {}
+            handle(app, event::read()?);
+            // a wheel flick or a window drag arrives as a burst; the whole
+            // burst is taken before the next frame, so the screen is painted
+            // once for where things ended up rather than once per step
+            while event::poll(Duration::ZERO)? {
+                handle(app, event::read()?);
             }
         }
         app.tick();
     }
     app.save_now();
     Ok(())
+}
+
+fn handle(app: &mut app::App, ev: Event) {
+    match ev {
+        Event::Key(k) if k.kind != event::KeyEventKind::Release => app.on_key(k),
+        Event::Mouse(m) => app.on_mouse(m),
+        _ => {}
+    }
 }
 
 #[cfg(test)]
