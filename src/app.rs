@@ -60,8 +60,6 @@ pub enum Overlay {
     /// ^O: every note in the vault, recently opened first.
     QuickOpen,
     ConfirmDelete,
-    /// A wikilink that resolves to nothing: enter makes the note it names.
-    ConfirmCreate,
     RenameFile,
     /// Move the open note to another folder under the session root.
     MoveFile,
@@ -274,8 +272,6 @@ pub struct App {
     pub preview_page_rows: Vec<(usize, Rect, usize)>,
     /// Buffer for the inline rename prompt.
     pub rename_input: String,
-    /// The wikilink target the create prompt is asking about.
-    pub pending_link: Option<String>,
     /// Where you have been, for ^B and ^F.
     pub history: crate::history::History,
     /// What has been typed into the shortcuts card, which filters its rows.
@@ -303,6 +299,9 @@ pub struct Peek {
     pub target: String,
     /// The note the link resolved to, which a click or Enter opens.
     pub path: PathBuf,
+    /// False when the link names no note yet: the popup is then a card
+    /// offering to make it, and opening it makes it.
+    pub exists: bool,
     /// The file's name, which titles the popup.
     pub name: String,
     /// The note's markdown with any front matter already cut off.
@@ -323,6 +322,15 @@ pub struct Peek {
 }
 
 impl Peek {
+    /// The wikilink target the popup was opened for, without its `wikilink:`
+    /// dress — what `create_from_link` wants.
+    fn target_name(&self) -> String {
+        match md::LinkTarget::parse(&self.target) {
+            md::LinkTarget::Wiki(t) => t,
+            _ => self.target.clone(),
+        }
+    }
+
     /// Render the body for `width`, unless the cache already is.
     pub fn ensure_rendered(&mut self, width: usize, tables: crate::config::TableStyle) {
         if self.rows_width == width {
@@ -368,6 +376,13 @@ impl Peek {
     pub fn contains(&self, x: u16, y: u16) -> bool {
         self.rect.contains(ratatui::layout::Position { x, y })
     }
+}
+
+/// The one sentence for a link to a note that is not there yet, shared by
+/// the status bar and the peek card. `key` is whatever follow-link is bound
+/// to, so a rebound key is named right.
+fn missing_link_hint(name: &str, key: &str) -> String {
+    format!("no note called \u{201c}{name}\u{201d} \u{b7} {key} creates it")
 }
 
 /// How long the pointer rests on a link before it is taken as a request to
@@ -439,7 +454,6 @@ impl App {
 
         let mut app = App {
             rename_input: String::new(),
-            pending_link: None,
             help_query: String::new(),
             foreign_root,
             images: Images::new(config.attachments_dir.clone()),
@@ -1007,15 +1021,19 @@ impl App {
         }
     }
 
-    /// Read the note a link names, for a peek. `None` when the link resolves
-    /// to nothing; deliberately no vault re-walk here, which is a cost a
-    /// hover must not pay.
+    /// Read the note a link names, for a peek. A wikilink that resolves to
+    /// nothing gets a card saying so instead of nothing at all — the hover
+    /// that asked is the moment you want to know. Deliberately no vault
+    /// re-walk here, which is a cost a hover must not pay.
     fn load_peek(&self, url: &str, anchor: Rect) -> Option<Peek> {
         let path = match md::LinkTarget::parse(url) {
             md::LinkTarget::Note(p) => PathBuf::from(p),
             md::LinkTarget::Wiki(t) => match index::resolve(&self.open_index, &t) {
                 Some(e) => e.path.clone(),
-                None => self.notes[best_title_match(&self.notes, &t)?].path.clone(),
+                None => match best_title_match(&self.notes, &t) {
+                    Some(i) => self.notes[i].path.clone(),
+                    None => return Some(self.missing_peek(url, &t, anchor)),
+                },
             },
             md::LinkTarget::Url(_) => return None,
         };
@@ -1031,6 +1049,7 @@ impl App {
         Some(Peek {
             target: url.to_string(),
             path,
+            exists: true,
             name,
             body: notes::body_after_front_matter(&content).to_string(),
             anchor,
@@ -1042,12 +1061,66 @@ impl App {
         })
     }
 
-    /// Open the peeked note for real, putting the popup away.
+    /// The card a peek at a link to nowhere shows: the same words the status
+    /// bar uses, so the two never disagree about what the key does.
+    fn missing_peek(&self, url: &str, target: &str, anchor: Rect) -> Peek {
+        let name = Self::link_note_path(target)
+            .map(|(_, n)| n)
+            .unwrap_or_else(|| target.to_string());
+        Peek {
+            target: url.to_string(),
+            path: PathBuf::new(),
+            exists: false,
+            name: name.clone(),
+            body: missing_link_hint(&name, &self.config.keys.label(Action::FollowLink)),
+            anchor,
+            rows: Vec::new(),
+            rows_width: 0,
+            scroll: 0,
+            view_rows: 0,
+            rect: Rect::default(),
+        }
+    }
+
+    /// Open the peeked note for real, putting the popup away. A peek at a
+    /// note that is not there yet makes it, as following the link would.
     fn open_peek(&mut self) {
         if let Some(peek) = self.peek.take() {
             self.hover = None;
-            self.open_path(&peek.path);
+            if peek.exists {
+                self.open_path(&peek.path);
+            } else {
+                self.create_from_link(&peek.target_name());
+            }
         }
+    }
+
+    /// What the status bar says under a cursor resting on a `[[wikilink]]`
+    /// to nowhere, and nothing for any other spot. Asks the styling, not the
+    /// index, so the bar and the grey underline agree — an un-walked vault
+    /// draws every link as resolvable and says nothing.
+    pub fn cursor_link_hint(&self) -> Option<String> {
+        if self.view != View::Edit || self.overlay != Overlay::None {
+            return None;
+        }
+        let pos = self.editor.cursor;
+        let target = match self
+            .editor
+            .lines()
+            .get(pos.0)
+            .and_then(|l| md::link_at(l, pos.1))?
+        {
+            md::LinkTarget::Wiki(t) => t,
+            _ => return None,
+        };
+        if md::links::resolves(&target) {
+            return None;
+        }
+        let name = Self::link_note_path(&target).map(|(_, n)| n)?;
+        Some(missing_link_hint(
+            &name,
+            &self.config.keys.label(Action::FollowLink),
+        ))
     }
 
     fn follow_wikilink(&mut self, target: &str) {
@@ -1063,8 +1136,9 @@ impl App {
             self.open_path(&path);
             return;
         }
-        self.pending_link = Some(target.to_string());
-        self.overlay = Overlay::ConfirmCreate;
+        // still nothing: the link is a note that has not been written yet,
+        // and following it is how it gets written
+        self.create_from_link(target);
     }
 
     /// The folder and filename a link target names, relative to the note the
@@ -1089,18 +1163,23 @@ impl App {
         Some((folder, name))
     }
 
-    /// Make the note an unresolved wikilink named, and open it. Confirmed
-    /// first through [`Overlay::ConfirmCreate`] — a mistyped link should not
-    /// quietly leave a file behind.
-    fn create_from_link(&mut self) {
-        let Some(target) = self.pending_link.take() else {
-            return;
-        };
-        let Some((folder, name)) = Self::link_note_path(&target) else {
+    /// Where a note made from a link lands: the folder of the note the link
+    /// is in, plus whatever folder part the target carried. Free-standing so
+    /// the test needs no app behind it.
+    fn create_dir(note_dir: &Path, folder: &Path) -> PathBuf {
+        note_dir.join(folder)
+    }
+
+    /// Make the note an unresolved wikilink names, beside the note the link
+    /// was written in, and open it. No confirmation: the grey underline and
+    /// the status bar have already said what the key will do, and ^B goes
+    /// back to where the link was.
+    fn create_from_link(&mut self, target: &str) {
+        let Some((folder, name)) = Self::link_note_path(target) else {
             self.flash(format!("“{target}” is not a name a note can have"));
             return;
         };
-        let dir = self.note_dir().join(folder);
+        let dir = Self::create_dir(&self.note_dir(), &folder);
         match notes::create_named(&dir, &name, format!("# {name}\n\n")) {
             Ok(note) => {
                 let path = note.path.clone();
@@ -1620,17 +1699,6 @@ impl App {
                 KeyCode::Esc => self.overlay = Overlay::None,
                 _ => {}
             },
-            Overlay::ConfirmCreate => match key.code {
-                KeyCode::Enter => {
-                    self.overlay = Overlay::None;
-                    self.create_from_link();
-                }
-                KeyCode::Esc => {
-                    self.overlay = Overlay::None;
-                    self.pending_link = None;
-                }
-                _ => {}
-            },
             Overlay::RenameFile => {
                 if !edit_line(&mut self.rename_input, &key) {
                     match key.code {
@@ -1945,19 +2013,6 @@ impl App {
     }
 
     /// The folder image references on this note resolve against.
-    /// What the create-a-note prompt should say: the filename the note will
-    /// be given, and the folder it will land in, `~/`-shortened. Worked out
-    /// from the same two calls `create_from_link` makes, so the prompt cannot
-    /// describe a different file from the one that then appears —
-    /// `[[stories/story-matrix]]` makes `story-matrix.md` inside `stories/`,
-    /// and saying "in ~/notes" would be a surprise on both counts.
-    ///
-    /// `None` for a target that names no note it is allowed to write.
-    pub fn pending_create(&self) -> Option<(String, String)> {
-        let (folder, name) = Self::link_note_path(self.pending_link.as_deref()?)?;
-        Some((name, index::short(&self.note_dir().join(folder))))
-    }
-
     pub fn note_dir(&self) -> PathBuf {
         self.active_note()
             .path
@@ -2340,10 +2395,7 @@ impl App {
                         // small betrayal
                         self.overlay = Overlay::None;
                     }
-                } else if matches!(
-                    self.overlay,
-                    Overlay::ConfirmDelete | Overlay::ConfirmCreate | Overlay::RenameFile
-                ) {
+                } else if matches!(self.overlay, Overlay::ConfirmDelete | Overlay::RenameFile) {
                     self.overlay = Overlay::None;
                 } else if self.view == View::Preview
                     && self
@@ -2677,6 +2729,7 @@ mod tests {
     fn peek_wraps_long_paragraphs_at_width() {
         let mut p = super::Peek {
             path: PathBuf::new(),
+            exists: true,
             target: String::new(),
             name: String::new(),
             body: "# A heading that is longer than thirty columns\n\nAs Lead PM for a connected vehicle platform, I nudged a long paragraph across many rows.".into(),
@@ -2702,6 +2755,7 @@ mod tests {
     fn peek_scroll_clamps_to_content() {
         let mut p = super::Peek {
             path: PathBuf::new(),
+            exists: true,
             target: String::new(),
             name: String::new(),
             body: String::new(),
@@ -3132,6 +3186,49 @@ mod tests {
         let (folder, name) = App::link_note_path("Story Matrix").unwrap();
         assert_eq!(folder, PathBuf::new());
         assert_eq!(name, "Story Matrix");
+    }
+
+    #[test]
+    fn a_note_made_from_a_link_lands_beside_the_note_that_links_to_it() {
+        let here = PathBuf::from("/vault/work");
+        let (folder, _) = App::link_note_path("plan").unwrap();
+        assert_eq!(
+            App::create_dir(&here, &folder),
+            PathBuf::from("/vault/work")
+        );
+        // a folder in the target is kept, under the same starting point
+        let (folder, _) = App::link_note_path("stories/plan").unwrap();
+        assert_eq!(
+            App::create_dir(&here, &folder),
+            PathBuf::from("/vault/work/stories")
+        );
+    }
+
+    #[test]
+    fn the_missing_link_hint_names_the_note_and_the_key() {
+        assert_eq!(
+            super::missing_link_hint("plan", "⌥⏎"),
+            "no note called \u{201c}plan\u{201d} \u{b7} ⌥⏎ creates it"
+        );
+    }
+
+    #[test]
+    fn a_peek_at_a_link_to_nowhere_is_a_card_that_offers_to_create() {
+        let p = super::Peek {
+            path: PathBuf::new(),
+            exists: false,
+            target: "wikilink:plan".into(),
+            name: "plan".into(),
+            body: super::missing_link_hint("plan", "⌥⏎"),
+            anchor: super::Rect::default(),
+            rows: Vec::new(),
+            rows_width: 0,
+            scroll: 0,
+            view_rows: 0,
+            rect: super::Rect::default(),
+        };
+        assert_eq!(p.target_name(), "plan");
+        assert!(p.body.contains("creates it"));
     }
 
     #[test]

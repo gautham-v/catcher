@@ -70,7 +70,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match app.overlay {
         Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile => draw_palette(f, app),
         Overlay::ConfirmDelete => draw_confirm(f, app),
-        Overlay::ConfirmCreate => draw_create(f, app),
         Overlay::RenameFile => draw_rename(f, app),
         Overlay::Help => draw_help(f, app),
         Overlay::None => {}
@@ -521,7 +520,12 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         View::Edit => "edit",
         View::Preview => "preview",
     };
-    let status = app.status.as_ref().map(|(m, _)| m.clone());
+    // a flash wins; failing one, a cursor on a link to nowhere says so
+    let status = app
+        .status
+        .as_ref()
+        .map(|(m, _)| m.clone())
+        .or_else(|| app.cursor_link_hint());
     let items = &app.config.status_bar_items;
     let shows = |i: StatusItem| items.contains(&i);
 
@@ -1161,37 +1165,6 @@ fn draw_help(f: &mut Frame, app: &App) {
     let block = panel(app).title(Span::styled(" help ", theme::state()));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-/// The prompt a `[[wikilink]]` that resolves to nothing puts up. No danger
-/// border: making a note is not a destructive thing, and borrowing the delete
-/// prompt's colour for it would teach the eye the wrong lesson.
-fn draw_create(f: &mut Frame, app: &mut App) {
-    let rect = overlay_rect(f, 4);
-    f.render_widget(Clear, rect);
-    let block = panel(app);
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-    // what will be made and where it will land, so the prompt is never a
-    // surprise: the filename the target ends in, in the note's own folder plus
-    // whatever folder part the target carried
-    let (name, dir) = app.pending_create().unwrap_or_else(|| {
-        (
-            app.pending_link.clone().unwrap_or_default(),
-            crate::index::short(&app.note_dir()),
-        )
-    });
-    let lines = vec![
-        Line::from(Span::styled(
-            format!(" create \u{201c}{name}\u{201d}?"),
-            theme::state().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            format!(" this makes a new note in {dir}. enter to confirm, esc to cancel."),
-            dim(),
-        )),
-    ];
     f.render_widget(Paragraph::new(lines), inner);
 }
 
