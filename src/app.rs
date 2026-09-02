@@ -370,12 +370,6 @@ pub struct App {
     pub history: crate::history::History,
     /// What has been typed into the shortcuts card, which filters its rows.
     pub help_query: String,
-    /// True when the session is rooted outside the configured notes dir (a
-    /// `catcher <file>` / `<dir>` invocation). Renaming and image paste are
-    /// decided per note now — quick-open can reach anywhere — but the flag
-    /// still says what kind of session this is.
-    #[allow(dead_code)]
-    pub foreign_root: bool,
     /// The wikilink the pointer is resting on in the reading view, and when
     /// it arrived there. A peek opens once it has stayed put for a moment.
     hover: Option<(String, Rect, Instant)>,
@@ -527,10 +521,6 @@ impl App {
                 (root, Some(Want::Path(file)))
             }
         };
-        let foreign_root = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())
-            != std::fs::canonicalize(&config.notes_dir)
-                .unwrap_or_else(|_| config.notes_dir.clone());
-
         let recents = index::load_recent();
         // a plain `catcher` picks up where you left off: the note you had
         // open when you closed it, wherever it lives. Only a launch that names
@@ -574,7 +564,6 @@ impl App {
         let mut app = App {
             rename_input: String::new(),
             help_query: String::new(),
-            foreign_root,
             images: Images::new(config.attachments_dir.clone()),
             config,
             dir,
@@ -1571,7 +1560,7 @@ impl App {
         if !(q.starts_with('/') || q.starts_with("~/")) {
             return None;
         }
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let path = match q.strip_prefix("~/") {
             Some(rest) => home.join(rest),
             None => PathBuf::from(q),

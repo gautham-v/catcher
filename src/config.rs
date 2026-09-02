@@ -197,7 +197,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let notes_dir = default_notes_dir(&home);
         Config {
             attachments_dir: notes_dir.join("attachments"),
@@ -237,7 +237,7 @@ pub fn settings_path() -> Result<PathBuf> {
 }
 
 pub fn config_dir() -> Result<PathBuf> {
-    let config = dirs::home_dir()
+    let config = std::env::home_dir()
         .context("no home directory")?
         .join(".config");
     let new = config.join("catcher");
@@ -324,7 +324,7 @@ impl Config {
 
     /// The file alone, as it would be written back.
     fn from_file_text(text: &str) -> Config {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let mut c = Config::default();
 
         if let Some(v) = value(text, "notes_dir") {
@@ -1103,7 +1103,7 @@ mod tests {
         // an unset notes_dir must never land on ~/notes: catcher renames
         // files to follow their titles, and that directory may be someone
         // else's markdown
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let c = Config::from_str("nothing set\n");
         if std::env::var_os("CATCHER_DIR").is_none() {
             assert_eq!(c.notes_dir, default_notes_dir(&home));
@@ -1138,7 +1138,7 @@ mod tests {
         assert_eq!(back.daily_dir, c.daily_dir);
         assert_eq!(back.daily_template, c.daily_template);
         // a hand-typed value reads back, tilde and all
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let c = Config::from_str("- daily_dir: ~/days\n");
         assert_eq!(c.daily_dir, home.join("days"));
     }
@@ -1192,7 +1192,7 @@ mod tests {
 
     #[test]
     fn extra_quick_open_folders_can_be_repeated_or_listed() {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let c = Config::from_str("- quick_open_dirs: /vault\n- quick_open_dirs: ~/work\n");
         assert_eq!(
             c.quick_open_dirs,

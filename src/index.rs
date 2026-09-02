@@ -80,7 +80,7 @@ pub fn folder_of(path: &Path, notes_dir: &Path) -> String {
 
 /// Shorten a path for display, `~/` for the home directory.
 pub fn short(path: &Path) -> String {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
     match path.strip_prefix(&home) {
         Ok(rel) => format!("~/{}", rel.display()),
         Err(_) => path.display().to_string(),

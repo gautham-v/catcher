@@ -250,12 +250,6 @@ pub mod theme {
         }
     }
 
-    /// Install a built-in palette by polarity, with no user overrides.
-    #[allow(dead_code)]
-    pub fn set_mode(mode: Mode) {
-        set_palette(base(mode));
-    }
-
     pub fn set_bold_headings(on: bool) {
         if let Ok(mut w) = BOLD_HEADINGS.write() {
             *w = on;

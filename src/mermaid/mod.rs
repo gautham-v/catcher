@@ -15,13 +15,6 @@
 //! each caller maps the four roles onto the palette itself. No `Style` crosses
 //! this boundary — the theme stays in one place, at the top of `md.rs`.
 
-// Scaffold. The reading view and the editor now call in, so nothing in this
-// file needs it any more — what still does is `canvas`, `flow` and `sequence`,
-// whose halves the unfinished builders have yet to reach. Delete this the day
-// `flow::render` and `sequence::render` stop answering `None`; the build will
-// then say whether anything left is genuinely unused.
-#![allow(dead_code)]
-
 pub mod canvas;
 pub mod flow;
 pub mod sequence;
@@ -98,8 +91,8 @@ impl Rendered {
         self.rows.len()
     }
 
-    /// The plain text of every row, for tests and for anything that only wants
-    /// to know what the diagram says.
+    /// The plain text of every row, for tests.
+    #[cfg(test)]
     pub fn text(&self) -> Vec<String> {
         self.rows
             .iter()

@@ -41,7 +41,6 @@ const BLANK: Ink = Ink {
 /// Which side of a box, or which way an arrow points.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
-    Up,
     Right,
     Down,
     Left,
@@ -61,22 +60,9 @@ pub enum Shape {
 /// The arrowhead that points `side`.
 pub fn arrow_char(side: Side) -> char {
     match side {
-        Side::Up => '▲',
         Side::Right => '▶',
         Side::Down => '▼',
         Side::Left => '◀',
-    }
-}
-
-/// Where an edge meets a box of `w`×`h` at `(x, y)`: the middle of the side it
-/// arrives on. Both builders attach here, so a line always lands on a border
-/// rather than beside it.
-pub fn attach(x: usize, y: usize, w: usize, h: usize, side: Side) -> (usize, usize) {
-    match side {
-        Side::Left => (x, y + h / 2),
-        Side::Right => (x + w.saturating_sub(1), y + h / 2),
-        Side::Up => (x + w / 2, y),
-        Side::Down => (x + w / 2, y + h.saturating_sub(1)),
     }
 }
 
@@ -169,10 +155,12 @@ impl Canvas {
         }
     }
 
+    #[cfg(test)]
     pub fn width(&self) -> usize {
         self.w
     }
 
+    #[cfg(test)]
     pub fn height(&self) -> usize {
         self.h
     }
@@ -301,7 +289,6 @@ impl Canvas {
         let bits = match side {
             Side::Right => R,
             Side::Left => L,
-            Side::Up => U,
             Side::Down => D,
         };
         self.put_bits(x, y, bits, role);
@@ -477,7 +464,7 @@ mod tests {
         let (w, h) = Canvas::node_size(Shape::Round, &label);
         let mut c = Canvas::new(w + 3, h);
         c.node(0, 0, w, h, Shape::Round, &label);
-        let (ax, ay) = attach(0, 0, w, h, Side::Right);
+        let (ax, ay) = (w - 1, h / 2);
         c.hline(ax, ay, 3, Role::Line);
         assert_eq!(text(&c), vec!["╭───╮", "│ a ├──", "╰───╯"]);
         // and a corner that grows a third edge is a tee too

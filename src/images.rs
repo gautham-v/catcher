@@ -329,7 +329,7 @@ fn fill_px(w: u32, h: u32, font_w: u16, font_h: u16, area: (u16, u16)) -> ((u32,
 /// Expand a leading `~/`; everything else is left alone.
 fn shellexpand(url: &str) -> String {
     match url.strip_prefix("~/") {
-        Some(rest) => dirs::home_dir()
+        Some(rest) => std::env::home_dir()
             .map(|h| h.join(rest).to_string_lossy().into_owned())
             .unwrap_or_else(|| url.to_string()),
         None => url.to_string(),
