@@ -79,6 +79,10 @@ pub enum Command {
     TogglePreview,
     Shortcuts,
     OpenSettings,
+    FoldSection,
+    UnfoldSection,
+    FoldAll,
+    UnfoldAll,
     Quit,
     ToggleCheckbox,
     MoveLineUp,
@@ -89,7 +93,7 @@ pub enum Command {
     RevealFile,
 }
 
-const COMMANDS: [Command; 18] = [
+const COMMANDS: [Command; 22] = [
     Command::NewNote,
     Command::DailyNote,
     Command::QuickOpen,
@@ -100,6 +104,10 @@ const COMMANDS: [Command; 18] = [
     Command::TogglePreview,
     Command::Shortcuts,
     Command::OpenSettings,
+    Command::FoldSection,
+    Command::UnfoldSection,
+    Command::FoldAll,
+    Command::UnfoldAll,
     Command::Quit,
     Command::ToggleCheckbox,
     Command::MoveLineUp,
@@ -126,6 +134,10 @@ impl Command {
             Command::TogglePreview => Action::TogglePreview,
             Command::Shortcuts => Action::Help,
             Command::OpenSettings => Action::Settings,
+            Command::FoldSection => Action::FoldSection,
+            Command::UnfoldSection => Action::UnfoldSection,
+            Command::FoldAll => Action::FoldAll,
+            Command::UnfoldAll => Action::UnfoldAll,
             Command::Quit => Action::Quit,
             Command::ToggleCheckbox => Action::ToggleCheckbox,
             Command::MoveLineUp => Action::MoveLineUp,
@@ -149,6 +161,10 @@ impl Command {
             Command::TogglePreview => ("Reading view", "the page, rendered"),
             Command::Shortcuts => ("Help", "every key, on one card"),
             Command::OpenSettings => ("Settings", "edit them here, as a note"),
+            Command::FoldSection => ("Fold section", "hide what is under this heading"),
+            Command::UnfoldSection => ("Unfold section", "show it again"),
+            Command::FoldAll => ("Fold all", "every section, headings only"),
+            Command::UnfoldAll => ("Unfold all", "open every fold in the note"),
             Command::Quit => ("Quit", "save and exit"),
             Command::ToggleCheckbox => ("Toggle checkbox", "item → [ ] → [x] → item"),
             Command::MoveLineUp => ("Move line up", "the line or selection, one up"),
@@ -177,7 +193,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
     (
         "moving",
         &[
-            ("⌥← ⌥→", "by word"),
+            ("⌥← ⌥→", "by word  ·  on a heading, fold / unfold"),
             ("⌘← ⌘→", "start / end of line"),
             ("⌘↑ ⌘↓", "start / end of note"),
             ("⇧ + any motion", "extend the selection"),
@@ -344,6 +360,12 @@ pub struct App {
     /// once when the link under the pointer changed and not touched again
     /// for every pointer twitch after.
     pub peek: Option<Peek>,
+    /// Which headings are folded, per note, for as long as the app runs.
+    folds: crate::fold::Folds,
+    /// The open note's lines as they stand on screen, rebuilt whenever the
+    /// buffer or its folds change. Everything that walks the note by line —
+    /// the draw, ↑↓, the wheel — asks this rather than the buffer.
+    pub visible: crate::fold::Visible,
 }
 
 /// A floating glimpse of another note, Obsidian-style.
@@ -569,6 +591,8 @@ impl App {
             preview_dragging: false,
             preview_page_rows: Vec::new(),
             history: crate::history::History::default(),
+            folds: crate::fold::Folds::default(),
+            visible: crate::fold::Visible::default(),
         };
         app.remember_active();
         app.load_active_into_editor();
@@ -607,7 +631,138 @@ impl App {
         self.preview_hscroll = 0;
         self.preview_goto = None;
         self.preview_sel = None;
+        self.refresh_visible();
         self.sync_title();
+    }
+
+    /// Rebuild the line → row mapping from the buffer and the note's folds.
+    fn refresh_visible(&mut self) {
+        let blocks = self.blocks();
+        let folded = self.folds.of(&self.notes[self.active].path);
+        self.visible = crate::fold::Visible::new(self.editor.lines(), &blocks, &folded);
+    }
+
+    /// Is `row` a heading the note has folded?
+    pub fn folded_here(&self, row: usize) -> bool {
+        self.folds.is_folded(&self.notes[self.active].path, row)
+    }
+
+    /// What a folded heading says at its right edge.
+    pub fn fold_label(&self, row: usize) -> Option<String> {
+        if !self.folded_here(row) {
+            return None;
+        }
+        Some(match self.visible.hidden_under(row) {
+            1 => "1 line folded".to_string(),
+            n => format!("{n} lines folded"),
+        })
+    }
+
+    /// Is the cursor on a heading line — the one place the fold keys apply?
+    fn on_heading(&self) -> bool {
+        crate::fold::heading_at(self.editor.lines(), &self.blocks(), self.editor.cursor.0).is_some()
+    }
+
+    /// Does this key fold rather than move? Only in the editor, only on a
+    /// heading, and never while a selection is being extended: ⇧⌥← is a
+    /// motion wherever the cursor is.
+    fn fold_key_applies(&self, key: &KeyEvent) -> bool {
+        self.view == View::Edit
+            && self.overlay == Overlay::None
+            && fold_key_takes(key, self.on_heading())
+    }
+
+    fn fold_section(&mut self) {
+        let path = self.notes[self.active].path.clone();
+        let blocks = self.blocks();
+        let row = self.editor.cursor.0;
+        match self.folds.fold(&path, self.editor.lines(), &blocks, row) {
+            Some(_) => self.refresh_visible(),
+            None if self.on_heading() => self.flash("nothing under this heading".to_string()),
+            None => self.flash("not on a heading".to_string()),
+        }
+    }
+
+    fn unfold_section(&mut self) {
+        let path = self.notes[self.active].path.clone();
+        if self.folds.unfold(&path, self.editor.cursor.0) {
+            self.refresh_visible();
+        } else {
+            self.flash("nothing folded here".to_string());
+        }
+    }
+
+    fn fold_all(&mut self) {
+        let path = self.notes[self.active].path.clone();
+        let blocks = self.blocks();
+        let n = self.folds.fold_all(&path, self.editor.lines(), &blocks);
+        self.refresh_visible();
+        // the cursor may have been inside a section that just closed
+        let row = self.editor.cursor.0;
+        self.leave_folds(row);
+        self.flash(format!("folded {n} sections"));
+    }
+
+    fn unfold_all(&mut self) {
+        let path = self.notes[self.active].path.clone();
+        let n = self.folds.unfold_all(&path);
+        self.refresh_visible();
+        self.flash(format!("opened {n} folds"));
+    }
+
+    /// A cursor that landed inside a fold is put on the nearest line on
+    /// screen: past the fold when it was moving down, on the heading when up.
+    /// Called after every motion, so the cursor is never on a hidden line.
+    fn leave_folds(&mut self, before: usize) {
+        let (row, col) = self.editor.cursor;
+        if !self.visible.is_hidden(row) {
+            return;
+        }
+        let to = if row > before {
+            self.visible.next_visible(row)
+        } else {
+            self.visible.prev_visible(row)
+        }
+        .or_else(|| self.visible.prev_visible(row))
+        .unwrap_or(0);
+        let keep = self.editor.selection().is_some();
+        self.editor.move_cursor(self.editor.clamp((to, col)), keep);
+    }
+
+    /// An edit put the cursor inside a fold — enter at the end of a folded
+    /// heading, a backspace that joined the line after one: the section
+    /// opens, because what was just typed must be on screen.
+    fn reveal_cursor(&mut self) {
+        let row = self.editor.cursor.0;
+        if !self.visible.is_hidden(row) {
+            return;
+        }
+        let path = self.notes[self.active].path.clone();
+        let blocks = self.blocks();
+        self.folds.reveal(&path, self.editor.lines(), &blocks, row);
+        self.refresh_visible();
+    }
+
+    /// Scroll the editor by rows on screen, so a wheel tick over a fold does
+    /// not spend itself on lines nobody can see.
+    fn scroll_edit(&mut self, delta: isize) {
+        let row = self.visible.line_to_row(self.editor.scroll) as isize + delta;
+        let last = self.visible.rows().saturating_sub(1) as isize;
+        let line = self.visible.row_to_line(row.clamp(0, last) as usize);
+        self.editor
+            .scroll_by(line as isize - self.editor.scroll as isize);
+    }
+
+    /// The coarse one-row-per-line scroll pass the buffer makes, done in rows
+    /// on screen so the lines a fold hides do not count toward the page.
+    pub fn scroll_cursor_into_view(&mut self, height: usize) {
+        if self.visible.is_plain() {
+            self.editor.scroll_into_view(height);
+        } else if self.editor.following() {
+            self.editor.scroll =
+                self.visible
+                    .scroll_for(self.editor.scroll, self.editor.cursor.0, height);
+        }
     }
 
     /// Put the open note's name in the terminal's title, if it is not there
@@ -636,6 +791,11 @@ impl App {
             self.notes[self.active].content = content;
             self.dirty = true;
             self.last_edit = Instant::now();
+            let blocks = self.blocks();
+            self.folds
+                .settle(&self.notes[self.active].path, self.editor.lines(), &blocks);
+            self.refresh_visible();
+            self.reveal_cursor();
         }
     }
 
@@ -1844,10 +2004,15 @@ impl App {
             self.redo();
             return;
         }
-        // whatever the settings say this key does, if anything
+        // whatever the settings say this key does, if anything. The fold keys
+        // are the word-motion arrows, and only a heading line takes them:
+        // anywhere else the editor gets the key and moves by word, as before
         if let Some(action) = self.config.keys.action(&key) {
-            self.run_action(action);
-            return;
+            let fold_key = matches!(action, Action::FoldSection | Action::UnfoldSection);
+            if !fold_key || self.fold_key_applies(&key) {
+                self.run_action(action);
+                return;
+            }
         }
 
         match self.overlay {
@@ -1907,6 +2072,7 @@ impl App {
                         KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT,
                     );
                     let select = key.modifiers.contains(KeyModifiers::SHIFT);
+                    let before = self.editor.cursor.0;
                     match key.code {
                         KeyCode::Up if plain => self.move_vertical(false, select),
                         KeyCode::Down if plain => self.move_vertical(true, select),
@@ -1916,6 +2082,7 @@ impl App {
                             }
                         }
                     }
+                    self.leave_folds(before);
                 }
             },
         }
@@ -2020,6 +2187,10 @@ impl App {
             }
             Action::CopyPath => self.copy_path(),
             Action::RevealFile => self.reveal_file(),
+            Action::FoldSection => self.fold_section(),
+            Action::UnfoldSection => self.unfold_section(),
+            Action::FoldAll => self.fold_all(),
+            Action::UnfoldAll => self.unfold_all(),
         }
     }
 
@@ -2188,9 +2359,12 @@ impl App {
         } else if !down && seg > 0 {
             Some((row, seg - 1))
         } else if down {
-            (row + 1 < self.editor.lines().len()).then_some((row + 1, 0))
+            // the next line on screen, which is past a fold rather than in it
+            self.visible.next_visible(row + 1).map(|r| (r, 0))
         } else {
-            row.checked_sub(1).map(|r| (r, usize::MAX))
+            row.checked_sub(1)
+                .and_then(|r| self.visible.prev_visible(r))
+                .map(|r| (r, usize::MAX))
         };
         let Some((trow, tseg)) = target else {
             // already on the first/last display row: go to the buffer's edge
@@ -2233,12 +2407,13 @@ impl App {
     /// text is still in the file, and moving the cursor into the block brings
     /// the whole thing back.
     pub fn hidden_row(&self, blocks: &[md::Block], row: usize) -> bool {
-        hidden_by(
-            md::block_at(blocks, row),
-            self.config.front_matter,
-            self.editor.cursor.0,
-            self.editor.selection(),
-        )
+        self.visible.is_hidden(row)
+            || hidden_by(
+                md::block_at(blocks, row),
+                self.config.front_matter,
+                self.editor.cursor.0,
+                self.editor.selection(),
+            )
     }
 
     /// Is `row` an image line that is currently drawn as a picture rather than
@@ -2256,14 +2431,19 @@ impl App {
     /// the block the cursor is in), styled everywhere else, with the block
     /// spans and page width already to hand.
     pub fn line_view_in(&self, row: usize, blocks: &[md::Block], width: usize) -> md::RLine {
-        view_line(
+        let line = view_line(
             self.editor.lines(),
             blocks,
             row,
             width,
             self.editor.cursor.0,
             self.editor.selection(),
-        )
+        );
+        if self.folded_here(row) {
+            fold_marked(line)
+        } else {
+            line
+        }
     }
 
     /// The folder image references on this note resolve against.
@@ -2624,7 +2804,7 @@ impl App {
                     self.selected = self.selected.saturating_sub(1)
                 }
                 (_, View::Preview) => self.preview_scroll = self.preview_scroll.saturating_sub(2),
-                (_, View::Edit) => self.editor.scroll_by(-2),
+                (_, View::Edit) => self.scroll_edit(-2),
             },
             MouseEventKind::ScrollDown => match (self.overlay, self.view) {
                 (Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile, _) => {
@@ -2634,7 +2814,7 @@ impl App {
                     }
                 }
                 (_, View::Preview) => self.preview_scroll = self.preview_scroll.saturating_add(2),
-                (_, View::Edit) => self.editor.scroll_by(2),
+                (_, View::Edit) => self.scroll_edit(2),
             },
             MouseEventKind::ScrollLeft if self.view == View::Preview => self.pan(-4),
             MouseEventKind::ScrollRight if self.view == View::Preview => self.pan(4),
@@ -2830,6 +3010,26 @@ fn view_line(
     } else {
         md::style_line(src)
     }
+}
+
+/// Does a fold key fold here, or fall through to the editor as the word
+/// motion it also is? A heading takes it; a heading with shift held does not,
+/// because ⇧⌥← is extending a selection and that is a motion anywhere.
+fn fold_key_takes(key: &KeyEvent, on_heading: bool) -> bool {
+    on_heading && !key.modifiers.contains(KeyModifiers::SHIFT)
+}
+
+/// A folded heading's line with the `▸ ` marker in front. The marker stands
+/// for source column 0 — the first `#` — so a click on it lands at the start
+/// of the line and the cursor's own column mapping is untouched.
+pub fn fold_marked(mut line: md::RLine) -> md::RLine {
+    let marker = md::theme::FOLDED.chars().map(|ch| md::Cell {
+        ch,
+        style: md::theme::fold(),
+        src: 0,
+    });
+    line.cells.splice(0..0, marker);
+    line
 }
 
 /// Flip the `[ ]`/`[x]` box of a task line, keeping everything else intact.
@@ -3444,6 +3644,51 @@ mod tests {
             }
             // the rows cover the whole line, in order
             assert_eq!(rows.last().unwrap().end_src, len);
+        }
+    }
+
+    #[test]
+    fn the_fold_keys_only_take_a_heading_and_never_a_shifted_motion() {
+        let key = |m| KeyEvent::new(KeyCode::Left, m);
+        assert!(fold_key_takes(&key(KeyModifiers::ALT), true));
+        // off a heading the editor keeps its word motion
+        assert!(!fold_key_takes(&key(KeyModifiers::ALT), false));
+        // and a selection being extended is a motion even on one
+        assert!(!fold_key_takes(
+            &key(KeyModifiers::ALT | KeyModifiers::SHIFT),
+            true
+        ));
+    }
+
+    #[test]
+    fn a_folded_heading_carries_its_marker_and_still_maps_its_columns() {
+        let line = fold_marked(md::style_line("## Title"));
+        let text: String = line.cells.iter().map(|c| c.ch).collect();
+        assert_eq!(text, "\u{25b8} Title");
+        assert_eq!(line.cells[0].style, md::theme::fold());
+        let seg = line.one_row();
+        // the marker stands for the start of the line; the text is where it was
+        assert_eq!(seg.display_to_source(0), 0);
+        assert_eq!(seg.display_to_source(2), 3);
+        assert_eq!(seg.source_to_display(3), 2);
+        assert_eq!(seg.source_to_display(0), 0);
+        // the cursor's own line shows its source, marker and all
+        let raw = fold_marked(md::RLine::raw("## Title"));
+        let text: String = raw.cells.iter().map(|c| c.ch).collect();
+        assert_eq!(text, "\u{25b8} ## Title");
+    }
+
+    #[test]
+    fn every_fold_command_has_a_palette_row_and_an_action() {
+        for c in [
+            Command::FoldSection,
+            Command::UnfoldSection,
+            Command::FoldAll,
+            Command::UnfoldAll,
+        ] {
+            assert!(COMMANDS.contains(&c));
+            assert!(c.action().is_some());
+            assert!(!c.label().0.is_empty());
         }
     }
 

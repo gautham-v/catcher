@@ -1368,7 +1368,7 @@ fn callout_at(src: &str, start: usize) -> Option<(String, String, usize)> {
     let rest = src.get(start..)?;
     let line_end = rest.find('\n').map_or(rest.len(), |i| i + 1);
     let line = &rest[..line_end];
-    let body = line.trim_start_matches(|c: char| c == '>' || c == ' ' || c == '\t');
+    let body = line.trim_start_matches(['>', ' ', '\t']);
     let inner = body.strip_prefix("[!")?;
     let close = inner.find(']')?;
     let kind = inner[..close].trim();
@@ -2005,7 +2005,11 @@ mod tests {
     fn a_tag_in_code_a_heading_marker_or_a_url_is_not_recorded() {
         crate::md::tags::set_enabled(true);
         let r = render("# Title\n\n`#code` and https://x.y/#frag and x#y\n\n```\n#fence\n```\n");
-        assert!(r.urls.iter().all(|u| !u.starts_with("tag:")), "{:?}", r.urls);
+        assert!(
+            r.urls.iter().all(|u| !u.starts_with("tag:")),
+            "{:?}",
+            r.urls
+        );
         // and the one right after a code span is not one either: the char
         // before it is a backtick, whatever pulldown split the events on
         let r = render("`x`#glued\n");
