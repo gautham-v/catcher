@@ -631,6 +631,12 @@ impl App {
         self.preview_hscroll = 0;
         self.preview_goto = None;
         self.preview_sel = None;
+        // a note switched to may have changed since its folds were made — a
+        // link rewrite put a fresh copy in `notes` — so the folds are settled
+        // against the text about to be shown, not the text they were made on
+        let blocks = self.blocks();
+        self.folds
+            .settle(&self.notes[self.active].path, self.editor.lines(), &blocks);
         self.refresh_visible();
         self.sync_title();
     }
@@ -932,6 +938,18 @@ impl App {
         self.editor.replace_all(&self.notes[self.active].content);
         self.dirty = false;
         self.mentions.invalidate();
+        // the folds were made on the old text: move the ones whose heading
+        // survived, drop the rest, and rebuild the rows — otherwise the draw
+        // goes on skipping lines by their old numbers
+        let blocks = self.blocks();
+        self.folds
+            .settle(&self.notes[self.active].path, self.editor.lines(), &blocks);
+        self.refresh_visible();
+        // the cursor kept its place by number, which may now be inside a
+        // fold: another program's edit is not a reason to open one, so the
+        // cursor goes to the heading instead
+        let row = self.editor.cursor.0;
+        self.leave_folds(row);
         self.flash(if dropped {
             "reloaded: changed on disk, your last edits were dropped".to_string()
         } else {
