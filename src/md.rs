@@ -1199,6 +1199,12 @@ pub fn tag_at(src: &[char], i: usize) -> Option<usize> {
     if src.get(i) != Some(&'#') || !tag_boundary(i.checked_sub(1).map(|k| src[k])) {
         return None;
     }
+    // `[[#heading]]` is a link to a place in this note, which `wikilink_at`
+    // leaves as typed — and typed, its `#` sits after a `[` the way `(#tag)`
+    // does. It is still not a tag
+    if i >= 2 && src[i - 1] == '[' && src[i - 2] == '[' {
+        return None;
+    }
     if !src.get(i + 1).is_some_and(|c| c.is_alphabetic()) {
         return None;
     }
@@ -1239,6 +1245,14 @@ pub fn tags_in(line: &str) -> Vec<(usize, usize)> {
                 }
             }
             '[' => {
+                // a [[wikilink]] is one thing, the way `link_at` and the
+                // styling take it: `[[#heading]]` names a heading, not a tag
+                if src.get(i + 1) == Some(&'[') && links::enabled() {
+                    if let Some(w) = wikilink_at(&src, i) {
+                        i = w.end;
+                        continue;
+                    }
+                }
                 if let Some(close) = find(&src, i + 1, ']') {
                     if src.get(close + 1) == Some(&'(') {
                         if let Some(paren) = find(&src, close + 2, ')') {
@@ -2726,6 +2740,18 @@ mod tests {
         assert!(tags_in("see `a #b` c").is_empty());
         // but one beside them still is
         assert_eq!(tags_in("`x` #tag https://a.b#c"), vec![(4, 8)]);
+    }
+
+    #[test]
+    fn a_hash_inside_a_wikilink_is_a_heading_and_not_a_tag() {
+        // what the index counts must be what the styling draws, and the
+        // styling takes the whole [[…]] before it ever looks for a tag
+        assert!(tags_in("[[#heading]] [[note#part|alias]]").is_empty());
+        assert_eq!(tags_in("[[note]] #tag"), vec![(9, 13)]);
+        // and neither the cursor nor the styling finds a tag there either
+        assert_eq!(link_at("[[#heading]]", 3), None);
+        let l = style_line("[[#heading]]");
+        assert!(l.cells.iter().all(|c| c.style.fg != theme::tag().fg));
     }
 
     #[test]
