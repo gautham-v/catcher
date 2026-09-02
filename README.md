@@ -1,8 +1,10 @@
 # catcher
 
-https://github.com/user-attachments/assets/5a060469-40c5-4fd8-a17c-cab2e60b6f96
-
 A minimal note-taking app for the terminal. Local-first, no accounts, no sync: your notes are a folder of `.md` files in `~/catcher`, so `grep`, git and Obsidian work on them too.
+
+![catcher's reading view: a note with a TL;DR callout, a table and a mermaid flowchart, over Sanford Gifford's A Gorge in the Mountains](docs/hero.jpg)
+
+<sub>Background: Sanford Robinson Gifford, <i>A Gorge in the Mountains (Kauterskill Clove)</i>, 1862. The Metropolitan Museum of Art, public domain.</sub>
 
 > Called **tinynote** until 0.9. Existing `~/tinynote` and `~/.config/tinynote` folders are still picked up.
 
