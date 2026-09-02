@@ -1137,7 +1137,7 @@ impl Ren {
                 }
             }
             Event::Code(code) => {
-                let style = self.style().patch(theme::code());
+                let style = self.style().patch(theme::inline_code());
                 let link = self.link;
                 // the range spans the backticks too; the content starts after them
                 let ticks = self.src[range.clone()]
