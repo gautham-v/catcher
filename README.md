@@ -23,7 +23,8 @@ or `cargo install catcher`. Then run `catcher`.
 - `[[wikilinks]]` work like Obsidian's. **⌥⏎** follows one, **⌥P** peeks at it, **^B** / **^F** go back and forward. The reading view lists the notes that link here at the bottom.
 - A ` ```mermaid ` fence is drawn as text: flowcharts and sequence diagrams, in box-drawing characters, no images and no network. Other kinds keep their source under a label.
 - Callouts, front matter, tables wider than the page (they pan sideways), checkboxes and `==highlights==` all render.
-- Notes autosave. Mouse works: click, drag to select and copy, scroll. **^V** pastes a clipboard image as a PNG.
+- Notes autosave. Edit a note in another program and catcher takes what is on disk: the buffer reloads, the cursor stays on its line, and **^Z** brings the old buffer back. A file deleted from under it is said so in the status bar and recreated on the next save.
+- Mouse works: click, drag to select and copy, scroll. **^V** pastes a clipboard image as a PNG.
 
 ## CLI
 

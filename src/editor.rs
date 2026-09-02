@@ -236,6 +236,23 @@ impl Editor {
         }
     }
 
+    /// Swap the whole buffer for `content` as a single undo step: what a
+    /// reload after another program wrote the file does. The cursor stays on
+    /// its line number, clamped to the new length, and the scroll is left
+    /// where it was, so the page does not jump for an edit made elsewhere.
+    pub fn replace_all(&mut self, content: &str) {
+        self.record(EditKind::Other);
+        // and the step after this must not fold into it
+        self.last_kind = None;
+        let fresh = Editor::new(content);
+        self.lines = fresh.lines;
+        self.trailing_newline = fresh.trailing_newline;
+        self.crlf = fresh.crlf;
+        self.anchor = None;
+        self.cursor = self.clamp(self.cursor);
+        self.scroll = self.scroll.min(self.lines.len().saturating_sub(1));
+    }
+
     pub fn clear_selection(&mut self) {
         self.anchor = None;
     }
@@ -884,6 +901,32 @@ mod tests {
         assert!(e.redo());
         assert_eq!(e.text(), "hello world");
         assert!(!e.redo());
+    }
+
+    #[test]
+    fn replacing_the_buffer_is_one_undo_step_that_keeps_the_cursor_line() {
+        let mut e = Editor::new("one\ntwo\nthree\n");
+        e.set_cursor((2, 3));
+        e.replace_all("uno\ndos\n");
+        assert_eq!(e.lines(), ["uno", "dos"]);
+        // past the end: clamped to the last line, and to its length
+        assert_eq!(e.cursor, (1, 3));
+        assert!(e.undo());
+        assert_eq!(e.text(), "one\ntwo\nthree\n");
+        assert!(e.redo());
+        assert_eq!(e.text(), "uno\ndos\n");
+    }
+
+    #[test]
+    fn typing_after_a_replace_does_not_fold_into_it() {
+        let mut e = Editor::new("abc\n");
+        e.insert_char('x');
+        e.replace_all("new\n");
+        e.insert_char('y');
+        assert!(e.undo());
+        assert_eq!(e.text(), "new\n");
+        assert!(e.undo());
+        assert_eq!(e.text(), "xabc\n");
     }
 
     #[test]
