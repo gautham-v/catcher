@@ -1,6 +1,6 @@
 [package]
 name = "catcher"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 description = "A minimal, local-first markdown notes TUI over plain files"
 license = "MIT"
