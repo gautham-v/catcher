@@ -858,6 +858,9 @@ impl App {
                 // just typed turn up in the footer of the note it names
                 self.mentions.invalidate();
                 if now != path {
+                    // the folds are kept by path, and the text they were
+                    // made on has not changed
+                    self.folds.relocate(&path, &now);
                     if let Some(done) = self.update_links(&path, &now) {
                         self.flash(format!("renamed · {done}"));
                     }
@@ -1898,14 +1901,16 @@ impl App {
     /// if the folder already has one by that name); the title is untouched.
     fn commit_move(&mut self, dir: &Path) {
         let label = self.move_label(dir);
+        let old = self.active_note().path.clone();
         match notes::move_file(&mut self.notes[self.active], dir) {
             Ok(path) => {
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                // the note is somewhere else now: the index, the recents and
-                // the history all named the old path
+                // the note is somewhere else now: the index, the recents, the
+                // history and the folds all named the old path
+                self.folds.relocate(&old, &path);
                 self.reindex();
                 self.remember_active();
                 self.flash(format!("moved → {label}{name}"));
@@ -1942,6 +1947,7 @@ impl App {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 let done = if path != old {
+                    self.folds.relocate(&old, &path);
                     self.update_links(&old, &path)
                 } else {
                     None

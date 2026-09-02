@@ -120,6 +120,18 @@ impl Folds {
         self.by_note.remove(path).map_or(0, |m| m.len())
     }
 
+    /// The note at `old` is now the file at `new`: its folds come along. A
+    /// save that follows the title, a rename and a move all change the path
+    /// and none of them change the text, so nothing is re-settled here.
+    pub fn relocate(&mut self, old: &Path, new: &Path) {
+        if old == new {
+            return;
+        }
+        if let Some(m) = self.by_note.remove(old) {
+            self.by_note.insert(new.to_path_buf(), m);
+        }
+    }
+
     /// Open every fold that hides `row`. Whether any did.
     pub fn reveal(&mut self, path: &Path, lines: &[String], blocks: &[Block], row: usize) -> bool {
         let covering: Vec<usize> = self
@@ -453,5 +465,22 @@ mod tests {
         // the buffer's rule would have counted the four hidden lines
         let plain = Visible::new(&l, &b, &[]);
         assert_eq!(plain.scroll_for(0, 7, 3), 5);
+    }
+
+    #[test]
+    fn a_renamed_note_keeps_its_folds_under_its_new_path() {
+        let (l, b) = note();
+        let mut f = Folds::default();
+        let old = Path::new("/v/one.md");
+        let new = Path::new("/v/two.md");
+        assert!(f.fold(old, &l, &b, 2).is_some());
+        f.relocate(old, new);
+        assert!(f.is_folded(new, 2));
+        assert!(!f.is_folded(old, 2));
+        // the same path is a no-op, and nothing is lost to a note with no folds
+        f.relocate(new, new);
+        assert!(f.is_folded(new, 2));
+        f.relocate(Path::new("/v/none.md"), Path::new("/v/x.md"));
+        assert!(f.is_folded(new, 2));
     }
 }
