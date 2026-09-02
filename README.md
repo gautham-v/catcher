@@ -23,6 +23,8 @@ or `cargo install catcher`. Then run `catcher`.
 - `[[wikilinks]]` work like Obsidian's. **⌥⏎** follows one, **⌥P** peeks at it, **^B** / **^F** go back and forward. The reading view lists the notes that link here at the bottom.
 - A ` ```mermaid ` fence is drawn as text: flowcharts and sequence diagrams, in box-drawing characters, no images and no network. Other kinds keep their source under a label.
 - Callouts, front matter, tables wider than the page (they pan sideways), checkboxes and `==highlights==` all render.
+- Sections fold. On a heading, **⌥←** folds everything under it down to the next heading of the same or a higher level, **⌥→** opens it again; a folded heading shows `▸` and how many lines it hides. Folds are per note and last for the session; the reading view ignores them.
+- Sections fold. On a heading, **⌥←** folds everything under it down to the next heading of the same or a higher level, **⌥→** opens it again; a folded heading shows `▸` and how many lines it hides. Folds are per note and last for the session; the reading view ignores them.
 - Notes autosave. Mouse works: click, drag to select and copy, scroll. **^V** pastes a clipboard image as a PNG.
 
 ## CLI
@@ -49,6 +51,8 @@ catcher --keys           show what your terminal sends for each key
 | `^C` `^X` `^V` | Copy / cut / paste |
 | `⌥⏎` / `⌥P` | Follow / peek at the `[[wikilink]]` under the cursor |
 | `^B` / `^F` | Back / forward |
+| `⌥←` / `⌥→` | On a heading: fold / unfold the section (elsewhere: by word) |
+| `⌥←` / `⌥→` | On a heading: fold / unfold the section (elsewhere: by word) |
 | `^/` or `F1` | Help card |
 | `^,` | Settings |
 | `^Q` | Quit |
@@ -57,7 +61,7 @@ Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, 
 
 ## Settings
 
-**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes and attachments folders, theme (`auto`, `dark`, `light`) and colours, page width, borders, status bar, autosave delay, tab width, front matter, table style, wikilinks, linked mentions, how far **^O** looks, and every key binding. Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
+**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes and attachments folders, theme (`auto`, `dark`, `light`) and colours, page width, borders, status bar, autosave delay, tab width, front matter, table style, wikilinks, linked mentions, how far **^O** looks, and every key binding (`key_fold`, `key_unfold`, and the unbound `key_fold_all` / `key_unfold_all` among them). Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
 
 ## Development
 

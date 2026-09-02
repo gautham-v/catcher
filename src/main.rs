@@ -3,6 +3,7 @@ mod cli;
 mod clipboard;
 mod config;
 mod editor;
+mod fold;
 mod history;
 mod images;
 mod index;

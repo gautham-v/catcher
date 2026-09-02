@@ -33,6 +33,10 @@ pub enum Action {
     NavBack,
     NavForward,
     Peek,
+    FoldSection,
+    UnfoldSection,
+    FoldAll,
+    UnfoldAll,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -127,6 +131,33 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         // document is read back through `parse`, which keeps the letter's case
         Some("alt+P"),
         "peek at the [[wikilink]] under the cursor",
+    ),
+    // the word-motion arrows, but only while the cursor is on a heading: the
+    // app checks the line before it runs these, and anywhere else the key
+    // still moves by word. So a fold costs no key of its own.
+    (
+        Action::FoldSection,
+        "key_fold",
+        Some("alt+left"),
+        "on a heading, fold the section under it",
+    ),
+    (
+        Action::UnfoldSection,
+        "key_unfold",
+        Some("alt+right"),
+        "on a folded heading, open it again",
+    ),
+    (
+        Action::FoldAll,
+        "key_fold_all",
+        None,
+        "fold every section in the note",
+    ),
+    (
+        Action::UnfoldAll,
+        "key_unfold_all",
+        None,
+        "open every fold in the note",
     ),
 ];
 
@@ -598,9 +629,20 @@ mod tests {
         let map = Keymap::default();
         assert_eq!(map.action(&ev(KeyCode::Char('b'), KeyModifiers::CONTROL)), Some(Action::NavBack));
         assert_eq!(map.action(&ev(KeyCode::Char('f'), KeyModifiers::CONTROL)), Some(Action::NavForward));
-        // every modifier + arrow stays with the editor (or the window manager)
-        assert_eq!(map.action(&ev(KeyCode::Left, KeyModifiers::ALT)), None);
+        // ⌥← is the fold key, which the app hands back to the editor off a
+        // heading; every other modifier + arrow stays with the editor outright
+        assert_eq!(map.action(&ev(KeyCode::Left, KeyModifiers::ALT)), Some(Action::FoldSection));
+        assert_eq!(map.action(&ev(KeyCode::Right, KeyModifiers::ALT)), Some(Action::UnfoldSection));
         assert_eq!(map.action(&ev(KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::ALT)), None);
+        assert_eq!(map.action(&ev(KeyCode::Left, KeyModifiers::SUPER)), None);
+    }
+
+    #[test]
+    fn fold_all_and_unfold_all_ship_unbound() {
+        let map = Keymap::default();
+        assert_eq!(map.label(Action::FoldAll), "");
+        assert_eq!(map.label(Action::UnfoldAll), "");
+        assert!(map.settings_rows().iter().any(|(k, v, _)| *k == "key_fold_all" && v == "none"));
     }
 
     #[test]

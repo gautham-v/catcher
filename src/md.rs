@@ -326,6 +326,11 @@ pub mod theme {
     pub fn bright() -> Style {
         Style::new().fg(palette().bright)
     }
+    /// The marker on a folded heading: the accent, so a closed section reads
+    /// as the one thing on the page that is asking to be opened.
+    pub fn fold() -> Style {
+        Style::new().fg(palette().accent)
+    }
 
     /// The ground a selected palette row sits on. Monochrome on purpose: the
     /// palette is chrome over the note, and a hue here would compete with the
@@ -394,6 +399,8 @@ pub mod theme {
     pub const CHECKED: &str = "\u{2713}";
     pub const UNCHECKED: &str = "\u{2610}";
     pub const BULLET: &str = "\u{2022}";
+    /// In front of a folded heading.
+    pub const FOLDED: &str = "\u{25b8} ";
     pub const QUOTE_BAR: &str = "\u{258c}";
 }
 

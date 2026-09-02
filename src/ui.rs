@@ -89,7 +89,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     let blocks = app.blocks();
     let width = area.width.max(1) as usize;
     let (cseg, cdisp) = app.cursor_seg(&blocks, width);
-    app.editor.scroll_into_view(area.height as usize);
+    app.scroll_cursor_into_view(area.height as usize);
 
     let dir = app.note_dir();
     let n = app.editor.lines().len();
@@ -162,13 +162,20 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
             None => {
                 let segs = app.wrapped(*row, &blocks, width);
                 let selection = app.editor.selection_on(*row);
+                let label = app.fold_label(*row);
                 for (i, seg) in segs.iter().enumerate().take(*h as usize) {
                     app.edit_rows.push(EditRow {
                         rect: Rect::new(area.x, y + i as u16, area.width, 1),
                         line: *row,
                         seg: i,
                     });
-                    lines.push(seg.to_line(selection));
+                    let mut line = seg.to_line(selection);
+                    if i == 0 {
+                        if let Some(label) = &label {
+                            fold_note(&mut line, label, width);
+                        }
+                    }
+                    lines.push(line);
                 }
             }
         }
@@ -195,6 +202,19 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
     }
+}
+
+/// Put a folded heading's count at the right edge of its first row, when the
+/// row has room for it and a gap besides; a heading that fills the page keeps
+/// its text, and the marker in front already says it is folded.
+fn fold_note(line: &mut Line<'static>, label: &str, width: usize) {
+    let used = line.width();
+    let need = crate::md::str_width(label) + 2;
+    if used + need > width {
+        return;
+    }
+    line.spans.push(Span::raw(" ".repeat(width - used - need + 2)));
+    line.spans.push(Span::styled(label.to_string(), dim()));
 }
 
 /// How many rows source line `row` occupies, and the image URL when it is one
