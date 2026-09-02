@@ -320,6 +320,16 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     // clamp the scroll so the page can't be scrolled off the bottom
     let height = area.height as usize;
     let max_scroll = rows.len().saturating_sub(height.max(1)) as u16;
+    // a line asked for by the contents tab: the first page row it wrapped to
+    // goes at the top, a couple of rows down so it is not flush with the edge
+    if let Some(line) = app.preview_goto.take() {
+        if let Some(at) = rows
+            .iter()
+            .position(|r| r.src_line.is_some_and(|l| l >= line))
+        {
+            app.preview_scroll = at.saturating_sub(2) as u16;
+        }
+    }
     app.preview_scroll = app.preview_scroll.min(max_scroll);
     let top = app.preview_scroll as usize;
 
@@ -685,7 +695,11 @@ fn overlay_budget(f: &Frame) -> u16 {
 fn draw_palette(f: &mut Frame, app: &mut App) {
     let quick = app.overlay == Overlay::QuickOpen;
     let browse = quick && app.browse;
-    let items = palette_rows(app);
+    let contents = quick && app.contents;
+    // the box is at most 100 wide and inset 2 from each side of the frame,
+    // less the border: what a snippet has to fit in, known before the box is
+    let width = overlay_rect_wide(f, 1, 100).width.saturating_sub(2) as usize;
+    let items = palette_rows(app, width);
     // two border rows, the prompt, the rule under it, and the footer hint ^O
     // carries. Derived from the box's own budget rather than guessed at, so
     // the tree scrolls inside the rows it actually has on an 80x24 terminal.
@@ -697,7 +711,10 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let rect = overlay_rect_wide(f, shown + chrome, 100);
     app.overlay_rect = rect;
     f.render_widget(Clear, rect);
-    let block = panel(app);
+    let mut block = panel(app);
+    if quick {
+        block = block.title(tab_strip(app));
+    }
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -711,7 +728,9 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let caret = Span::styled(" ❯ ", theme::bright());
     let prompt = if app.query.is_empty() {
         let hint = if browse {
-            "browse folders — tab returns to search"
+            "browse folders — tab for contents"
+        } else if contents {
+            "type to search note contents"
         } else if quick {
             "open a note — any folder, most recent first"
         } else if app.overlay == Overlay::MoveFile {
@@ -818,6 +837,14 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
         let detailw =
             (area.width as usize).saturating_sub(4 + namew + 2 + keyw + 3 + tag_width(tag));
 
+        // a contents row draws its own text: a snippet with the match lit
+        // is not a name and a description
+        if let Some(line) = &row.line {
+            let line = line.clone().patch_style(row_bg);
+            f.render_widget(Paragraph::new(line).style(row_bg), area);
+            app.palette_rows.push((area, item.clone()));
+            continue;
+        }
         let mut spans = vec![
             Span::styled("  ", row_bg),
             Span::styled(padded, title),
@@ -850,9 +877,11 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     // that opened a note when clicked would be a bug, not a shortcut.
     if quick {
         let hint = if browse {
-            "←→ fold  ↵ open  tab: search"
+            "←→ fold  ↵ open  tab: contents"
+        } else if contents {
+            "↵ open at the line  tab: recent"
         } else {
-            "tab: browse"
+            "tab: tree"
         };
         f.render_widget(
             Paragraph::new(Span::styled(format!("  {hint}"), dim())),
@@ -867,6 +896,72 @@ struct PRow {
     name: String,
     detail: String,
     tag: &'static str,
+    /// A row drawn as given rather than as name + detail columns: the
+    /// contents tab, whose rows are snippets.
+    line: Option<Line<'static>>,
+}
+
+/// The three tabs of ^O, the one on screen in the accent.
+fn tab_strip(app: &App) -> Line<'static> {
+    let on = if app.browse {
+        1
+    } else if app.contents {
+        2
+    } else {
+        0
+    };
+    let mut spans = vec![Span::raw(" ")];
+    for (i, name) in ["recent", "tree", "contents"].into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", dim()));
+        }
+        let style = if i == on { theme::state() } else { dim() };
+        spans.push(Span::styled(name, style));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+/// The contents tab's rows: a dim header per note, then its lines, indented,
+/// with the match lit. Trimmed here because only the draw knows the width.
+fn contents_rows(app: &App, width: usize) -> Vec<PRow> {
+    use crate::contents::Row;
+    let words = crate::contents::words(&app.query);
+    let plain = |item: Item, line: Line<'static>| PRow {
+        item,
+        name: String::new(),
+        detail: String::new(),
+        tag: "",
+        line: Some(line),
+    };
+    app.contents_rows()
+        .into_iter()
+        .map(|r| match r {
+            Row::Note(entry) => {
+                let (name, folder) = app
+                    .open_index
+                    .get(entry)
+                    .map(|e| (e.name(), folder_or_root(e.folder.clone(), app)))
+                    .unwrap_or_default();
+                let text = truncate(&format!("  {name}  {folder}"), width);
+                plain(Item::Entry(entry), Line::from(Span::styled(text, dim())))
+            }
+            Row::Hit(h) => {
+                let mut spans = vec![Span::raw("    ")];
+                for (piece, lit) in
+                    crate::contents::snippet(&h.text, &words, width.saturating_sub(4))
+                {
+                    let style = if lit { theme::state() } else { Style::new() };
+                    spans.push(Span::styled(piece, style));
+                }
+                plain(Item::Line(h.entry, h.line), Line::from(spans))
+            }
+            Row::More(n) => plain(
+                Item::Notice,
+                Line::from(Span::styled(format!("  …and {n} more"), dim())),
+            ),
+        })
+        .collect()
 }
 
 /// The rows to draw, from whichever list the overlay is showing. Browse mode
@@ -874,7 +969,10 @@ struct PRow {
 /// one item looked up in isolation: its indent, its fold marker and its note
 /// count all come from where it sits in the tree, and the tree is walked once
 /// here rather than once per row.
-fn palette_rows(app: &App) -> Vec<PRow> {
+fn palette_rows(app: &App, width: usize) -> Vec<PRow> {
+    if app.overlay == Overlay::QuickOpen && app.contents {
+        return contents_rows(app, width);
+    }
     if app.overlay == Overlay::QuickOpen && app.browse {
         let now = SystemTime::now();
         return app
@@ -902,6 +1000,7 @@ fn palette_rows(app: &App) -> Vec<PRow> {
                     },
                     tag: "",
                     item: Item::Folder(key),
+                    line: None,
                 },
                 RowKind::Note {
                     entry,
@@ -914,6 +1013,7 @@ fn palette_rows(app: &App) -> Vec<PRow> {
                     detail: crate::index::age(modified, now),
                     tag: "",
                     item: Item::Entry(entry),
+                    line: None,
                 },
             })
             .collect();
@@ -927,6 +1027,7 @@ fn palette_rows(app: &App) -> Vec<PRow> {
                 name,
                 detail,
                 tag,
+                line: None,
             }
         })
         .collect()
@@ -956,7 +1057,7 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
         },
         // a folder row writes its own text in `palette_rows`, where the tree
         // around it is still in hand; it never reaches here
-        Item::Folder(_) => (String::new(), String::new(), ""),
+        Item::Folder(_) | Item::Line(..) | Item::Notice => (String::new(), String::new(), ""),
         Item::MoveTo(dir) => {
             let notes = std::fs::read_dir(dir)
                 .map(|rd| {

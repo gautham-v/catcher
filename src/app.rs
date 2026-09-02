@@ -70,6 +70,7 @@ pub enum Overlay {
 pub enum Command {
     NewNote,
     QuickOpen,
+    SearchAll,
     DeleteNote,
     RenameFile,
     MoveFile,
@@ -79,9 +80,10 @@ pub enum Command {
     Quit,
 }
 
-const COMMANDS: [Command; 9] = [
+const COMMANDS: [Command; 10] = [
     Command::NewNote,
     Command::QuickOpen,
+    Command::SearchAll,
     Command::DeleteNote,
     Command::RenameFile,
     Command::MoveFile,
@@ -100,6 +102,7 @@ impl Command {
             Command::MoveFile => return None,
             Command::NewNote => Action::NewNote,
             Command::QuickOpen => Action::QuickOpen,
+            Command::SearchAll => Action::SearchAll,
             Command::DeleteNote => Action::DeleteNote,
             Command::RenameFile => Action::RenameFile,
             Command::TogglePreview => Action::TogglePreview,
@@ -113,6 +116,7 @@ impl Command {
         match self {
             Command::NewNote => ("New note", "an empty note, ready to type"),
             Command::QuickOpen => ("Open note", "any folder, recent first"),
+            Command::SearchAll => ("Search in all files", "type to search note contents"),
             Command::DeleteNote => ("Delete note", "delete the file on disk"),
             Command::RenameFile => ("Rename file", "change the name on disk"),
             Command::MoveFile => ("Move to folder", "another folder under this one"),
@@ -161,7 +165,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("type", "fuzzy-search titles and bodies"),
             ("↑ ↓", "move  ·  ⏎ open or run  ·  esc close"),
-            ("tab", "in ^O, swap the ranked list for the folder tree"),
+            ("tab", "in ^O, next tab: recent · tree · contents"),
             ("← →", "in the tree, fold and unfold a folder"),
         ],
     ),
@@ -190,6 +194,12 @@ pub enum Item {
     Folder(String),
     /// A folder the open note can be moved into, from the move picker.
     MoveTo(PathBuf),
+    /// One line of a note, from the contents tab: the entry and the line.
+    /// Choosing it opens the note there.
+    Line(usize, usize),
+    /// A row that is only there to be read — "…and N more". Choosing it
+    /// does nothing and the overlay stays.
+    Notice,
     Command(Command),
 }
 
@@ -247,6 +257,15 @@ pub struct App {
     index_rx: Option<std::sync::mpsc::Receiver<Vec<index::Entry>>>,
     /// True while ^O is showing the folder tree instead of the ranked list.
     pub browse: bool,
+    /// True while ^O is searching note contents instead. Never set together
+    /// with `browse`: the tabs are recent, tree, contents, one at a time.
+    pub contents: bool,
+    /// Every body the contents tab searches, one per `open_index` entry, read
+    /// once when the tab is entered so a keystroke never touches the disk.
+    contents_bodies: Vec<Option<String>>,
+    /// A source line the reading view should scroll to on its next draw. Only
+    /// the draw knows which page row a line lands on once wrapped.
+    pub preview_goto: Option<usize>,
     /// Which folders the tree has unfolded. Session only, and deliberately not
     /// in the settings note: which folders are open is where you are in a
     /// session, not something you configure. A `BTreeSet` rather than a hash
@@ -487,6 +506,9 @@ impl App {
             index_rx: None,
             browse: false,
             tree_open: BTreeSet::new(),
+            contents: false,
+            contents_bodies: Vec::new(),
+            preview_goto: None,
             overlay_rect: Rect::default(),
             hover: None,
             peek: None,
@@ -532,6 +554,7 @@ impl App {
         }
         self.preview_scroll = 0;
         self.preview_hscroll = 0;
+        self.preview_goto = None;
         self.preview_sel = None;
         self.sync_title();
     }
@@ -1228,10 +1251,53 @@ impl App {
         // before `enter_browse`, which reads the index it builds
         self.refresh_index();
         self.overlay = Overlay::QuickOpen;
+        self.contents = false;
         self.browse = self.config.quick_open_browse;
         if self.browse {
             self.enter_browse();
         }
+    }
+
+    /// ⇧^F: ^O, opened straight on the contents tab.
+    fn open_search_all(&mut self) {
+        self.open_quick_open();
+        self.browse = false;
+        self.enter_contents();
+    }
+
+    /// Entering the contents tab reads every body the index reaches, once.
+    /// A vault of a few thousand notes is a moment's work, and after it each
+    /// keystroke is string search over memory.
+    fn enter_contents(&mut self) {
+        self.contents = true;
+        self.selected = 0;
+        self.contents_bodies = self
+            .open_index
+            .iter()
+            .map(|e| crate::contents::body_of(&e.path))
+            .collect();
+    }
+
+    /// The contents rows for the current query: a header per note, its
+    /// matching lines under it, and a count of what the cap left out.
+    pub fn contents_rows(&self) -> Vec<crate::contents::Row> {
+        let (hits, more) = crate::contents::search(
+            &self.contents_bodies,
+            &self.query,
+            crate::contents::MAX_HITS,
+        );
+        crate::contents::rows(&hits, more)
+    }
+
+    /// Open the note `entry` names with line `line` in view: under the cursor
+    /// in the editor, at the top of the page in the reading view.
+    fn open_at_line(&mut self, entry: usize, line: usize) {
+        let Some(path) = self.open_index.get(entry).map(|e| e.path.clone()) else {
+            return;
+        };
+        self.open_path(&path);
+        self.editor.set_cursor((line, 0));
+        self.preview_goto = Some(line);
     }
 
     /// Quick-open rows for the current query. With no query this is simply the
@@ -1280,15 +1346,20 @@ impl App {
         crate::tree::rows(&self.open_index, &self.tree_open, &self.query)
     }
 
-    /// tab: the same overlay, the other way of looking at it. The query
-    /// survives the swap both ways — typing `log` and then wanting to see
-    /// *where* the log notes live is the whole reason to have this.
-    fn toggle_browse(&mut self) {
-        self.browse = !self.browse;
+    /// tab: the same overlay, the next way of looking at it — recent, tree,
+    /// contents, and round again. The query survives every swap: typing
+    /// `log` and then wanting to see *where* the log notes live, or which
+    /// notes *say* it, is the whole reason to have the tabs.
+    fn next_tab(&mut self) {
         if self.browse {
-            self.enter_browse();
-        } else {
+            self.browse = false;
+            self.enter_contents();
+        } else if self.contents {
+            self.contents = false;
             self.selected = 0;
+        } else {
+            self.browse = true;
+            self.enter_browse();
         }
     }
 
@@ -1373,6 +1444,16 @@ impl App {
                 .map(|r| match &r.kind {
                     crate::tree::RowKind::Folder { key, .. } => Item::Folder(key.clone()),
                     crate::tree::RowKind::Note { entry, .. } => Item::Entry(*entry),
+                })
+                .collect(),
+            Overlay::QuickOpen if self.contents => self
+                .contents_rows()
+                .into_iter()
+                .map(|r| match r {
+                    // a header opens the note at its top, like any note row
+                    crate::contents::Row::Note(entry) => Item::Entry(entry),
+                    crate::contents::Row::Hit(h) => Item::Line(h.entry, h.line),
+                    crate::contents::Row::More(_) => Item::Notice,
                 })
                 .collect(),
             Overlay::QuickOpen => self.open_items(),
@@ -1508,6 +1589,9 @@ impl App {
             self.toggle_folder(&key);
             return;
         }
+        if item == Item::Notice {
+            return;
+        }
         self.overlay = Overlay::None;
         match item {
             Item::Entry(i) => {
@@ -1516,10 +1600,12 @@ impl App {
                 }
             }
             Item::Path(path) => self.open_path(&path),
+            Item::Line(entry, line) => self.open_at_line(entry, line),
             // handled above, before the overlay was closed
-            Item::Folder(_) => {}
+            Item::Folder(_) | Item::Notice => {}
             Item::Command(Command::NewNote) => self.new_note(),
             Item::Command(Command::QuickOpen) => self.open_quick_open(),
+            Item::Command(Command::SearchAll) => self.open_search_all(),
             Item::Command(Command::TogglePreview) => self.toggle_preview(),
             Item::Command(Command::Shortcuts) => {
                 self.help_query.clear();
@@ -1618,6 +1704,7 @@ impl App {
         };
         self.preview_scroll = 0;
         self.preview_hscroll = 0;
+        self.preview_goto = None;
     }
 
     /// Pan the page sideways, clamped to what the last draw measured. A
@@ -1826,14 +1913,21 @@ impl App {
             Action::NavBack => self.nav_history(true),
             Action::NavForward => self.nav_history(false),
             Action::Peek => self.peek_at_cursor(),
+            Action::SearchAll => {
+                if self.overlay == Overlay::QuickOpen && self.contents {
+                    self.overlay = Overlay::None;
+                } else {
+                    self.open_search_all();
+                }
+            }
         }
     }
 
     fn on_palette_key(&mut self, key: KeyEvent) {
-        // tab flips ^O between the ranked list and the tree, both ways. The
-        // command palette has no second view of itself, so it never sees this.
+        // tab steps ^O through its tabs, round and round. The command
+        // palette has no second view of itself, so it never sees this.
         if key.code == KeyCode::Tab && self.overlay == Overlay::QuickOpen {
-            self.toggle_browse();
+            self.next_tab();
             return;
         }
         // the query is a one-line input, and the Mac editing keys have to work

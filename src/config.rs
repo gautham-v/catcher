@@ -1125,6 +1125,15 @@ mod tests {
     }
 
     #[test]
+    fn the_search_key_is_written_and_read_back() {
+        use crate::keys::Action;
+        let c = Config::default();
+        assert!(c.to_document().contains("- key_search: ctrl+⇧F"));
+        let back = Config::from_str("- key_search: f3\n");
+        assert_eq!(back.keys.label(Action::SearchAll), "F3");
+    }
+
+    #[test]
     fn flags_take_the_words_a_person_would_type() {
         assert!(!Config::from_str("- key_hints: no").key_hints);
         assert!(!Config::from_str("- key_hints: false").key_hints);

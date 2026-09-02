@@ -33,6 +33,7 @@ pub enum Action {
     NavBack,
     NavForward,
     Peek,
+    SearchAll,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -127,6 +128,16 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         // document is read back through `parse`, which keeps the letter's case
         Some("alt+P"),
         "peek at the [[wikilink]] under the cursor",
+    ),
+    // ⇧^F, so it sits beside ^F and ^O. A terminal without the kitty
+    // protocol sends ⇧^F as plain ^F, which is forward; there the palette
+    // is the way in.
+    (
+        Action::SearchAll,
+        "key_search",
+        // capital for the same reason as ⌥P: the label writes it as ⇧F
+        Some("ctrl+shift+F"),
+        "search in all files",
     ),
 ];
 
@@ -243,6 +254,12 @@ impl Binding {
         let cmd = m.contains(KeyModifiers::SUPER);
         let alt = m.contains(KeyModifiers::ALT);
         if !same_key(self.code, normalize(key.code, ctrl)) {
+            return false;
+        }
+        // a binding that asks for shift needs it; one that does not is
+        // indifferent, because a capital letter arrives with SHIFT set on
+        // some terminals and not on others
+        if self.shift && !m.contains(KeyModifiers::SHIFT) {
             return false;
         }
         if self.ctrl_or_cmd {
@@ -380,12 +397,24 @@ impl Keymap {
     }
 
     /// Which action `key` triggers, if any. First match wins, so a key bound
-    /// twice by hand runs the action listed first rather than both.
+    /// twice by hand runs the action listed first rather than both — except
+    /// that a binding spelled with shift beats one without when shift is
+    /// down, or ⇧^F could never be anything but ^F.
     pub fn action(&self, key: &KeyEvent) -> Option<Action> {
-        self.bound
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let hits = self
+            .bound
             .iter()
-            .find(|(_, bs)| bs.iter().any(|b| b.matches(key)))
-            .map(|(a, _)| *a)
+            .filter_map(|(a, bs)| bs.iter().find(|b| b.matches(key)).map(|b| (*a, b.shift)));
+        let mut best: Option<(Action, bool)> = None;
+        for hit in hits {
+            match best {
+                None => best = Some(hit),
+                Some((_, exact)) if shift && hit.1 && !exact => best = Some(hit),
+                _ => {}
+            }
+        }
+        best.map(|(a, _)| a)
     }
 
     /// Every key bound to `action`, first the one hints show.
@@ -662,6 +691,29 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn a_shifted_binding_wins_over_the_plain_one_and_needs_its_shift() {
+        let map = Keymap::default();
+        let shifted = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('f'), shifted)),
+            Some(Action::SearchAll)
+        );
+        // the kitty protocol reports the shifted letter as a capital
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('F'), shifted)),
+            Some(Action::SearchAll)
+        );
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            Some(Action::NavForward)
+        );
+        // the label reads back to the same key
+        let b = Binding::parse("ctrl+shift+F").unwrap();
+        assert_eq!(b.label(), "ctrl+⇧F");
+        assert_eq!(Binding::parse(&b.label()), Some(b));
     }
 
     #[test]
