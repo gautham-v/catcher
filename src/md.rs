@@ -60,13 +60,19 @@ pub mod theme {
         pub accent: Color,
         /// The brightest step — keys, group headings, anything that must lead.
         pub bright: Color,
-        /// Second-rank headings and other structure that should recede.
+        /// Structure that should recede: struck tasks, the status-bar path.
         pub grey: Color,
+        /// `##` headings. The complement of the accent, so the two top
+        /// levels can never be mistaken for one another.
+        pub heading: Color,
         /// Markers, rules, quotes: present but never read first.
         pub dim: Color,
         /// Links, which lean on the underline rather than the colour.
         pub link: Color,
-        /// Behind code, inline and fenced alike.
+        /// Inline code: a tint of the accent and no box, so a file name in a
+        /// sentence reads as a name rather than a patch on the page.
+        pub code: Color,
+        /// Behind a fenced code block.
         pub code_bg: Color,
         /// The text on that background. Code is the one construct that paints
         /// its own ground, so it is also the one that cannot leave its
@@ -88,9 +94,9 @@ pub mod theme {
     /// The colour field names the settings file accepts, in the order the
     /// settings document lists them. The single source of truth: a name that
     /// isn't here can't be set and isn't documented.
-    pub const COLOR_KEYS: [&str; 10] = [
-        "accent", "bright", "grey", "dim", "link", "code_bg", "code_fg", "border", "danger",
-        "ground",
+    pub const COLOR_KEYS: [&str; 12] = [
+        "accent", "bright", "grey", "heading", "dim", "link", "code", "code_bg", "code_fg",
+        "border", "danger", "ground",
     ];
 
     impl Palette {
@@ -101,8 +107,10 @@ pub mod theme {
                 "accent" => self.accent = color,
                 "bright" => self.bright = color,
                 "grey" => self.grey = color,
+                "heading" => self.heading = color,
                 "dim" => self.dim = color,
                 "link" => self.link = color,
+                "code" => self.code = color,
                 "code_bg" => self.code_bg = color,
                 "code_fg" => self.code_fg = color,
                 "border" => self.border = color,
@@ -118,8 +126,10 @@ pub mod theme {
                 "accent" => self.accent,
                 "bright" => self.bright,
                 "grey" => self.grey,
+                "heading" => self.heading,
                 "dim" => self.dim,
                 "link" => self.link,
+                "code" => self.code,
                 "code_bg" => self.code_bg,
                 "code_fg" => self.code_fg,
                 "border" => self.border,
@@ -134,8 +144,10 @@ pub mod theme {
         accent: Color::Rgb(0xff, 0x9e, 0x64),
         bright: Color::Rgb(0xe1, 0xe1, 0xe1),
         grey: Color::Rgb(0x78, 0x78, 0x78),
+        heading: Color::Rgb(0x8f, 0xb4, 0xd9),
         dim: Color::Rgb(0x82, 0x82, 0x82),
         link: Color::Rgb(0xb4, 0xb4, 0xb4),
+        code: Color::Rgb(0xd9, 0xa2, 0x7a),
         code_bg: Color::Rgb(0x1c, 0x1c, 0x1c),
         code_fg: Color::Rgb(0xe1, 0xe1, 0xe1),
         border: Color::Rgb(0x32, 0x32, 0x37),
@@ -147,8 +159,10 @@ pub mod theme {
         accent: Color::Rgb(0xb8, 0x5c, 0x18),
         bright: Color::Rgb(0x26, 0x26, 0x26),
         grey: Color::Rgb(0x55, 0x55, 0x55),
+        heading: Color::Rgb(0x3d, 0x6a, 0x99),
         dim: Color::Rgb(0x8d, 0x8d, 0x8d),
         link: Color::Rgb(0x5a, 0x58, 0x52),
+        code: Color::Rgb(0x8a, 0x4a, 0x14),
         code_bg: Color::Rgb(0xe2, 0xe2, 0xe2),
         code_fg: Color::Rgb(0x26, 0x26, 0x26),
         border: Color::Rgb(0xc8, 0xc8, 0xcd),
@@ -266,26 +280,15 @@ pub mod theme {
     /// idea of what plain prose looks like.
     pub const PLAIN: Style = Style::new();
 
-    /// Headings fall off into the ramp rather than each taking a hue: the
-    /// accent leads, then the second step, then weight alone.
+    /// Every heading level a terminal can tell apart without a change of
+    /// size: the accent leads, `##` takes its complement, `###` the bright
+    /// step, and anything deeper is weight alone.
     pub fn heading(level: usize) -> Style {
         match level {
             1 => Style::new().fg(palette().accent).add_modifier(bold()),
-            2 => Style::new().fg(second_step()).add_modifier(bold()),
+            2 => Style::new().fg(palette().heading).add_modifier(bold()),
+            3 => Style::new().fg(palette().bright).add_modifier(bold()),
             _ => Style::new().add_modifier(bold()),
-        }
-    }
-
-    /// The colour an `##` heading takes. On a light ground grey is darker
-    /// than the prose and reads as a heading; on a dark ground the same grey
-    /// is *dimmer* than the prose and read as an aside, so there the heading
-    /// takes the bright step instead. Decided from the ground actually in
-    /// force, so a custom palette gets the same treatment as the built-in.
-    fn second_step() -> Color {
-        let p = palette();
-        match p.ground {
-            Color::Rgb(r, g, b) if mode_of_background(r, g, b) == Mode::Dark => p.bright,
-            _ => p.grey,
         }
     }
 
@@ -302,8 +305,13 @@ pub mod theme {
     pub fn grey() -> Style {
         Style::new().fg(palette().grey)
     }
-    /// Code carries no hue of its own — the raised background is the signal.
-    /// It states its foreground anyway: see `code_fg`.
+    /// Inline code: tinted ink, no background. The box that a fence gets
+    /// nearly vanished at terminal contrast inside a sentence; a hue does not.
+    pub fn inline_code() -> Style {
+        Style::new().fg(palette().code)
+    }
+    /// A fenced block carries no hue of its own — the raised background is
+    /// the signal. It states its foreground anyway: see `code_fg`.
     pub fn code() -> Style {
         Style::new().fg(palette().code_fg).bg(palette().code_bg)
     }
@@ -994,7 +1002,7 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
     // `code`
     if c == '`' {
         let end = find(b.src, i + 1, '`')?;
-        return Some(delimited(b, i, i + 1, end, end + 1, theme::code()));
+        return Some(delimited(b, i, i + 1, end, end + 1, theme::inline_code()));
     }
 
     // [text](url) — show the text, hide the target
@@ -2137,11 +2145,15 @@ mod tests {
     }
 
     #[test]
-    fn a_second_level_heading_is_bright_on_dark_and_grey_on_light() {
-        theme::set_palette(theme::DARK);
-        assert_eq!(theme::heading(2).fg, Some(theme::DARK.bright));
-        theme::set_palette(theme::LIGHT);
-        assert_eq!(theme::heading(2).fg, Some(theme::LIGHT.grey));
+    fn each_of_the_first_three_heading_levels_takes_its_own_colour() {
+        for p in [theme::DARK, theme::LIGHT] {
+            theme::set_palette(p);
+            let fg: Vec<_> = (1..=4).map(|l| theme::heading(l).fg).collect();
+            assert_eq!(fg[..3], [Some(p.accent), Some(p.heading), Some(p.bright)]);
+            assert_eq!(fg[3], None);
+            assert_ne!(p.accent, p.heading);
+            assert_ne!(p.heading, p.bright);
+        }
         theme::set_palette(theme::DARK);
     }
 
@@ -2207,7 +2219,7 @@ mod tests {
         assert!(t.contains("foo"), "{t}");
         assert!(!t.contains('`'), "{t}");
         let f = head.cells.iter().find(|c| c.ch == 'f').unwrap();
-        assert_eq!(f.style.bg, theme::code().bg);
+        assert_eq!(f.style.fg, theme::inline_code().fg);
         // the code text maps back to its own source columns
         assert_eq!(f.src, rows[0].find('f').unwrap());
         let body = table_line(&rows, 2, 80);
@@ -2216,11 +2228,12 @@ mod tests {
         let x = body.cells.iter().find(|c| c.ch == 'x').unwrap();
         assert_eq!(x.style, theme::PLAIN);
         let b = body.cells.iter().find(|c| c.ch == 'b').unwrap();
-        assert_eq!(b.style.bg, theme::code().bg);
+        assert_eq!(b.style.fg, theme::inline_code().fg);
         // and the same construct outside a table still works
         let l = style_line("say `foo` now");
         assert_eq!(text(&l), "say foo now");
-        assert_eq!(l.cells[4].style.bg, theme::code().bg);
+        assert_eq!(l.cells[4].style.fg, theme::inline_code().fg);
+        assert_eq!(l.cells[4].style.bg, None);
     }
 
     #[test]
