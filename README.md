@@ -27,7 +27,7 @@ or `cargo install catcher`. Then run `catcher`.
 - `#tags` are coloured, inline or as front matter `tags:`. **⌥⏎** or a click on one opens **^O** cut to the notes that carry it.
 - A ` ```mermaid ` fence is drawn as text: flowcharts and sequence diagrams, in box-drawing characters, no images and no network. Other kinds keep their source under a label.
 - Callouts, front matter, tables wider than the page (they pan sideways), checkboxes and `==highlights==` all render.
-- Sections fold. On a heading, **⌥←** folds everything under it down to the next heading of the same or a higher level, **⌥→** opens it again; a folded heading shows `▸` and how many lines it hides. Folds are per note and last for the session; the reading view ignores them.
+- Sections fold. On a heading, **⌥←** folds everything under it down to the next heading of the same or a higher level, **⌥→** opens it again; a folded heading shows `▸` and how many lines it hides. Folds are per note and last for the session, and the reading view keeps them: a click on a heading there folds or unfolds it, and **⌥←** / **⌥→** take the heading the selection is on, or the first one on screen.
 - Notes autosave. Edit a note in another program and catcher takes what is on disk: the buffer reloads, the cursor stays on its line, and **^Z** brings the old buffer back. A file deleted from under it is said so in the status bar and recreated on the next save.
 - Mouse works: click, drag to select and copy, scroll. **^V** pastes a clipboard image as a PNG.
 

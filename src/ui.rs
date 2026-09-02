@@ -270,6 +270,9 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
         .map_or((0, 0), |r| (r.end, content[..r.end].lines().count()));
     let mut rendered =
         crate::render::render_page_at(&content[skip..], first, width, app.config.table_style);
+    // the same folds the editor has: one set per note, whichever view made them
+    let folded = app.folded_lines();
+    crate::render::apply_folds(&mut rendered, &app.visible, &folded, width);
     // the footer arrives a frame or two late by design: the scan behind it
     // reads every note body under the roots, and a page that waited for that
     // would be a page that stuttered on every open

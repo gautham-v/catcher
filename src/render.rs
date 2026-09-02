@@ -228,6 +228,83 @@ const MAX_NAME_COLS: usize = 28;
 /// An excerpt styled the way the editor would style it — bold as bold, a
 /// wikilink as its label — and cut to `room` columns around the link at
 /// `link` (a char span in `excerpt`), so the link itself is always on screen.
+/// Take the folded sections out of a rendered page, before the footer goes
+/// on: every row drawn from a hidden line goes, a folded heading gets the
+/// `▸ ` marker in front and how many lines it hides at the right edge, the
+/// way the editor draws one, and the blank rows either side of a section
+/// that is gone collapse to one, so two headings end up spaced the way they
+/// would be with nothing between them.
+///
+/// Rows are dropped rather than the source cut: the renderer never sees a
+/// section boundary that is not there, and every line number the page keeps
+/// still counts from the top of the file.
+pub fn apply_folds(
+    r: &mut Rendered,
+    visible: &crate::fold::Visible,
+    folded: &[usize],
+    width: usize,
+) {
+    if visible.is_plain() {
+        return;
+    }
+    let lines = std::mem::take(&mut r.lines);
+    let mut out: Vec<PLine> = Vec::with_capacity(lines.len());
+    for mut line in lines {
+        match line.src_line {
+            Some(l) if visible.is_hidden(l) => continue,
+            Some(l) if folded.contains(&l) && !line.cells.is_empty() => {
+                // the marker only on the heading's first row: a heading that
+                // wrapped carries its line number on every row it took
+                let first = out.last().is_none_or(|p| p.src_line != Some(l));
+                if first {
+                    mark_folded(&mut line, l, visible.hidden_under(l), width);
+                }
+            }
+            // a spacer next to one the section took with it
+            None if line.cells.is_empty() && out.last().is_some_and(|p| p.cells.is_empty()) => {
+                continue
+            }
+            _ => {}
+        }
+        out.push(line);
+    }
+    // a section folded at the very end leaves the spacer that stood before it
+    while out.last().is_some_and(|l| l.cells.is_empty()) {
+        out.pop();
+    }
+    r.lines = out;
+}
+
+/// The `▸ ` in front of a folded heading, standing for source column 0 the
+/// way it does in the editor, and the count at the right edge when the row
+/// has room for it and a gap besides.
+fn mark_folded(line: &mut PLine, src: usize, hidden: usize, width: usize) {
+    let marker: Vec<PCell> = theme::FOLDED
+        .chars()
+        .map(|ch| PCell {
+            ch,
+            style: theme::fold(),
+            link: None,
+            src: Some((src, 0)),
+        })
+        .collect();
+    line.cells.splice(0..0, marker);
+    let label = match hidden {
+        1 => "1 line folded".to_string(),
+        n => format!("{n} lines folded"),
+    };
+    let used = cells_width(&line.cells);
+    let need = crate::md::str_width(&label) + 2;
+    if width == usize::MAX || used + need > width {
+        return;
+    }
+    line.cells.extend(str_cells(
+        &" ".repeat(width - used - need + 2),
+        theme::PLAIN,
+    ));
+    line.cells.extend(str_cells(&label, theme::marker()));
+}
+
 /// The cells carry no link and no source position: the footer is not the
 /// note, and a click on an excerpt has nowhere in the note to go.
 fn excerpt_cells(excerpt: &str, link: (usize, usize), base: Style, room: usize) -> Vec<PCell> {
@@ -2215,6 +2292,81 @@ mod tests {
             .iter()
             .filter(|c| c.link.is_some())
             .all(|c| "meta".contains(c.ch)));
+    }
+
+    fn folded(md: &str, heads: &[usize], width: usize) -> Rendered {
+        let lines: Vec<String> = md.lines().map(String::from).collect();
+        let blocks = crate::md::blocks(&lines);
+        let visible = crate::fold::Visible::new(&lines, &blocks, heads);
+        let mut r = render_wide(md, width);
+        apply_folds(&mut r, &visible, heads, width);
+        r
+    }
+
+    fn texts(r: &Rendered) -> Vec<String> {
+        r.lines.iter().map(PLine::text).collect()
+    }
+
+    #[test]
+    fn a_folded_section_loses_its_rows_and_the_heading_says_how_many() {
+        let md = "# Title\nintro\n## One\na\nb\n## Two\nc\n";
+        let r = folded(md, &[2], 40);
+        let t = texts(&r);
+        assert!(t.iter().all(|l| l != "a" && l != "b"), "{t:?}");
+        let head = r.lines.iter().find(|l| l.src_line == Some(2)).unwrap();
+        let text = head.text();
+        assert!(text.starts_with("▸ One"), "{text:?}");
+        assert!(text.ends_with("2 lines folded"), "{text:?}");
+        assert_eq!(cells_width(&head.cells), 40);
+        // the marker stands for the first `#`, the way it does in the editor
+        assert_eq!(head.cells[0].src, Some((2, 0)));
+        assert_eq!(head.cells[0].style, theme::fold());
+        // Two follows One after one blank row, not the two either side of
+        // the section that went
+        let one = r.lines.iter().position(|l| l.src_line == Some(2)).unwrap();
+        assert!(r.lines[one + 1].cells.is_empty());
+        assert_eq!(r.lines[one + 2].src_line, Some(5));
+        assert!(!r.lines[one + 2].text().starts_with('▸'));
+        // the plain page is what it was
+        let plain = folded(md, &[], 40);
+        assert_eq!(texts(&plain), texts(&render_wide(md, 40)));
+    }
+
+    #[test]
+    fn a_fold_at_the_end_of_the_page_leaves_no_blank_behind() {
+        let md = "# Title\n## Last\nx\ny\n";
+        let r = folded(md, &[1], 40);
+        assert!(!r.lines.last().unwrap().cells.is_empty());
+        assert_eq!(r.lines.last().unwrap().src_line, Some(1));
+        // one hidden line reads in the singular, and a page too narrow for
+        // the count keeps the heading text and the marker
+        assert!(folded("# T\n## L\nx\n", &[1], 40).lines[2]
+            .text()
+            .ends_with("1 line folded"));
+        let tight = folded("# T\n## Last\nx\n", &[1], 12);
+        assert_eq!(tight.lines[2].text(), "▸ Last");
+    }
+
+    #[test]
+    fn everything_a_section_holds_goes_with_it() {
+        let md = "# T\n## One\n- [ ] task\n```rust\nlet x = 1;\n```\n| a | b |\n| - | - |\n| 1 | 2 |\n> quoted\n![pic](p.png)\n```mermaid\ngraph LR\nA-->B\n```\n## Two\nend\n";
+        let r = folded(md, &[1], 40);
+        for l in &r.lines {
+            assert!(
+                l.src_line.is_none_or(|s| s == 0 || s == 1 || s >= 15),
+                "row from a hidden line: {:?} {:?}",
+                l.src_line,
+                l.text()
+            );
+        }
+        let all = texts(&r).join("\n");
+        for gone in ["task", "let x", "│", "quoted", "pic", "A", "-->"] {
+            assert!(!all.contains(gone), "{gone:?} in {all:?}");
+        }
+        assert!(all.contains("end"));
+        assert!(r.lines.iter().all(|l| l.image.is_none()));
+        // the checkbox under the fold is not there to click
+        assert!(r.lines.iter().all(|l| l.checkbox.is_none()));
     }
 
     #[test]

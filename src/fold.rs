@@ -390,6 +390,22 @@ mod tests {
     }
 
     #[test]
+    fn a_hidden_run_stops_at_the_next_folded_heading() {
+        // One and Two folded back to back: each hides its own lines, and
+        // Two's heading is on screen between them, so a count on One does
+        // not swallow Two's section
+        let (l, b) = note();
+        let v = Visible::new(&l, &b, &[2, 7]);
+        assert_eq!(v.hidden_under(2), 4);
+        assert!(!v.is_hidden(7));
+        assert_eq!(v.hidden_under(7), 1);
+        assert_eq!(v.rows(), 4);
+        // a heading that is not folded hides nothing, folded or not around it
+        assert_eq!(v.hidden_under(0), 0);
+        assert_eq!(v.hidden_under(99), 0);
+    }
+
+    #[test]
     fn fold_all_takes_every_heading_that_has_a_section() {
         let (l, b) = note();
         let mut f = Folds::default();
