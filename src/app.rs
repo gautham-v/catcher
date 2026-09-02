@@ -1530,7 +1530,16 @@ impl App {
             return;
         };
         self.open_path(&path);
+        // an open that failed flashed and left the old note up, and its
+        // cursor must not go to a line number that belongs to another file
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        if canon(&self.active_note().path) != canon(&path) {
+            return;
+        }
         self.editor.set_cursor((line, 0));
+        // a hit inside a folded section is one you asked to see: the fold
+        // opens, the way it does for a line you have just typed on
+        self.reveal_cursor();
         self.preview_goto = Some(line);
     }
 
