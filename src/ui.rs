@@ -1041,11 +1041,11 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     // that opened a note when clicked would be a bug, not a shortcut.
     if quick {
         let hint = if browse {
-            "←→ fold  ↵ open  tab: contents"
+            "←→ fold  ↵ open  ⌥↵ split  tab: contents"
         } else if contents {
-            "↵ open at the line  tab: recent"
+            "↵ open at the line  ⌥↵ split  tab: recent"
         } else {
-            "tab: tree"
+            "↵ open  ⌥↵ split  ⌘↵ tab  tab: tree"
         };
         f.render_widget(
             Paragraph::new(Span::styled(format!("  {hint}"), dim())),

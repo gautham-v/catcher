@@ -21,6 +21,7 @@ or `cargo install catcher`. Then run `catcher`.
 - **^K** is the command palette: new, open, delete, rename, move to folder, reading view, help, settings, quit.
 - **^O** opens a note: every folder, most recently opened first, fuzzy-searched by filename. **Tab** steps through its tabs: recent, a folder tree, and contents.
 - **⇧^F** searches in all files: every line that has every word you type, grouped by note. **⏎** opens the note at that line.
+- **⌥⏎** on a row in **^O** or **⇧^F** opens that note in a terminal split to the right and leaves this one where it is; **⌥⇧⏎** splits below, **⌘⏎** opens a tab, and **⌥click** does the same as **⌥⏎**. The palette has *open in split right / down / new tab* for the note you are in. Catcher asks the terminal: Ghostty 1.3+ (through AppleScript; macOS asks once whether catcher may control it), tmux, kitty and WezTerm. Elsewhere the status bar says so.
 - **^N** makes a note. The filename follows its first line until you rename the file yourself. Either way, `[[links]]` to the old name in other notes are rewritten to the new one.
 - **⌥D** opens today's note, `journal/2026-09-01.md`, made from `journal/template.md` the first time (`{{title}}`, `{{date}}`, `{{yesterday}}`, `{{tomorrow}}`) and never rewritten after.
 - The palette also has editing commands, unbound until you give them a key: toggle checkbox (`- item` → `- [ ]` → `- [x]` → `- item`, numbered lists too), move line up / down, toggle heading (`#`, `##`, `###`, none), insert today's date, copy path, reveal in Finder. Each takes the selection when there is one, and undoes as one step.
@@ -41,6 +42,8 @@ catcher groceries        open the note that best matches; create it if none does
 catcher today            open today's note in `journal/`, creating it from the template
 catcher add "buy milk"   write a new note and print its path
 catcher ~/vault          open the TUI rooted at that folder
+catcher --root ~/vault ~/vault/a.md
+                         open that note, rooted there: what a split runs
 catcher path             print the notes directory
 catcher --keys           show what your terminal sends for each key
 ```
@@ -65,7 +68,7 @@ catcher --keys           show what your terminal sends for each key
 | `^,` | Settings |
 | `^Q` | Quit |
 
-Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, `⇧` to extend a selection, `⌘A` select all. Every key is rebindable in the settings; `^K` answers to ctrl or cmd. `⇧^F` needs a terminal that tells shift+ctrl apart (Ghostty, kitty, WezTerm); elsewhere it arrives as `^F` and the palette is the way in. The editing commands ship with no key: `key_checkbox`, `key_line_up`, `key_line_down`, `key_heading`, `key_date`, `key_copy_path`, `key_reveal` bind them.
+Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, `⇧` to extend a selection, `⌘A` select all. Every key is rebindable in the settings; `^K` answers to ctrl or cmd. `⇧^F` needs a terminal that tells shift+ctrl apart (Ghostty, kitty, WezTerm); elsewhere it arrives as `^F` and the palette is the way in. The editing commands ship with no key: `key_checkbox`, `key_line_up`, `key_line_down`, `key_heading`, `key_date`, `key_copy_path`, `key_reveal` bind them, and `key_split_right`, `key_split_down`, `key_new_tab` the open-beside ones.
 
 ## Settings
 

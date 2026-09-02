@@ -5,6 +5,8 @@
 //! catcher <name>          fuzzy-open a note by title, or create it
 //! catcher <file>.md       open the TUI on that file, rooted at its parent
 //! catcher <dir>           open the TUI rooted at that directory
+//! catcher --root <dir> <file>
+//!                         open <file>, rooted at <dir>: what a split runs
 //! catcher today           open today's daily note, creating it if missing
 //! catcher add "text"      capture a note without the TUI (stdin if no text)
 //! catcher path            print the resolved notes dir
@@ -20,6 +22,8 @@ usage:
   catcher <name>          open the note whose title best matches, else create it
   catcher <file>.md       open that file, rooted at its parent directory
   catcher <dir>           open the TUI rooted at that directory
+  catcher --root <dir> <file>
+                          open that file with the session rooted at <dir>
   catcher today           open today's daily note, creating it if missing
   catcher add [text]      write a new note from text (or stdin) and print its path
   catcher path            print the notes directory
@@ -46,6 +50,10 @@ pub enum Launch {
     File(PathBuf),
     /// This directory, as a per-invocation notes dir.
     Dir(PathBuf),
+    /// This file, in a session rooted at this directory: what one catcher
+    /// hands another when it opens a note in a new split or tab, so the
+    /// second one sees the same vault as the first.
+    In { root: PathBuf, file: PathBuf },
     /// Today's daily note, made if missing.
     Today,
 }
@@ -76,6 +84,15 @@ pub fn parse(args: &[String], probe: impl Fn(&str) -> PathKind) -> Cli {
         "path" if args.len() == 1 => return Cli::PrintPath,
         "today" if args.len() == 1 => return Cli::Tui(Launch::Today),
         "--keys" => return Cli::Keys,
+        "--root" => {
+            return match args {
+                [_, root, file] => Cli::Tui(Launch::In {
+                    root: PathBuf::from(root),
+                    file: PathBuf::from(file),
+                }),
+                _ => Cli::Error("--root takes a directory and a file".to_string()),
+            };
+        }
         "add" => {
             let rest = args[1..].join(" ");
             let rest = rest.trim();
@@ -134,6 +151,18 @@ mod tests {
         assert_eq!(parse(&args(&["--help"]), nothing), Cli::Help);
         assert_eq!(parse(&args(&["-h"]), nothing), Cli::Help);
         assert!(matches!(parse(&args(&["--wat"]), nothing), Cli::Error(_)));
+    }
+
+    #[test]
+    fn root_takes_a_directory_and_a_file() {
+        assert_eq!(
+            parse(&args(&["--root", "/v", "/v/a/b.md"]), nothing),
+            Cli::Tui(Launch::In {
+                root: "/v".into(),
+                file: "/v/a/b.md".into()
+            })
+        );
+        assert!(matches!(parse(&args(&["--root", "/v"]), nothing), Cli::Error(_)));
     }
 
     #[test]

@@ -1289,6 +1289,9 @@ mod tests {
             "key_date",
             "key_copy_path",
             "key_reveal",
+            "key_split_right",
+            "key_split_down",
+            "key_new_tab",
         ] {
             assert!(doc.contains(&format!("- {key}: none")), "{key}");
         }

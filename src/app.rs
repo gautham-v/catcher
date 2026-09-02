@@ -91,9 +91,12 @@ pub enum Command {
     InsertDate,
     CopyPath,
     RevealFile,
+    SplitRight,
+    SplitDown,
+    NewTab,
 }
 
-const COMMANDS: [Command; 22] = [
+const COMMANDS: [Command; 25] = [
     Command::NewNote,
     Command::DailyNote,
     Command::QuickOpen,
@@ -116,6 +119,9 @@ const COMMANDS: [Command; 22] = [
     Command::InsertDate,
     Command::CopyPath,
     Command::RevealFile,
+    Command::SplitRight,
+    Command::SplitDown,
+    Command::NewTab,
 ];
 
 impl Command {
@@ -146,6 +152,9 @@ impl Command {
             Command::InsertDate => Action::InsertDate,
             Command::CopyPath => Action::CopyPath,
             Command::RevealFile => Action::RevealFile,
+            Command::SplitRight => Action::OpenSplitRight,
+            Command::SplitDown => Action::OpenSplitDown,
+            Command::NewTab => Action::OpenTab,
         })
     }
 
@@ -173,6 +182,9 @@ impl Command {
             Command::InsertDate => ("Insert today's date", "2026-09-01, at the cursor"),
             Command::CopyPath => ("Copy path", "the note's path, to the clipboard"),
             Command::RevealFile => ("Reveal in Finder", "show the file on disk"),
+            Command::SplitRight => ("Open in split right", "this note again, beside this one"),
+            Command::SplitDown => ("Open in split down", "this note again, below this one"),
+            Command::NewTab => ("Open in new tab", "this note again, in a terminal tab"),
         }
     }
 }
@@ -216,6 +228,10 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("↑ ↓", "move  ·  ⏎ open or run  ·  esc close"),
             ("tab", "in ^O, next tab: recent · tree · contents"),
             ("← →", "in the tree, fold and unfold a folder"),
+            (
+                "⌥⏎  ⌥⇧⏎  ⌘⏎",
+                "open the note in a split right / below / a new tab (⌥click too)",
+            ),
         ],
     ),
     (
@@ -504,6 +520,11 @@ impl App {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("."));
                 (parent, Some(Want::Path(f)))
+            }
+            Launch::In { root, file } => {
+                let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+                let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.clone());
+                (root, Some(Want::Path(file)))
             }
         };
         let foreign_root = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())
@@ -2163,6 +2184,12 @@ impl App {
             self.redo();
             return;
         }
+        // ⏎ with a modifier on a ^O row opens the note beside this one; it
+        // must get there before the keymap, where ⌥⏎ is follow-link
+        if self.overlay == Overlay::QuickOpen && key.code == KeyCode::Enter {
+            self.on_palette_key(key);
+            return;
+        }
         // whatever the settings say this key does, if anything. The fold keys
         // are the word-motion arrows, and only a heading line takes them:
         // anywhere else the editor gets the key and moves by word, as before
@@ -2346,6 +2373,9 @@ impl App {
             }
             Action::CopyPath => self.copy_path(),
             Action::RevealFile => self.reveal_file(),
+            Action::OpenSplitRight => self.open_beside(crate::terminal::Place::SplitRight, None),
+            Action::OpenSplitDown => self.open_beside(crate::terminal::Place::SplitDown, None),
+            Action::OpenTab => self.open_beside(crate::terminal::Place::Tab, None),
             Action::FoldSection => self.fold_section(),
             Action::UnfoldSection => self.unfold_section(),
             Action::FoldAll => self.fold_all(),
@@ -2444,10 +2474,58 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(item) = self.overlay_items().get(self.selected).cloned() {
-                    self.run_item(item);
+                    match beside_place(key.modifiers) {
+                        Some(place) if self.overlay == Overlay::QuickOpen => {
+                            self.run_item_beside(item, place)
+                        }
+                        _ => self.run_item(item),
+                    }
                 }
             }
             _ => {}
+        }
+    }
+
+    /// ⌥⏎ / ⌥⇧⏎ / ⌘⏎ (or ⌥click) on a ^O row: the note opens in a new split
+    /// or tab and this one stays where it is. A folder row folds as it would
+    /// on a plain ⏎, since there is nothing to open.
+    fn run_item_beside(&mut self, item: Item, place: crate::terminal::Place) {
+        let path = match &item {
+            Item::Entry(i) | Item::Line(i, _) => self.open_index.get(*i).map(|e| e.path.clone()),
+            Item::Path(p) => Some(p.clone()),
+            _ => return self.run_item(item),
+        };
+        if let Some(path) = path {
+            self.overlay = Overlay::None;
+            self.open_beside(place, Some(path));
+        }
+    }
+
+    /// Ask the terminal for a new split or tab running catcher on `path`
+    /// (this note, if none), rooted where this session is, so ^O there sees
+    /// the same vault. The new surface takes focus, as the terminal's own
+    /// split would.
+    fn open_beside(&mut self, place: crate::terminal::Place, path: Option<PathBuf>) {
+        self.overlay = Overlay::None;
+        self.save_now();
+        let path = path.unwrap_or_else(|| self.active_note().path.clone());
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("catcher"));
+        let argv = vec![
+            exe.to_string_lossy().into_owned(),
+            "--root".to_string(),
+            self.dir.to_string_lossy().into_owned(),
+            path.to_string_lossy().into_owned(),
+        ];
+        match crate::terminal::open_beside(place, &argv) {
+            Ok(()) => {
+                let what = match place {
+                    crate::terminal::Place::Tab => "tab",
+                    _ => "split",
+                };
+                let term = crate::terminal::backend().unwrap_or("terminal");
+                self.flash(format!("{what} → {term}"));
+            }
+            Err(e) => self.flash(e),
         }
     }
 
@@ -3047,7 +3125,12 @@ impl App {
                         .find(|(r, _)| r.contains(ratatui::layout::Position { x, y }))
                         .cloned()
                     {
-                        self.run_item(item);
+                        match beside_place(ev.modifiers) {
+                            Some(place) if self.overlay == Overlay::QuickOpen => {
+                                self.run_item_beside(item, place)
+                            }
+                            _ => self.run_item(item),
+                        }
                     } else if !self
                         .overlay_rect
                         .contains(ratatui::layout::Position { x, y })
@@ -3404,6 +3487,21 @@ fn screen_to_cell(area: Rect, scroll: usize, x: u16, y: u16) -> (usize, usize) {
         scroll + y.saturating_sub(area.y) as usize,
         x.saturating_sub(area.x) as usize,
     )
+}
+
+/// Which way ⌥ / ⌥⇧ / ⌘ send a picker row: a split right, a split below,
+/// a new tab. `None` is a plain open, in place.
+fn beside_place(m: KeyModifiers) -> Option<crate::terminal::Place> {
+    use crate::terminal::Place;
+    if m.contains(KeyModifiers::SUPER) {
+        Some(Place::Tab)
+    } else if m.contains(KeyModifiers::ALT) && m.contains(KeyModifiers::SHIFT) {
+        Some(Place::SplitDown)
+    } else if m.contains(KeyModifiers::ALT) {
+        Some(Place::SplitRight)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

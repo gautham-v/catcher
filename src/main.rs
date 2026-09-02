@@ -19,6 +19,7 @@ mod mermaid;
 mod notes;
 mod render;
 mod search;
+mod terminal;
 mod tree;
 mod ui;
 

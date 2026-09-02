@@ -42,6 +42,9 @@ pub enum Action {
     InsertDate,
     CopyPath,
     RevealFile,
+    OpenSplitRight,
+    OpenSplitDown,
+    OpenTab,
     FoldSection,
     UnfoldSection,
     FoldAll,
@@ -202,6 +205,26 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_reveal",
         None,
         "show the file in Finder (or the file manager)",
+    ),
+    // this note again, beside this one: the terminal does the splitting
+    // (Ghostty, tmux, kitty, WezTerm), catcher only asks
+    (
+        Action::OpenSplitRight,
+        "key_split_right",
+        None,
+        "open this note again in a split to the right",
+    ),
+    (
+        Action::OpenSplitDown,
+        "key_split_down",
+        None,
+        "open this note again in a split below",
+    ),
+    (
+        Action::OpenTab,
+        "key_new_tab",
+        None,
+        "open this note again in a new terminal tab",
     ),
     // the word-motion arrows, but only while the cursor is on a heading: the
     // app checks the line before it runs these, and anywhere else the key
