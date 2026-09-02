@@ -222,7 +222,9 @@ pub fn settings_path() -> Result<PathBuf> {
 }
 
 pub fn config_dir() -> Result<PathBuf> {
-    let config = dirs::home_dir().context("no home directory")?.join(".config");
+    let config = dirs::home_dir()
+        .context("no home directory")?
+        .join(".config");
     let new = config.join("catcher");
     let old = config.join("tinynote");
     // The app was called tinynote until 0.9. A settings folder left behind
@@ -479,7 +481,11 @@ impl Config {
         d.row("bold_headings", yn(self.bold_headings), "yes · no");
         d.row("status_bar", yn(self.status_bar), "the bottom line at all");
         d.row("key_hints", yn(self.key_hints), "the shortcuts in it");
-        d.row("window_title", yn(self.window_title), "the terminal title follows the note");
+        d.row(
+            "window_title",
+            yn(self.window_title),
+            "the terminal title follows the note",
+        );
         d.row(
             "status_bar_items",
             self.status_bar_items

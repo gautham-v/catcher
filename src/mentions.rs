@@ -153,7 +153,10 @@ pub fn excerpt(line: &str, at: usize, end: usize) -> (String, (usize, usize)) {
     let mut end = end.min(chars.len());
     // a table row: keep only the cell the link is in
     if line.trim_start().starts_with('|') {
-        let prev = chars[..at].iter().rposition(|c| *c == '|').map_or(0, |p| p + 1);
+        let prev = chars[..at]
+            .iter()
+            .rposition(|c| *c == '|')
+            .map_or(0, |p| p + 1);
         let next = chars[end..]
             .iter()
             .position(|c| *c == '|')
@@ -525,7 +528,11 @@ mod tests {
 
     /// The note on screen, as the app would describe it to a scan.
     fn target(dir: &Path, rel: &str, title: &str) -> Entry {
-        target_entry(&dir.join(rel), title, std::slice::from_ref(&dir.to_path_buf()))
+        target_entry(
+            &dir.join(rel),
+            title,
+            std::slice::from_ref(&dir.to_path_buf()),
+        )
     }
 
     fn names(of: &[&str]) -> Vec<String> {
@@ -546,7 +553,10 @@ mod tests {
     #[test]
     fn an_aliased_link_counts_against_the_note_it_points_at_not_the_alias() {
         let body = "pulled from [[stories/story-matrix|the matrix]]\n";
-        assert_eq!(mentions_in(body, &names(&["stories/story-matrix"])).len(), 1);
+        assert_eq!(
+            mentions_in(body, &names(&["stories/story-matrix"])).len(),
+            1
+        );
         // the label is what is drawn, never what is named
         assert!(mentions_in(body, &names(&["the matrix"])).is_empty());
     }
@@ -691,7 +701,11 @@ mod tests {
         write(&dir, "spec.md", &format!("# Spec\n{filler}"));
         write(&dir, "deep/spec.md", "# Spec\n");
         write(&dir, "other.md", "# Other\nsee [[spec]].\n");
-        assert!(scan(&target(&dir, "deep/spec.md", "Spec"), std::slice::from_ref(&dir)).is_empty());
+        assert!(scan(
+            &target(&dir, "deep/spec.md", "Spec"),
+            std::slice::from_ref(&dir)
+        )
+        .is_empty());
         // and the note the link does open still gets its row
         let rows = scan(&target(&dir, "spec.md", "Spec"), std::slice::from_ref(&dir));
         assert_eq!(rows.len(), 1);
@@ -729,7 +743,10 @@ mod tests {
         let near = scan(&target(&dir, "spec.md", "Spec"), std::slice::from_ref(&dir));
         assert_eq!(near.len(), 1);
         assert_eq!(near[0].name, "other");
-        let far = scan(&target(&dir, "deep/spec.md", "Spec"), std::slice::from_ref(&dir));
+        let far = scan(
+            &target(&dir, "deep/spec.md", "Spec"),
+            std::slice::from_ref(&dir),
+        );
         assert!(far.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }

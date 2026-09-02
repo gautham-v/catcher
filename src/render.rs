@@ -230,12 +230,7 @@ const MAX_NAME_COLS: usize = 28;
 /// `link` (a char span in `excerpt`), so the link itself is always on screen.
 /// The cells carry no link and no source position: the footer is not the
 /// note, and a click on an excerpt has nowhere in the note to go.
-fn excerpt_cells(
-    excerpt: &str,
-    link: (usize, usize),
-    base: Style,
-    room: usize,
-) -> Vec<PCell> {
+fn excerpt_cells(excerpt: &str, link: (usize, usize), base: Style, room: usize) -> Vec<PCell> {
     let cells: Vec<PCell> = crate::md::style_inline(excerpt)
         .into_iter()
         .map(|c| PCell {
@@ -249,8 +244,12 @@ fn excerpt_cells(
         return strip_src(cells);
     }
     // where the link landed once the brackets were hidden
-    let first = cells.iter().position(|c| c.src.is_some_and(|s| s.1 >= link.0));
-    let last = cells.iter().rposition(|c| c.src.is_some_and(|s| s.1 < link.1));
+    let first = cells
+        .iter()
+        .position(|c| c.src.is_some_and(|s| s.1 >= link.0));
+    let last = cells
+        .iter()
+        .rposition(|c| c.src.is_some_and(|s| s.1 < link.1));
     let (Some(first), Some(last)) = (first, last) else {
         return strip_src(truncate_cells(&cells, room));
     };
@@ -527,7 +526,10 @@ impl Ren {
                 cells.extend(str_cells("│ ", theme::state()));
             }
             for _ in 0..self.rails {
-                cells.extend(str_cells(&format!("{} ", theme::QUOTE_BAR), theme::marker()));
+                cells.extend(str_cells(
+                    &format!("{} ", theme::QUOTE_BAR),
+                    theme::marker(),
+                ));
             }
             cells.extend(line.cells);
             if self.boxed {
@@ -702,7 +704,9 @@ impl Ren {
                 let url: String = chars[i..end].iter().collect();
                 self.push_at(&std::mem::take(&mut run), base, None, at(run_start));
                 let idx = self.out.urls.len();
-                self.out.urls.push(crate::md::LinkTarget::Url(url.clone()).href());
+                self.out
+                    .urls
+                    .push(crate::md::LinkTarget::Url(url.clone()).href());
                 self.push_at(&url, base.patch(theme::link()), Some(idx), at(i));
                 i = end;
                 run_start = i;
@@ -902,7 +906,8 @@ impl Ren {
                 self.blank();
                 self.src_line = Some(src_line);
                 self.in_code_block = true;
-                if matches!(&kind, CodeBlockKind::Fenced(info) if crate::mermaid::is_mermaid(info)) {
+                if matches!(&kind, CodeBlockKind::Fenced(info) if crate::mermaid::is_mermaid(info))
+                {
                     self.mermaid = Some((String::new(), 0));
                 }
             }
@@ -1792,16 +1797,27 @@ mod tests {
         let quoted: Vec<&String> = rows.iter().filter(|t| t.starts_with("▌")).collect();
         // one paragraph and one bullet, each wrapped, with a blank row between
         assert!(quoted.len() >= 5, "{rows:?}");
-        assert!(quoted.iter().any(|t| t.trim() == "▌"), "blank row keeps its bar: {rows:?}");
+        assert!(
+            quoted.iter().any(|t| t.trim() == "▌"),
+            "blank row keeps its bar: {rows:?}"
+        );
         for t in &quoted {
             assert!(crate::md::str_width(t) <= 24, "{t:?}");
         }
         // the wrapped bullet hangs under its text, not under the bullet
         let bullet = rows.iter().position(|t| t.contains("• alpha")).unwrap();
-        assert!(rows[bullet + 1].starts_with("▌   "), "{:?}", rows[bullet + 1]);
+        assert!(
+            rows[bullet + 1].starts_with("▌   "),
+            "{:?}",
+            rows[bullet + 1]
+        );
         // nothing after the quote carries a bar, and the quote body is not dim
         assert!(rows.iter().any(|t| t == "after"));
-        let body = r.lines.iter().find(|l| l.text().contains("one two")).unwrap();
+        let body = r
+            .lines
+            .iter()
+            .find(|l| l.text().contains("one two"))
+            .unwrap();
         let word = body.cells.iter().find(|c| c.ch == 'o').unwrap();
         assert_eq!(word.style, Style::default());
     }
@@ -1813,7 +1829,10 @@ mod tests {
         let r = render_wide(md, w);
         let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
         let top = rows.iter().find(|t| t.starts_with('╭')).expect("top edge");
-        let bottom = rows.iter().find(|t| t.starts_with('╰')).expect("bottom edge");
+        let bottom = rows
+            .iter()
+            .find(|t| t.starts_with('╰'))
+            .expect("bottom edge");
         assert_eq!(crate::md::str_width(top), w, "{top:?}");
         assert_eq!(crate::md::str_width(bottom), w, "{bottom:?}");
         assert!(top.ends_with('╮') && bottom.ends_with('╯'));
@@ -1828,11 +1847,26 @@ mod tests {
         assert!(rows.iter().all(|t| !t.contains("[!summary]")), "{rows:?}");
         assert!(rows.iter().any(|t| t.contains("Situation:")));
         // the bullet wrapped inside the box, and blank quoted rows are bare box rows
-        assert!(rows[ti + 1..bi].iter().any(|t| t.trim_matches(|c| c == '│' || c == ' ').is_empty()));
-        assert!(rows[ti + 1..bi].iter().filter(|t| t.contains("Airstream") || t.contains("platform")).count() >= 2);
+        assert!(rows[ti + 1..bi]
+            .iter()
+            .any(|t| t.trim_matches(|c| c == '│' || c == ' ').is_empty()));
+        assert!(
+            rows[ti + 1..bi]
+                .iter()
+                .filter(|t| t.contains("Airstream") || t.contains("platform"))
+                .count()
+                >= 2
+        );
         // text in the box still knows its source line
-        let sit = r.lines.iter().find(|l| l.text().contains("Situation")).unwrap();
-        assert_eq!(sit.cells.iter().find(|c| c.ch == 'S').unwrap().src, Some((1, 4)));
+        let sit = r
+            .lines
+            .iter()
+            .find(|l| l.text().contains("Situation"))
+            .unwrap();
+        assert_eq!(
+            sit.cells.iter().find(|c| c.ch == 'S').unwrap().src,
+            Some((1, 4))
+        );
         assert!(rows.iter().any(|t| t == "after"));
     }
 
@@ -2110,7 +2144,13 @@ mod tests {
         let mut r = render("# Spec\n");
         append_mentions(&mut r, &[mention("meta", "about [[spec]]", 1)], 60);
         let row = r.lines.iter().find(|l| l.text().contains("meta")).unwrap();
-        let link = row.cells.iter().find(|c| c.ch == 'm').unwrap().link.unwrap();
+        let link = row
+            .cells
+            .iter()
+            .find(|c| c.ch == 'm')
+            .unwrap()
+            .link
+            .unwrap();
         // an exact file, so the click cannot land on another note of the same
         // name, and never a url the desktop would be handed
         assert_eq!(r.url(link), Some("note:/vault/meta.md"));
@@ -2168,7 +2208,11 @@ mod tests {
             .map(|c| c.ch)
             .collect();
         assert_eq!(name, "meta-os-control");
-        assert!(row.cells.iter().filter(|c| c.link.is_some()).all(|c| c.style == theme::link()));
+        assert!(row
+            .cells
+            .iter()
+            .filter(|c| c.link.is_some())
+            .all(|c| c.style == theme::link()));
     }
 
     #[test]
@@ -2176,7 +2220,11 @@ mod tests {
         let mut r = render("# Spec\n");
         append_mentions(
             &mut r,
-            &[mention("meta", "**Projects:** [[spec|the spec]] and `code`", 1)],
+            &[mention(
+                "meta",
+                "**Projects:** [[spec|the spec]] and `code`",
+                1,
+            )],
             80,
         );
         let row = footer_row(&r, "meta");

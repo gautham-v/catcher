@@ -553,7 +553,12 @@ mod tests {
         let mut open = open_set(&[]);
         // tab into browse with "matrix" typed: the drawn tree is three rows,
         // and the note you are in is not one of them
-        let at = reveal(&entries, &mut open, Some(&entries[0].path.clone()), "matrix");
+        let at = reveal(
+            &entries,
+            &mut open,
+            Some(&entries[0].path.clone()),
+            "matrix",
+        );
         assert_eq!(
             shape(&rows(&entries, &open, "matrix")),
             vec!["▾interviews", "  ▾interviews/stories", "    matrix"]
@@ -561,7 +566,12 @@ mod tests {
         assert_eq!(at, 0);
         // and the note that *is* showing is found at its filtered row, not at
         // the one it would have had in the whole vault
-        let at = reveal(&entries, &mut open, Some(&entries[1].path.clone()), "matrix");
+        let at = reveal(
+            &entries,
+            &mut open,
+            Some(&entries[1].path.clone()),
+            "matrix",
+        );
         assert_eq!(at, 2);
     }
 
@@ -575,10 +585,7 @@ mod tests {
             entry("tmp/y.md", "Inside"),
         ];
         let rows = rows(&entries, &open_set(&["/tmp/scratch", "tmp"]), "");
-        assert_eq!(
-            shape(&rows),
-            vec!["▾/tmp/scratch", "  x", "▾tmp", "  y"]
-        );
+        assert_eq!(shape(&rows), vec!["▾/tmp/scratch", "  x", "▾tmp", "  y"]);
     }
 
     #[test]
