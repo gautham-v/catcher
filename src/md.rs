@@ -1906,13 +1906,43 @@ fn mermaid_line(rows: &[String], row: usize, width: usize) -> RLine {
     if rows.len() > 2 {
         // the caps are the fence, not the diagram
         let body = rows[1..rows.len() - 1].join("\n");
-        if let Some(line) = crate::mermaid::render(&body, width)
-            .and_then(|d| diagram_line(&d, rows.len(), row, src))
+        if let Some(line) =
+            rendered_memo(&body, width).and_then(|d| diagram_line(&d, rows.len(), row, src))
         {
             return line;
         }
     }
     fence_line(src, row == 0 || row + 1 == rows.len())
+}
+
+/// One remembered layout: the fence body, the width, and what it rendered to.
+type MermaidMemo = (String, usize, Option<std::rc::Rc<crate::mermaid::Rendered>>);
+
+thread_local! {
+    /// The last diagram laid out for the editor.
+    static MERMAID_MEMO: std::cell::RefCell<Option<MermaidMemo>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `mermaid::render(body, width)`, remembered for the most recent `(body,
+/// width)` so a fence is laid out once rather than once per row per pass.
+///
+/// Every row of a fence asks for the same diagram, and the rows of one fence
+/// are visited back to back in the plan loop, the draw loop and the
+/// cursor-follow loop, so a single entry is enough; a failed layout is
+/// remembered too, so an unparseable fence does not retry on every row.
+fn rendered_memo(body: &str, width: usize) -> Option<std::rc::Rc<crate::mermaid::Rendered>> {
+    MERMAID_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if let Some((b, w, d)) = memo.as_ref() {
+            if b == body && *w == width {
+                return d.clone();
+            }
+        }
+        let d = crate::mermaid::render(body, width).map(std::rc::Rc::new);
+        *memo = Some((body.to_string(), width, d.clone()));
+        d
+    })
 }
 
 /// Row `row` of a fence `rows` source lines tall, drawn as one row of `d`
@@ -2070,9 +2100,17 @@ fn truncate_cells(mut cells: Vec<Cell>, width: usize) -> Vec<Cell> {
     cells
 }
 
-/// Lay a table's rows out in aligned columns, and draw row `row` of it.
-/// Every source row is exactly one display row, separator included.
-fn table_line(rows: &[String], row: usize, width: usize) -> RLine {
+/// A table's layout: its rows split into cells, which row is the separator,
+/// the column alignments it declares and the column widths fitted to the page.
+struct TableLayout {
+    parsed: Vec<(Vec<TCell>, Vec<usize>)>,
+    rule_row: Option<usize>,
+    aligns: Vec<Align>,
+    widths: Vec<usize>,
+}
+
+/// Lay a table's rows out in aligned columns.
+fn table_layout(rows: &[String], width: usize) -> TableLayout {
     let parsed: Vec<(Vec<TCell>, Vec<usize>)> = rows.iter().map(|r| split_row(r)).collect();
     let rule_row = rows.iter().position(|r| is_table_rule(r));
     let aligns: Vec<Align> = rule_row
@@ -2090,12 +2128,62 @@ fn table_line(rows: &[String], row: usize, width: usize) -> RLine {
         })
         .collect();
     let widths = fit_widths(&column_widths(&measured, cols), width);
+    TableLayout {
+        parsed,
+        rule_row,
+        aligns,
+        widths,
+    }
+}
 
+/// One remembered table layout: the rows, the width, and what they laid out to.
+type TableMemo = (Vec<String>, usize, std::rc::Rc<TableLayout>);
+
+thread_local! {
+    /// The last table laid out for the editor.
+    static TABLE_MEMO: std::cell::RefCell<Option<TableMemo>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `table_layout(rows, width)`, remembered for the most recent `(rows, width)`
+/// so a table is measured once rather than once per row per pass — the same
+/// single slot `rendered_memo` keeps for a diagram, and for the same reason:
+/// the rows of one table are visited back to back, and an edit to any of them
+/// changes the key.
+fn layout_memo(rows: &[String], width: usize) -> std::rc::Rc<TableLayout> {
+    TABLE_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if let Some((r, w, l)) = memo.as_ref() {
+            if r == rows && *w == width {
+                return l.clone();
+            }
+        }
+        let l = std::rc::Rc::new(table_layout(rows, width));
+        *memo = Some((rows.to_vec(), width, l.clone()));
+        l
+    })
+}
+
+/// Draw row `row` of a table. Every source row is exactly one display row,
+/// separator included.
+fn table_line(rows: &[String], row: usize, width: usize) -> RLine {
+    table_row(&layout_memo(rows, width), rows, row)
+}
+
+/// Row `row` of `rows`, drawn to the layout `l`.
+fn table_row(l: &TableLayout, rows: &[String], row: usize) -> RLine {
+    let TableLayout {
+        parsed,
+        rule_row,
+        aligns,
+        widths,
+    } = l;
+    let rule_row = *rule_row;
     let src = rows.get(row).map(String::as_str).unwrap_or("");
     // the separator row becomes the rule under the head
     if Some(row) == rule_row {
         let len = src.chars().count();
-        let cells = table_rule(&widths)
+        let cells = table_rule(widths)
             .chars()
             .enumerate()
             .map(|(i, ch)| Cell {

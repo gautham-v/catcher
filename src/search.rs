@@ -8,26 +8,33 @@ pub fn fuzzy(query: &str, text: &str) -> Option<i64> {
     let Some(first) = words.next() else {
         return Some(0);
     };
-    let mut score = fuzzy_word(first, text)?;
+    let lowered = |w: &str| {
+        w.chars()
+            .flat_map(char::to_lowercase)
+            .collect::<Vec<char>>()
+    };
+    let mut score = fuzzy_word(&lowered(first), text)?;
     for w in words {
-        score += fuzzy_word(w, text)?;
+        score += fuzzy_word(&lowered(w), text)?;
     }
     Some(score)
 }
 
-fn fuzzy_word(query: &str, text: &str) -> Option<i64> {
-    let q: Vec<char> = query.to_lowercase().chars().collect();
-    let t: Vec<char> = text.to_lowercase().chars().collect();
+/// `query` is already lowered. The haystack is lowered as it is walked,
+/// with one char of lookback for the word-boundary test, so scoring an
+/// index of thousands of entries allocates nothing per entry.
+fn fuzzy_word(q: &[char], text: &str) -> Option<i64> {
     let mut score: i64 = 0;
     let mut qi = 0;
     let mut last_hit: Option<usize> = None;
-    for (ti, &c) in t.iter().enumerate() {
+    let mut prev: Option<char> = None;
+    for (ti, c) in text.chars().flat_map(char::to_lowercase).enumerate() {
         if qi < q.len() && c == q[qi] {
             score += 1;
             if last_hit == Some(ti.wrapping_sub(1)) {
                 score += 4; // contiguous
             }
-            if ti == 0 || !t[ti - 1].is_alphanumeric() {
+            if prev.is_none_or(|p| !p.is_alphanumeric()) {
                 score += 3; // word boundary
             }
             last_hit = Some(ti);
@@ -36,6 +43,7 @@ fn fuzzy_word(query: &str, text: &str) -> Option<i64> {
                 break;
             }
         }
+        prev = Some(c);
     }
     if qi < q.len() {
         return None;

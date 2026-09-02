@@ -26,16 +26,32 @@ pub fn words(query: &str) -> Vec<String> {
 /// word, or `None`. Every word has to be somewhere on the line, in any
 /// order — `milk buy` finds "buy milk" — and case never matters.
 pub fn find(words: &[String], line: &str) -> Option<usize> {
+    find_lowered(words, &line.to_lowercase())
+}
+
+/// `find` over a line already lowered, so a body searched on every
+/// keystroke is lowered once when it is read rather than once per query.
+fn find_lowered(words: &[String], lower: &str) -> Option<usize> {
     if words.is_empty() {
         return None;
     }
-    let lower = line.to_lowercase();
     let mut first = usize::MAX;
     for w in words {
         let at = lower.find(w.as_str())?;
         first = first.min(lower[..at].chars().count());
     }
     Some(first)
+}
+
+/// A note's lines as read, each beside its lowered form: what `search`
+/// walks, built once per visit to the tab by `body`.
+pub type Body = Vec<(String, String)>;
+
+/// `text` split into lines and lowered once, ready for `search`.
+pub fn body(text: &str) -> Body {
+    text.lines()
+        .map(|l| (l.to_string(), l.to_lowercase()))
+        .collect()
 }
 
 /// The body to search, or nothing for a file that is too big or not text.
@@ -59,7 +75,7 @@ pub struct Hit {
 /// Every hit across `bodies` (one per index entry, `None` where it could not
 /// be read), in index order, cut at `cap`. The second number is how many
 /// more there were — what "…and N more" says.
-pub fn search(bodies: &[Option<String>], query: &str, cap: usize) -> (Vec<Hit>, usize) {
+pub fn search(bodies: &[Option<Body>], query: &str, cap: usize) -> (Vec<Hit>, usize) {
     let words = words(query);
     let mut hits = Vec::new();
     let mut over = 0;
@@ -68,8 +84,8 @@ pub fn search(bodies: &[Option<String>], query: &str, cap: usize) -> (Vec<Hit>, 
     }
     for (entry, body) in bodies.iter().enumerate() {
         let Some(body) = body else { continue };
-        for (line, text) in body.lines().enumerate() {
-            if find(&words, text).is_none() {
+        for (line, (text, lower)) in body.iter().enumerate() {
+            if find_lowered(&words, lower).is_none() {
                 continue;
             }
             if hits.len() >= cap {
@@ -187,9 +203,9 @@ mod tests {
     #[test]
     fn hits_are_capped_and_the_overflow_counted() {
         let bodies = vec![
-            Some("a\nb\na\n".to_string()),
+            Some(body("a\nb\na\n")),
             None,
-            Some("A here\nnothing\n".to_string()),
+            Some(body("A here\nnothing\n")),
         ];
         let (hits, more) = search(&bodies, "a", 10);
         assert_eq!(hits.len(), 3);

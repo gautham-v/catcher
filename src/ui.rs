@@ -102,16 +102,17 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     // take more, so walk the top down until the cursor's own display row fits
     if app.editor.following() {
         let mut top = app.editor.scroll.min(crow);
-        while top < crow {
-            let used: u16 = (top..crow)
-                .map(|r| row_height(app, &blocks, r, &dir, area.width).0)
-                .sum::<u16>()
-                // only the rows of the cursor's line up to the cursor itself
-                + cseg as u16
-                + 1;
-            if used <= area.height {
-                break;
-            }
+        // each row's height is the same wherever the top ends up, so measure
+        // the span once and shrink it from the front
+        let heights: Vec<u32> = (top..crow)
+            .map(|r| row_height(app, &blocks, r, &dir, area.width).0 as u32)
+            .collect();
+        // only the rows of the cursor's line up to the cursor itself
+        let mut used: u32 = heights.iter().sum::<u32>() + cseg as u32 + 1;
+        let mut i = 0;
+        while top < crow && used > area.height as u32 {
+            used -= heights[i];
+            i += 1;
             top += 1;
         }
         app.editor.scroll = top;

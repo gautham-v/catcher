@@ -334,7 +334,10 @@ pub struct App {
     pub contents: bool,
     /// Every body the contents tab searches, one per `open_index` entry, read
     /// once when the tab is entered so a keystroke never touches the disk.
-    contents_bodies: Vec<Option<String>>,
+    contents_bodies: Vec<Option<crate::contents::Body>>,
+    /// Every folder the move picker offers, walked once when it opens rather
+    /// than on every frame it is on screen.
+    move_targets: Vec<(PathBuf, usize)>,
     /// A source line the reading view should scroll to on its next draw. Only
     /// the draw knows which page row a line lands on once wrapped.
     pub preview_goto: Option<usize>,
@@ -601,6 +604,7 @@ impl App {
             tree_open: BTreeSet::new(),
             contents: false,
             contents_bodies: Vec::new(),
+            move_targets: Vec::new(),
             preview_goto: None,
             overlay_rect: Rect::default(),
             hover: None,
@@ -1623,8 +1627,10 @@ impl App {
             .map(|e| {
                 let here = canon(&e.path);
                 match open.iter().find(|(p, _)| *p == here) {
-                    Some((_, body)) => Some(body.to_string()),
-                    None => crate::contents::body_of(&e.path),
+                    Some((_, body)) => Some(crate::contents::body(body)),
+                    None => crate::contents::body_of(&e.path)
+                        .as_deref()
+                        .map(crate::contents::body),
                 }
             })
             .collect();
@@ -1965,9 +1971,9 @@ impl App {
     /// Move-picker rows for the current query, best first.
     pub fn move_items(&self) -> Vec<Item> {
         let mut scored: Vec<(i64, Item)> = Vec::new();
-        for (dir, _) in self.move_targets() {
-            if let Some(s) = search::fuzzy(&self.query, &self.move_label(&dir)) {
-                scored.push((s, Item::MoveTo(dir)));
+        for (dir, _) in &self.move_targets {
+            if let Some(s) = search::fuzzy(&self.query, &self.move_label(dir)) {
+                scored.push((s, Item::MoveTo(dir.clone())));
             }
         }
         scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
@@ -2029,6 +2035,7 @@ impl App {
         self.save_now();
         self.query.clear();
         self.selected = 0;
+        self.move_targets = self.move_targets();
         self.overlay = Overlay::MoveFile;
     }
 
