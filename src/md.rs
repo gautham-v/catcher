@@ -27,6 +27,22 @@ pub fn str_width(s: &str) -> usize {
     s.chars().map(char_width).sum()
 }
 
+/// How many leading items, each `widths` columns wide, fit in `width` with a
+/// column left over for an ellipsis: the index of the first one that does not.
+pub fn cut_at(widths: impl Iterator<Item = usize>, width: usize) -> usize {
+    let room = width.saturating_sub(1);
+    let mut used = 0;
+    let mut n = 0;
+    for cw in widths {
+        if used + cw > room {
+            break;
+        }
+        used += cw;
+        n += 1;
+    }
+    n
+}
+
 /// The one place colours live, so preview and live preview agree.
 ///
 /// A neutral grey chassis with a single accent. Hue is never decoration: it
@@ -492,16 +508,8 @@ pub fn truncate(text: &str, width: usize) -> String {
     if str_width(text) <= width {
         return text.to_string();
     }
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let cw = char_width(ch);
-        if used + cw > width.saturating_sub(1) {
-            break;
-        }
-        out.push(ch);
-        used += cw;
-    }
+    let n = cut_at(text.chars().map(char_width), width);
+    let mut out: String = text.chars().take(n).collect();
     out.push('…');
     out
 }
@@ -832,7 +840,7 @@ pub fn style_line(src: &str) -> RLine {
     let mut i = 0;
 
     // fenced code lines: shown verbatim, dimmed
-    if src.trim_start().starts_with("```") {
+    if is_fence(src) {
         for (idx, _) in chars.iter().enumerate() {
             b.keep(idx, theme::code());
         }
@@ -1019,14 +1027,7 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
     }
 
     // bare URL
-    if starts_url(b.src, i) {
-        let mut end = i;
-        while end < b.src.len() && !b.src[end].is_whitespace() {
-            end += 1;
-        }
-        while end > i && matches!(b.src[end - 1], '.' | ',' | ')' | ']' | '!' | '?') {
-            end -= 1;
-        }
+    if let Some(end) = url_at(b.src, i) {
         let style = base.patch(theme::link());
         for k in i..end {
             b.keep(k, style);
@@ -1142,14 +1143,7 @@ pub fn link_at(line: &str, col: usize) -> Option<LinkTarget> {
                 }
             }
         }
-        if starts_url(&src, i) {
-            let mut end = i;
-            while end < src.len() && !src[end].is_whitespace() {
-                end += 1;
-            }
-            while end > i && matches!(src[end - 1], '.' | ',' | ')' | ']' | '!' | '?') {
-                end -= 1;
-            }
+        if let Some(end) = url_at(&src, i) {
             if (i..end).contains(&col) {
                 return Some(LinkTarget::Url(src[i..end].iter().collect()));
             }
@@ -1170,18 +1164,32 @@ pub fn link_at(line: &str, col: usize) -> Option<LinkTarget> {
     None
 }
 
-/// Does a bare `http(s)://` URL start at `i`?
-fn starts_url(src: &[char], i: usize) -> bool {
+/// Does a bare `http(s)://` URL start at `i`? If so, where it ends: the run
+/// up to the next whitespace, less any trailing punctuation that is more
+/// likely the sentence's than the URL's. Shared with the reading view, so the
+/// editor and the renderer agree on what a URL is.
+pub fn url_at(src: &[char], i: usize) -> Option<usize> {
     let rest: String = src[i..].iter().take(8).collect();
-    (rest.starts_with("http://") || rest.starts_with("https://"))
-        && (i == 0 || !src[i - 1].is_alphanumeric())
+    let starts = (rest.starts_with("http://") || rest.starts_with("https://"))
+        && (i == 0 || !src[i - 1].is_alphanumeric());
+    if !starts {
+        return None;
+    }
+    let mut end = i;
+    while end < src.len() && !src[end].is_whitespace() {
+        end += 1;
+    }
+    while end > i && matches!(src[end - 1], '.' | ',' | ')' | ']' | '!' | '?') {
+        end -= 1;
+    }
+    Some(end)
 }
 
 fn find(src: &[char], from: usize, ch: char) -> Option<usize> {
     (from..src.len()).find(|&k| src[k] == ch)
 }
 
-fn find_pair(src: &[char], from: usize, ch: char) -> Option<usize> {
+pub(crate) fn find_pair(src: &[char], from: usize, ch: char) -> Option<usize> {
     (from..src.len().saturating_sub(1)).find(|&k| src[k] == ch && src[k + 1] == ch)
 }
 
@@ -1271,7 +1279,7 @@ pub fn tags_in(line: &str) -> Vec<(usize, usize)> {
                     continue;
                 }
             }
-            _ if starts_url(&src, i) => {
+            _ if url_at(&src, i).is_some() => {
                 while i < src.len() && !src[i].is_whitespace() {
                     i += 1;
                 }
@@ -1659,8 +1667,12 @@ impl Block {
     }
 }
 
-fn is_fence(line: &str) -> bool {
-    line.trim_start().starts_with("```")
+/// A fence line: three backticks or three tildes at the start, as CommonMark
+/// and Obsidian have it. The one place the answer lives, so the block scan,
+/// the line styler and the vault scanners never disagree about what a fence is.
+pub(crate) fn is_fence(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("```") || t.starts_with("~~~")
 }
 
 /// A fence line's info string: whatever follows its run of backticks or
@@ -2043,22 +2055,19 @@ fn cells_width(cells: &[Cell]) -> usize {
 }
 
 /// `cells` cut to `width` display columns, with an ellipsis when cut.
-fn truncate_cells(cells: Vec<Cell>, width: usize) -> Vec<Cell> {
+fn truncate_cells(mut cells: Vec<Cell>, width: usize) -> Vec<Cell> {
     if cells_width(&cells) <= width {
         return cells;
     }
-    let mut out = Vec::new();
-    let mut used = 0;
-    for c in cells {
-        let cw = char_width(c.ch);
-        if used + cw > width.saturating_sub(1) {
-            out.push(Cell { ch: '…', ..c });
-            return out;
-        }
-        used += cw;
-        out.push(c);
-    }
-    out
+    // the ellipsis takes the style of the first cell that did not fit
+    let n = cut_at(cells.iter().map(|c| char_width(c.ch)), width);
+    let cut = Cell {
+        ch: '…',
+        ..cells[n]
+    };
+    cells.truncate(n);
+    cells.push(cut);
+    cells
 }
 
 /// Lay a table's rows out in aligned columns, and draw row `row` of it.

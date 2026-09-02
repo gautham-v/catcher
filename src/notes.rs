@@ -170,6 +170,24 @@ pub fn body_after_front_matter(content: &str) -> &str {
     }
 }
 
+/// The lines of a note that are prose: front matter and fenced code stepped
+/// over, the fence lines themselves left out. Numbered from the top of the
+/// body, not the file. A wikilink or a tag inside a fence is source someone is
+/// showing, not a link or a tag: the reading view does not draw it as one.
+pub fn prose_lines(content: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut fenced = false;
+    body_after_front_matter(content)
+        .lines()
+        .enumerate()
+        .filter(move |(_, line)| {
+            if crate::md::is_fence(line) {
+                fenced = !fenced;
+                return false;
+            }
+            !fenced
+        })
+}
+
 pub fn slug(title: &str) -> String {
     let s: String = title
         .to_lowercase()
@@ -502,10 +520,7 @@ mod tests {
     }
 
     fn tmpdir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("catcher-test-{name}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::testutil::tmpdir("test", name)
     }
 
     fn note_at(dir: &Path, name: &str, content: &str) -> Note {

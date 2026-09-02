@@ -10,7 +10,6 @@
 
 use crate::index::{self, Entry};
 use crate::notes;
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -113,8 +112,7 @@ impl Rename {
         let mut done = 0;
         let mut fenced = false;
         for line in body[front..].split_inclusive('\n') {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            if crate::md::is_fence(line) {
                 fenced = !fenced;
             }
             if fenced {
@@ -152,44 +150,15 @@ fn target_span(src: &[char], w: &crate::md::Wikilink) -> (usize, usize) {
 /// found under, walked the way quick-open walks: what cannot be opened from
 /// ^O is not a note worth rewriting.
 fn notes_under(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
-    let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut out = Vec::new();
-    for root in roots {
-        let root = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-        let mut stack = vec![(root.clone(), 0usize)];
-        while let Some((dir, depth)) = stack.pop() {
-            if depth > index::MAX_DEPTH || out.len() >= index::MAX_FILES {
-                continue;
-            }
-            let Ok(read) = fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in read.flatten() {
-                let path = entry.path();
-                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    if !index::skip_dir(name) {
-                        stack.push((path, depth + 1));
-                    }
-                    continue;
-                }
-                if name.starts_with('.') || !name.ends_with(".md") {
-                    continue;
-                }
-                if out.len() >= index::MAX_FILES || !seen.insert(path.clone()) {
-                    continue;
-                }
-                let rel = path
-                    .strip_prefix(&root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .into_owned();
-                out.push((path, rel));
-            }
-        }
-    }
+    index::walk_notes(roots, None, |root, path, _| {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        out.push((path, rel));
+    });
     out
 }
 
@@ -292,19 +261,10 @@ pub fn retarget(old: &Path, new: &Path, roots: &[PathBuf]) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::write;
 
     fn tmpdir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("catcher-links-{name}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        fs::canonicalize(&dir).unwrap()
-    }
-
-    fn write(dir: &Path, rel: &str, body: &str) -> PathBuf {
-        let path = dir.join(rel);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, body).unwrap();
-        path
+        crate::testutil::tmpdir("links", name)
     }
 
     fn read(path: &Path) -> String {
@@ -425,12 +385,12 @@ mod tests {
     fn front_matter_and_fenced_code_are_stepped_over() {
         let dir = tmpdir("fence");
         write(&dir, "groceries.md", "# Groceries\n");
-        let body = "---\nsee: \"[[groceries]]\"\n---\n[[groceries]]\n```\n[[groceries]]\n```\n";
+        let body = "---\nsee: \"[[groceries]]\"\n---\n[[groceries]]\n```\n[[groceries]]\n```\n~~~\n[[groceries]]\n~~~\n";
         let other = write(&dir, "other.md", body);
         let r = renamed(&dir, "groceries.md", "shopping.md");
         assert_eq!(
             read(&other),
-            "---\nsee: \"[[groceries]]\"\n---\n[[shopping]]\n```\n[[groceries]]\n```\n"
+            "---\nsee: \"[[groceries]]\"\n---\n[[shopping]]\n```\n[[groceries]]\n```\n~~~\n[[groceries]]\n~~~\n"
         );
         assert_eq!(r.links, 1);
         let _ = fs::remove_dir_all(&dir);

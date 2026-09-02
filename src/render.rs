@@ -723,13 +723,7 @@ impl Ren {
             .map_or(self.src.len(), |n| off + n);
         let chars: Vec<char> = self.src[off..line_end].chars().collect();
         let w = crate::md::wikilink_at(&chars, 0)?;
-        let mut byte_at: Vec<usize> = Vec::with_capacity(chars.len() + 1);
-        let mut b = off;
-        for ch in &chars {
-            byte_at.push(b);
-            b += ch.len_utf8();
-        }
-        byte_at.push(b);
+        let byte_at = byte_offsets(&chars, off);
         Some((
             byte_at[w.end],
             w.target,
@@ -785,13 +779,7 @@ impl Ren {
         let link = self.link;
         let chars: Vec<char> = text.chars().collect();
         // byte offset of each char, so every run knows where it started
-        let mut byte_at: Vec<usize> = Vec::with_capacity(chars.len() + 1);
-        let mut b = 0;
-        for ch in &chars {
-            byte_at.push(b);
-            b += ch.len_utf8();
-        }
-        byte_at.push(b);
+        let byte_at = byte_offsets(&chars, 0);
         let at = |i: usize| off.map(|o| o + byte_at[i]);
 
         let mut i = 0;
@@ -800,7 +788,7 @@ impl Ren {
         while i < chars.len() {
             // ==highlight==
             if chars[i] == '=' && chars.get(i + 1) == Some(&'=') {
-                if let Some(end) = find_pair(&chars, i + 2) {
+                if let Some(end) = crate::md::find_pair(&chars, i + 2, '=') {
                     self.push_at(&std::mem::take(&mut run), base, link, at(run_start));
                     let body: String = chars[i + 2..end].iter().collect();
                     self.push_at(&body, base.patch(theme::highlight()), link, at(i + 2));
@@ -810,14 +798,7 @@ impl Ren {
                 }
             }
             // bare URL, when not already inside a link
-            if link.is_none() && starts_url(&chars, i) {
-                let mut end = i;
-                while end < chars.len() && !chars[end].is_whitespace() {
-                    end += 1;
-                }
-                while end > i && matches!(chars[end - 1], '.' | ',' | ')' | ']' | '!' | '?') {
-                    end -= 1;
-                }
+            if let Some(end) = crate::md::url_at(&chars, i).filter(|_| link.is_none()) {
                 let url: String = chars[i..end].iter().collect();
                 self.push_at(&std::mem::take(&mut run), base, None, at(run_start));
                 let idx = self.out.urls.len();
@@ -1445,14 +1426,10 @@ enum Shape {
 /// columns. Shared by the preview's own soft wrap and by table cells, so a
 /// wrapped cell breaks where a wrapped paragraph would.
 pub fn wrap_pcells(cells: &[PCell], width: usize) -> Vec<Vec<PCell>> {
-    if width == 0 || cells_width(cells) <= width {
+    if width == 0 {
         return vec![cells.to_vec()];
     }
-    let chars: Vec<char> = cells.iter().map(|c| c.ch).collect();
-    crate::md::wrap_breaks(&chars, width, width)
-        .into_iter()
-        .map(|(s, e)| cells[s..e].to_vec())
-        .collect()
+    wrap_hang(cells, width, width)
 }
 
 /// Word-wrap like [`wrap_pcells`], but with `first` columns for the first row
@@ -1528,16 +1505,8 @@ fn truncate_cells(cells: &[PCell], width: usize) -> Vec<PCell> {
     if cells_width(cells) <= width {
         return cells.to_vec();
     }
-    let mut out: Vec<PCell> = Vec::new();
-    let mut used = 0;
-    for c in cells {
-        let cw = crate::md::char_width(c.ch);
-        if used + cw > width.saturating_sub(1) {
-            break;
-        }
-        out.push(c.clone());
-        used += cw;
-    }
+    let n = crate::md::cut_at(cells.iter().map(|c| crate::md::char_width(c.ch)), width);
+    let mut out = cells[..n].to_vec();
     let style = out.last().map(|c| c.style).unwrap_or(theme::PLAIN);
     out.push(PCell {
         ch: '…',
@@ -1572,14 +1541,17 @@ fn emits_cells(event: &Event<'_>) -> bool {
     )
 }
 
-fn starts_url(chars: &[char], i: usize) -> bool {
-    let rest: String = chars[i..].iter().take(8).collect();
-    (rest.starts_with("http://") || rest.starts_with("https://"))
-        && (i == 0 || !chars[i - 1].is_alphanumeric())
-}
-
-fn find_pair(chars: &[char], from: usize) -> Option<usize> {
-    (from..chars.len().saturating_sub(1)).find(|&k| chars[k] == '=' && chars[k + 1] == '=')
+/// The byte offset, from `base`, at which each char of `chars` starts, plus
+/// one past the last — so a run over chars can name where it sat in the source.
+fn byte_offsets(chars: &[char], base: usize) -> Vec<usize> {
+    let mut v = Vec::with_capacity(chars.len() + 1);
+    let mut b = base;
+    for ch in chars {
+        v.push(b);
+        b += ch.len_utf8();
+    }
+    v.push(b);
+    v
 }
 
 #[cfg(test)]

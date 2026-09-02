@@ -1,7 +1,7 @@
 use crate::app::{App, EditRow, Item, Overlay, View};
 use crate::config::BorderStyle;
-use crate::md::theme;
-use crate::render::PCell;
+use crate::md::{theme, truncate};
+use crate::render::{wrap_pcells as wrap_cells, PCell};
 use crate::tree::RowKind;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -662,15 +662,6 @@ fn link_runs(cells: &[PCell], rendered: &crate::render::Rendered) -> Vec<(usize,
     runs
 }
 
-/// Word-wrap a rendered line into rows no wider than `width` *display columns*,
-/// so a line of CJK or emoji wraps where it actually reaches the edge. The
-/// segmentation is [`crate::md::wrap_breaks`], shared with the editor's soft
-/// wrap; the preview's own rows are already indented by the renderer, so every
-/// row here gets the full width.
-fn wrap_cells(cells: &[PCell], width: usize) -> Vec<Vec<PCell>> {
-    crate::render::wrap_pcells(cells, width)
-}
-
 /// The bottom line: what note you are on, what mode you are in, and what the
 /// keys do — laid out so a narrow window loses the least useful part first
 /// rather than letting the two halves collide.
@@ -1268,10 +1259,6 @@ fn pad_to(text: &str, width: usize) -> String {
     format!("{cut}{}", " ".repeat(pad))
 }
 
-fn truncate(text: &str, width: usize) -> String {
-    crate::md::truncate(text, width)
-}
-
 /// The help card: every binding, in the groups `app::SHORTCUTS` declares. Sized
 /// to its content and centred, and dismissed by any key at all — it is a
 /// reference to glance at, not a mode to get stuck in.
@@ -1491,7 +1478,7 @@ fn truncate_left(text: &str, width: usize) -> String {
     let mut out = String::new();
     let mut w = 0;
     for c in text.chars().rev() {
-        let cw = crate::md::str_width(&c.to_string());
+        let cw = crate::md::char_width(c);
         if w + cw + 1 > width {
             break;
         }

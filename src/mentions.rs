@@ -18,7 +18,6 @@
 
 use crate::index::{self, Entry};
 use crate::notes;
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -110,18 +109,7 @@ fn rel_under(path: &Path, roots: &[PathBuf]) -> String {
 /// instead of per hit.
 pub fn mentions_in(body: &str, names: &[String]) -> Vec<Hit> {
     let mut out = Vec::new();
-    let mut fenced = false;
-    for (line_no, line) in notes::body_after_front_matter(body).lines().enumerate() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            fenced = !fenced;
-            continue;
-        }
-        // a wikilink inside a fence is source someone is showing, not a link:
-        // the reading view does not draw it as one, so it is not a mention
-        if fenced {
-            continue;
-        }
+    for (line_no, line) in notes::prose_lines(body) {
         for w in crate::md::wikilinks(line) {
             if names.contains(&crate::md::link_key(&w.target)) {
                 let (excerpt, link) = excerpt(line, w.start, w.end);
@@ -247,94 +235,64 @@ fn strip_markers(s: &str) -> String {
 /// because the resolver has to be able to rank the whole vault to say whether
 /// a `[[spec]]` somewhere means *this* note or the other one — and doing that
 /// from the quick-open index would mean an answer that depends on whether ^O
-/// has been opened yet.
-/// `cancel` is watched per file rather than per root: one root is the whole
-/// vault, and stopping "at the next root" is not stopping.
+/// has been opened yet. Both walks are [`index::walk_notes`], so they agree
+/// about which files exist; `cancel` is watched per directory entry there.
 pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Mention> {
     let names = index::link_keys(target);
-    // roots overlap — a vault named in the settings that sits inside the notes
-    // dir — and a note read twice would be a note mentioned twice
-    let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut entries: Vec<Entry> = Vec::new();
     let mut found: Vec<(PathBuf, SystemTime, Vec<Hit>)> = Vec::new();
-    let mut files = 0usize;
-    for root in roots {
-        let root = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-        let mut stack = vec![(root.clone(), 0usize)];
-        while let Some((dir, depth)) = stack.pop() {
-            if depth > index::MAX_DEPTH || files >= index::MAX_FILES {
-                continue;
-            }
-            let Ok(read) = fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in read.flatten() {
-                if cancel.load(Ordering::Relaxed) {
-                    return Vec::new();
-                }
-                let path = entry.path();
-                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    if !index::skip_dir(name) {
-                        stack.push((path, depth + 1));
-                    }
-                    continue;
-                }
-                if name.starts_with('.') || !name.ends_with(".md") {
-                    continue;
-                }
-                if files >= index::MAX_FILES || !seen.insert(path.clone()) {
-                    continue;
-                }
-                let meta = entry.metadata().ok();
-                files += 1;
-                let modified = meta
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                // a body too big to read is a body this scan will not read;
-                // it is not a note that stopped existing. The resolver has to
-                // rank it like any other or the footer starts claiming
-                // mentions a click on the same link would not honour — a
-                // `[[spec]]` beside a 300KB `spec.md` resolves one way here
-                // and the other way in `App::follow_wikilink`. The title is
-                // read the way the quick-open walk reads one, from the head of
-                // the file, for the same reason.
-                let too_big = meta.as_ref().is_some_and(|m| m.len() > MAX_BODY_BYTES);
-                let body = if too_big {
-                    None
-                } else {
-                    // a file that is not text simply is not read; there is
-                    // nothing to say about it and nothing to fix
-                    fs::read_to_string(&path).ok()
-                };
-                let title = match &body {
-                    Some(b) => notes::title_of(b),
-                    None => index::title_at(&path),
-                };
-                entries.push(Entry {
-                    path: path.clone(),
-                    title,
-                    rel: rel_under(&path, std::slice::from_ref(&root)),
-                    folder: String::new(),
-                    modified,
-                });
-                let Some(body) = body else {
-                    continue;
-                };
-                // a note linking to itself is not a mention of it: the footer
-                // answers "who else", and the reader is already here
-                if path == target.path {
-                    continue;
-                }
-                let hits = mentions_in(&body, &names);
-                if !hits.is_empty() {
-                    found.push((path, modified, hits));
-                }
-            }
+    let walked = index::walk_notes(roots, Some(cancel), |root, path, entry| {
+        let meta = entry.metadata().ok();
+        let modified = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        // a body too big to read is a body this scan will not read;
+        // it is not a note that stopped existing. The resolver has to
+        // rank it like any other or the footer starts claiming
+        // mentions a click on the same link would not honour — a
+        // `[[spec]]` beside a 300KB `spec.md` resolves one way here
+        // and the other way in `App::follow_wikilink`. The title is
+        // read the way the quick-open walk reads one, from the head of
+        // the file, for the same reason.
+        let too_big = meta.as_ref().is_some_and(|m| m.len() > MAX_BODY_BYTES);
+        let body = if too_big {
+            None
+        } else {
+            // a file that is not text simply is not read; there is
+            // nothing to say about it and nothing to fix
+            fs::read_to_string(&path).ok()
+        };
+        let title = match &body {
+            Some(b) => notes::title_of(b),
+            None => index::title_at(&path),
+        };
+        entries.push(Entry {
+            path: path.clone(),
+            title,
+            rel: path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned(),
+            folder: String::new(),
+            modified,
+        });
+        let Some(body) = body else {
+            return;
+        };
+        // a note linking to itself is not a mention of it: the footer
+        // answers "who else", and the reader is already here
+        if path == target.path {
+            return;
         }
+        let hits = mentions_in(&body, &names);
+        if !hits.is_empty() {
+            found.push((path, modified, hits));
+        }
+    });
+    if walked.is_none() {
+        return Vec::new();
     }
     // the note on screen may live outside every root — opened from the command
     // line, or through the recents list — and the resolver cannot judge a link
@@ -502,6 +460,7 @@ impl Backlinks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::write;
 
     /// The walk, run to the end: no test ever gives up on one.
     fn scan(target: &Entry, roots: &[PathBuf]) -> Vec<Mention> {
@@ -509,21 +468,7 @@ mod tests {
     }
 
     fn tmpdir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("catcher-mentions-{name}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        // the walk canonicalizes its roots, so a fixture that does not would
-        // compare `/var/…` against `/private/var/…` and never match itself
-        fs::canonicalize(&dir).unwrap()
-    }
-
-    fn write(dir: &Path, rel: &str, body: &str) -> PathBuf {
-        let path = dir.join(rel);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(&path, body).unwrap();
-        path
+        crate::testutil::tmpdir("mentions", name)
     }
 
     /// The note on screen, as the app would describe it to a scan.
@@ -564,6 +509,11 @@ mod tests {
     #[test]
     fn a_wikilink_inside_a_fenced_code_block_is_source_not_a_link() {
         let body = "before [[spec]]\n```\nnot a link: [[spec]]\n```\nafter [[spec]]\n";
+        let hits = mentions_in(body, &names(&["spec"]));
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[1].line, 4);
+        // a tilde fence is a fence too
+        let body = "before [[spec]]\n~~~\nnot a link: [[spec]]\n~~~\nafter [[spec]]\n";
         let hits = mentions_in(body, &names(&["spec"]));
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[1].line, 4);

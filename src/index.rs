@@ -5,10 +5,11 @@
 //! vault organised into directories is reachable from anywhere in it.
 
 use crate::notes::title_of;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 /// A file the quick-open list can offer. Titles are read from the first few
@@ -41,17 +42,68 @@ impl Entry {
 
 /// Stop conditions for the walk. A vault of a few thousand notes is scanned in
 /// milliseconds; past that the list stops being something to eyeball anyway.
-pub(crate) const MAX_FILES: usize = 8000;
-pub(crate) const MAX_DEPTH: usize = 10;
+const MAX_FILES: usize = 8000;
+const MAX_DEPTH: usize = 10;
 /// Enough for a title line under any reasonable front matter.
 const TITLE_BYTES: usize = 4096;
 
-/// Directories never worth walking into. The linked-mentions scan walks with
-/// this too: a directory not worth offering in quick-open is not worth reading
-/// bodies out of either, and the two walks disagreeing about that would be a
-/// footer citing a note you cannot open.
-pub(crate) fn skip_dir(name: &str) -> bool {
+/// Directories never worth walking into.
+fn skip_dir(name: &str) -> bool {
     name.starts_with('.') || matches!(name, "node_modules" | "target" | "attachments")
+}
+
+/// Walk `roots` and call `f` once for every `.md` file under them, with the
+/// canonical root it was found under. This is the one walk rule: the depth and
+/// file caps, the directories skipped, the dot-file and `.md` filter, and the
+/// dedupe across roots that overlap (a vault named in the settings that sits
+/// inside the notes dir). The quick-open index, the linked-mentions scan and
+/// the rename rewrite all walk with it, because a footer citing a note you
+/// cannot open from ^O, or a rename that misses one, is the walks disagreeing.
+///
+/// `cancel` is watched per directory entry rather than per root: one root is
+/// the whole vault, and stopping "at the next root" is not stopping. Returns
+/// the set of files visited, or `None` when cancelled.
+pub(crate) fn walk_notes(
+    roots: &[PathBuf],
+    cancel: Option<&AtomicBool>,
+    mut f: impl FnMut(&Path, PathBuf, &fs::DirEntry),
+) -> Option<HashSet<PathBuf>> {
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for root in roots {
+        let root = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        let mut stack = vec![(root.clone(), 0usize)];
+        while let Some((dir, depth)) = stack.pop() {
+            if depth > MAX_DEPTH || seen.len() >= MAX_FILES {
+                continue;
+            }
+            let Ok(read) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in read.flatten() {
+                if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    return None;
+                }
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    if !skip_dir(name) {
+                        stack.push((path, depth + 1));
+                    }
+                    continue;
+                }
+                if name.starts_with('.') || !name.ends_with(".md") {
+                    continue;
+                }
+                if seen.len() >= MAX_FILES || !seen.insert(path.clone()) {
+                    continue;
+                }
+                f(&root, path, &entry);
+            }
+        }
+    }
+    Some(seen)
 }
 
 /// The title of the note at `path`, without reading the whole file. Shared
@@ -125,56 +177,27 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
     // bare "." and no row repeats the notes dir on every line
     let home_root = roots.first().cloned().unwrap_or_default();
     let home_root = fs::canonicalize(&home_root).unwrap_or(home_root);
-    let mut seen: HashMap<PathBuf, ()> = HashMap::new();
     let mut entries: Vec<Entry> = Vec::new();
-    for root in roots {
-        let root = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-        let mut stack = vec![(root.clone(), 0usize)];
-        while let Some((dir, depth)) = stack.pop() {
-            if depth > MAX_DEPTH || entries.len() >= MAX_FILES {
-                continue;
-            }
-            let Ok(read) = fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in read.flatten() {
-                let path = entry.path();
-                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                if is_dir {
-                    if !skip_dir(name) {
-                        stack.push((path, depth + 1));
-                    }
-                    continue;
-                }
-                if name.starts_with('.') || !name.ends_with(".md") {
-                    continue;
-                }
-                if entries.len() >= MAX_FILES || seen.insert(path.clone(), ()).is_some() {
-                    continue;
-                }
-                let modified = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                let rel = path
-                    .strip_prefix(&root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .into_owned();
-                let folder = folder_of(&path, &home_root);
-                entries.push(Entry {
-                    title: title_at(&path),
-                    path,
-                    rel,
-                    folder,
-                    modified,
-                });
-            }
-        }
-    }
+    let mut seen = walk_notes(roots, None, |root, path, entry| {
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        let folder = folder_of(&path, &home_root);
+        entries.push(Entry {
+            title: title_at(&path),
+            path,
+            rel,
+            folder,
+            modified,
+        });
+    })
+    .unwrap_or_default();
 
     // anything opened before that the walk did not reach — another vault, a
     // file passed on the command line once — is still worth offering
@@ -183,7 +206,7 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
             break;
         }
         let path = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-        if !path.is_file() || seen.insert(path.clone(), ()).is_some() {
+        if !path.is_file() || !seen.insert(path.clone()) {
             continue;
         }
         let modified = fs::metadata(&path)
@@ -292,15 +315,7 @@ fn rank(entry: &Entry, want: &str) -> Option<u8> {
 /// Fenced code is stepped over, as the styling steps over it.
 pub fn tags_of(content: &str) -> Vec<String> {
     let mut tags = front_matter_tags(content);
-    let mut fence = false;
-    for line in crate::notes::body_after_front_matter(content).lines() {
-        if line.trim_start().starts_with("```") {
-            fence = !fence;
-            continue;
-        }
-        if fence {
-            continue;
-        }
+    for (_, line) in crate::notes::prose_lines(content) {
         let chars: Vec<char> = line.chars().collect();
         for (s, e) in crate::md::tags_in(line) {
             tags.push(crate::md::tag_key(&chars[s..e].iter().collect::<String>()));
@@ -433,10 +448,7 @@ mod tests {
     use std::time::Duration;
 
     fn tmpdir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("catcher-index-{name}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::testutil::tmpdir("index", name)
     }
 
     #[test]
@@ -469,10 +481,7 @@ mod tests {
         fs::write(dir.join("a.md"), "# A\n").unwrap();
         fs::write(dir.join("b.md"), "# B\n").unwrap();
         fs::write(dir.join("c.md"), "# C\n").unwrap();
-        let recent = vec![
-            fs::canonicalize(dir.join("c.md")).unwrap(),
-            fs::canonicalize(dir.join("a.md")).unwrap(),
-        ];
+        let recent = vec![dir.join("c.md"), dir.join("a.md")];
         let found = scan(std::slice::from_ref(&dir), &recent);
         let titles: Vec<&str> = found.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(&titles[..2], &["C", "A"]);
@@ -495,10 +504,10 @@ mod tests {
         assert!(!found.iter().any(|e| e.title == "Job Application Log"));
 
         // …but having opened it before is enough, and it comes first
-        let recent = vec![fs::canonicalize(&far).unwrap()];
+        let recent = vec![far.clone()];
         let found = scan(&[dir.join("notes")], &recent);
         assert_eq!(found[0].title, "Job Application Log");
-        assert_eq!(found[0].path, fs::canonicalize(&far).unwrap());
+        assert_eq!(found[0].path, far);
         // and its folder is shown, since there is no root to be relative to
         assert!(
             found[0].folder.ends_with("vault/applications"),
@@ -527,7 +536,7 @@ mod tests {
         let dir = tmpdir("dedup");
         let path = dir.join("a.md");
         fs::write(&path, "# A\n").unwrap();
-        let recent = vec![fs::canonicalize(&path).unwrap()];
+        let recent = vec![path.clone()];
         let found = scan(std::slice::from_ref(&dir), &recent);
         assert_eq!(found.len(), 1);
         let _ = fs::remove_dir_all(&dir);
@@ -652,7 +661,7 @@ mod tests {
     #[test]
     fn a_notes_tags_are_its_front_matter_and_its_body_each_once() {
         let tags = tags_of(
-            "---\ntags: work\n---\n# T #Work\n\n```\n#fenced\n```\nsee #home and `#code`\n",
+            "---\ntags: work\n---\n# T #Work\n\n```\n#fenced\n```\n~~~\n#tilde\n~~~\nsee #home and `#code`\n",
         );
         assert_eq!(tags, vec!["work", "home"]);
     }

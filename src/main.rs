@@ -20,6 +20,8 @@ mod notes;
 mod render;
 mod search;
 mod terminal;
+#[cfg(test)]
+mod testutil;
 mod tree;
 mod ui;
 
