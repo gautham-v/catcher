@@ -104,7 +104,7 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         Action::FollowLink,
         "key_follow",
         Some("alt+enter"),
-        "open the [[wikilink]] under the cursor",
+        "open the [[wikilink]] under the cursor, or make the note it names",
     ),
     // every modifier + arrow already moves the cursor (or, with ^⌥, the
     // window), so the browser keys are letters: back and forward.

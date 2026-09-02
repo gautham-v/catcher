@@ -1391,23 +1391,21 @@ pub mod links {
 }
 
 /// How a wikilink is drawn: like any other link when it names a note that
-/// exists, and in the danger colour when it does not.
+/// exists, and grey when it does not.
 ///
-/// That is the only use of danger outside the delete confirmation, and it
-/// earns its place — a vault carried over from somewhere else is full of links
-/// that used to resolve, and a broken one you cannot see is one you never fix.
-/// Both views call this, so they can never disagree about what is broken.
+/// Grey, not danger: a link to a note not written yet is an invitation, not a
+/// fault — following it makes the note — and a vault carried over from
+/// somewhere else is full of them. Both views call this, so they can never
+/// disagree about what resolves.
 ///
-/// A broken link is still a link, so it keeps the underline `theme::link()`
-/// carries and only its colour changes. On a page full of dead links out of
-/// another vault, that is the difference between a page of red text and a page
-/// of links, some of which are red.
+/// An unresolved link is still a link, so it keeps the underline
+/// `theme::link()` carries and only its colour changes.
 pub fn wiki_style(base: Style, target: &str) -> Style {
     let base = base.patch(theme::link());
     if links::resolves(target) {
         base
     } else {
-        base.patch(theme::danger())
+        base.patch(theme::grey())
     }
 }
 
@@ -2472,7 +2470,7 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_wikilink_is_drawn_in_the_danger_colour() {
+    fn an_unresolved_wikilink_is_grey_and_still_underlined() {
         // both halves live in one test on purpose: the known-target set is
         // process-wide, and `cargo test` runs these in parallel, so splitting
         // the assertions would let one of them race the other's set-up
@@ -2484,7 +2482,11 @@ mod tests {
         let ok = style_line("[[real]]");
         assert_eq!(ok.cells[0].style.fg, theme::link().fg);
         let broken = style_line("[[gone]]");
-        assert_eq!(broken.cells[0].style.fg, theme::danger().fg);
+        assert_eq!(broken.cells[0].style.fg, theme::grey().fg);
+        assert!(broken.cells[0]
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
         // a name is matched without its case or its extension
         assert_eq!(
             style_line("[[Real.md]]").cells[0].style.fg,
@@ -2518,7 +2520,10 @@ mod tests {
         let targets: Vec<&str> = found.iter().map(|w| w.target.as_str()).collect();
         assert_eq!(targets, vec!["a", "b"]);
         // and the spans are the whole `[[…]]`, so nothing is scanned twice
-        assert_eq!(&"see [[a]] and [[b|bee]] and [[unclosed"[found[0].start..found[0].end], "[[a]]");
+        assert_eq!(
+            &"see [[a]] and [[b|bee]] and [[unclosed"[found[0].start..found[0].end],
+            "[[a]]"
+        );
         assert!(wikilinks("nothing here at all").is_empty());
     }
 
@@ -2569,6 +2574,9 @@ mod tests {
         // its own ground and so cannot
         let c = theme::code();
         assert!(c.bg.is_some());
-        assert!(c.fg.is_some(), "code without a foreground is unreadable on a terminal whose ink matches code_bg");
+        assert!(
+            c.fg.is_some(),
+            "code without a foreground is unreadable on a terminal whose ink matches code_bg"
+        );
     }
 }
