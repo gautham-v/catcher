@@ -1,16 +1,19 @@
-//! Hand-rolled argument parsing. No clap: the surface is five shapes.
+//! Hand-rolled argument parsing. No clap: the surface is a handful of shapes.
 //!
 //! ```text
 //! catcher                 open the TUI on the newest note
-//! catcher <name>          fuzzy-open a note by title, or create it
+//! catcher <name>          fuzzy-open a note by title; an error if none matches
 //! catcher <file>.md       open the TUI on that file, rooted at its parent
 //! catcher <dir>           open the TUI rooted at that directory
 //! catcher --root <dir> <file>
 //!                         open <file>, rooted at <dir>: what a split runs
+//! catcher new <name>      create a note titled <name> and open it
 //! catcher today           open today's daily note, creating it if missing
 //! catcher add "text"      capture a note without the TUI (stdin if no text)
 //! catcher path            print the resolved notes dir
 //! ```
+//!
+//! `--root` and `--keys` are internal or diagnostic and kept out of `--help`.
 
 use std::path::PathBuf;
 
@@ -19,15 +22,14 @@ catcher — a tiny markdown notes TUI over plain files
 
 usage:
   catcher                 open the notes TUI
-  catcher <name>          open the note whose title best matches, else create it
+  catcher <name>          open the note whose title best matches
   catcher <file>.md       open that file, rooted at its parent directory
   catcher <dir>           open the TUI rooted at that directory
-  catcher --root <dir> <file>
-                          open that file with the session rooted at <dir>
+  catcher new <name>      create a note titled <name> and open it
   catcher today           open today's daily note, creating it if missing
   catcher add [text]      write a new note from text (or stdin) and print its path
   catcher path            print the notes directory
-  catcher --keys          print the key events this terminal sends (esc quits)
+  catcher --version       print the version
   catcher --help          this message
 ";
 
@@ -44,8 +46,10 @@ pub enum PathKind {
 pub enum Launch {
     /// The configured notes dir, newest note.
     Default,
-    /// Fuzzy-match this against note titles; create it if nothing matches.
+    /// Fuzzy-match this against note titles; an error if nothing matches.
     Name(String),
+    /// Make a note with this title and open it; an error if one already has it.
+    New(String),
     /// This file, with the session rooted at its parent directory.
     File(PathBuf),
     /// This directory, as a per-invocation notes dir.
@@ -67,6 +71,7 @@ pub enum Cli {
     /// `--keys`: print raw key events until Esc, for debugging a terminal.
     Keys,
     Help,
+    Version,
     /// Bad usage: message for stderr, exit 2.
     Error(String),
 }
@@ -81,6 +86,16 @@ pub fn parse(args: &[String], probe: impl Fn(&str) -> PathKind) -> Cli {
 
     match first.as_str() {
         "-h" | "--help" | "help" => return Cli::Help,
+        "-V" | "--version" | "version" => return Cli::Version,
+        "new" => {
+            let name = args[1..].join(" ");
+            let name = name.trim();
+            return if name.is_empty() {
+                Cli::Error("new takes a title".to_string())
+            } else {
+                Cli::Tui(Launch::New(name.to_string()))
+            };
+        }
         "path" if args.len() == 1 => return Cli::PrintPath,
         "today" if args.len() == 1 => return Cli::Tui(Launch::Today),
         "--keys" => return Cli::Keys,
@@ -123,8 +138,8 @@ pub fn parse(args: &[String], probe: impl Fn(&str) -> PathKind) -> Cli {
     Cli::Tui(Launch::Name(args.join(" ")))
 }
 
-/// Something the user clearly meant as a path, so a missing target is an error
-/// rather than the title of a note to create.
+/// Something the user clearly meant as a path, so a missing target is reported
+/// as such rather than as a title that matched nothing.
 fn looks_like_path(s: &str) -> bool {
     s.contains('/') || s.starts_with('~') || s.ends_with(".md")
 }
@@ -186,6 +201,22 @@ mod tests {
     }
 
     #[test]
+    fn version() {
+        assert_eq!(parse(&args(&["--version"]), nothing), Cli::Version);
+        assert_eq!(parse(&args(&["-V"]), nothing), Cli::Version);
+    }
+
+    #[test]
+    fn new_takes_a_title() {
+        assert_eq!(
+            parse(&args(&["new", "meeting", "notes"]), nothing),
+            Cli::Tui(Launch::New("meeting notes".into()))
+        );
+        assert!(matches!(parse(&args(&["new"]), nothing), Cli::Error(_)));
+        assert!(matches!(parse(&args(&["new", " "]), nothing), Cli::Error(_)));
+    }
+
+    #[test]
     fn add_takes_text_or_stdin() {
         assert_eq!(
             parse(&args(&["add", "buy milk"]), nothing),
@@ -226,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_path_is_an_error_not_a_new_note() {
+    fn a_missing_path_is_a_path_error_not_a_title() {
         assert!(matches!(
             parse(&args(&["/nope/x.md"]), nothing),
             Cli::Error(_)

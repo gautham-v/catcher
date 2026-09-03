@@ -70,12 +70,23 @@ fn pop_keyboard() {
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = real_main() {
+        eprintln!("catcher: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn real_main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let launch = match cli::parse(&args, probe) {
         cli::Cli::Tui(l) => l,
         cli::Cli::Help => {
             print!("{}", cli::USAGE);
+            return Ok(());
+        }
+        cli::Cli::Version => {
+            println!("catcher {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         cli::Cli::PrintPath => {
@@ -253,7 +264,6 @@ fn from_colorfgbg() -> Option<theme::Mode> {
 }
 
 fn tui(launch: cli::Launch) -> Result<()> {
-    push_title();
     // before the settings load: `theme: auto` resolves against this
     let detected = detect_background();
     theme::set_detected(detected);
@@ -262,7 +272,9 @@ fn tui(launch: cli::Launch) -> Result<()> {
     theme::set_follows_system(theme::system_mode() == Some(detected));
     // shells out to `date` once, so it runs before raw mode
     dates::init();
+    // a name that matches nothing fails here, before the terminal is touched
     let mut app = app::App::launch(launch)?;
+    push_title();
     let mut terminal = ratatui::init();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     push_keyboard();

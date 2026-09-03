@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 enum Want {
     Path(PathBuf),
     Title(String),
+    New(String),
 }
 
 /// The note whose *title* best fuzzy-matches `name`, if any matches at all.
@@ -549,6 +550,7 @@ impl App {
         let (dir, want): (PathBuf, Option<Want>) = match &launch {
             Launch::Default => (config.notes_dir.clone(), None),
             Launch::Name(n) => (config.notes_dir.clone(), Some(Want::Title(n.clone()))),
+            Launch::New(n) => (config.notes_dir.clone(), Some(Want::New(n.clone()))),
             Launch::Today => {
                 let path = crate::daily::ensure(
                     &config.daily_dir(),
@@ -594,11 +596,21 @@ impl App {
             },
             Some(Want::Title(name)) => match best_title_match(&all, &name) {
                 Some(i) => active = i,
-                None => {
-                    all.insert(0, notes::create_with(&dir, format!("# {name}\n"))?);
-                    active = 0;
-                }
+                None => anyhow::bail!(
+                    "no note matching \u{201c}{name}\u{201d} \u{b7} catcher new {name} creates one"
+                ),
             },
+            Some(Want::New(name)) => {
+                if let Some(n) = all.iter().find(|n| n.title().eq_ignore_ascii_case(&name)) {
+                    anyhow::bail!(
+                        "a note called \u{201c}{}\u{201d} already exists: {}",
+                        n.title(),
+                        n.path.display()
+                    );
+                }
+                all.insert(0, notes::create_with(&dir, format!("# {name}\n"))?);
+                active = 0;
+            }
             None => {}
         }
         if all.is_empty() {

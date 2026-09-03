@@ -38,14 +38,14 @@ or `cargo install catcher`. Then run `catcher`.
 
 ```
 catcher                  open the note you last had open
-catcher groceries        open the note that best matches; create it if none does
+catcher groceries        open the note whose title best matches; an error if none does
+catcher new groceries    create a note titled "groceries" and open it
 catcher today            open today's note in `journal/`, creating it from the template
 catcher add "buy milk"   write a new note and print its path
 catcher ~/vault          open the TUI rooted at that folder
-catcher --root ~/vault ~/vault/a.md
-                         open that note, rooted there: what a split runs
+catcher ~/vault/a.md     open that note, rooted at its folder
 catcher path             print the notes directory
-catcher --keys           show what your terminal sends for each key
+catcher --version        print the version
 ```
 
 ## Keys
