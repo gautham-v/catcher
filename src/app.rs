@@ -895,6 +895,7 @@ impl App {
             .seed(&self.notes[self.active].path, self.editor.lines(), &blocks);
         self.refresh_visible();
         self.sync_title();
+        self.refresh_file_resolver();
     }
 
     /// Rebuild the line → row mapping from the buffer and the note's folds.
@@ -2177,7 +2178,9 @@ impl App {
                     None => return Some(self.missing_peek(url, &t, anchor)),
                 },
             },
-            md::LinkTarget::Url(_) | md::LinkTarget::Tag(_) => return None,
+            md::LinkTarget::Url(_) | md::LinkTarget::Tag(_) | md::LinkTarget::File(_) => {
+                return None
+            }
         };
         // an open note may have edits the disk has not seen yet
         let content = match self.notes.iter().find(|n| n.path == path) {
@@ -4449,7 +4452,30 @@ impl App {
             // is nothing left to resolve
             md::LinkTarget::Note(p) => self.open_path(Path::new(&p)),
             md::LinkTarget::Tag(t) => self.open_tag(&t),
+            md::LinkTarget::File(f) => self.open_attachment(&f),
         }
+    }
+
+    /// Following `[[report.pdf]]`: the file is looked for the way a picture
+    /// is — beside the note, in its attachments folder, in the configured one
+    /// — and handed to the desktop. Never made when it is not there: a PDF
+    /// is not a note waiting to be written.
+    fn open_attachment(&mut self, name: &str) {
+        match self.images.resolve(name, &self.note_dir()) {
+            Some(path) => self.open_url(&path.to_string_lossy()),
+            None => self.flash(format!("no such file: {name}")),
+        }
+    }
+
+    /// Tell the embed cards where attachments are found from the note on
+    /// screen: the same places a picture is looked for. Done when the note
+    /// changes, never per frame.
+    fn refresh_file_resolver(&self) {
+        let note_dir = self.note_dir();
+        let attachments = self.config.attachments_dir.clone();
+        crate::md::embeds::set_file_resolver(Box::new(move |name| {
+            crate::images::resolve_in(name, &note_dir, &attachments)
+        }));
     }
 
     /// Following a `#tag`: ^O, cut to the notes that carry it. Saved first,
@@ -4640,6 +4666,7 @@ impl App {
                 config.apply();
                 self.editor.tab_width = config.tab_width;
                 self.config = config;
+                self.refresh_file_resolver();
                 self.config_gen += 1;
                 self.sync_title();
                 // the roots to walk, or the setting itself, may have moved

@@ -109,10 +109,18 @@ impl Images {
     /// An image wider than the page is scaled down to fit, so the rows it needs
     /// shrink with it — reserving its full pixel height would leave a band of
     /// blank rows under a wide screenshot.
-    pub fn rows(&mut self, url: &str, note_dir: &Path, cols: u16) -> Option<u16> {
+    ///
+    /// `max_px` is a width the note asked for (Obsidian's `![[a.png|300]]`),
+    /// in pixels: the picture is fitted to that many columns, or the page
+    /// when the page is narrower.
+    pub fn rows(&mut self, url: &str, note_dir: &Path, cols: u16, max_px: Option<u32>) -> Option<u16> {
         let picker = self.picker.as_ref()?;
         let path = self.resolve(url, note_dir)?;
         let (font_w, font_h) = picker.font_size();
+        let cols = match max_px {
+            Some(px) => cols.min(px_to_cols(px, font_w)),
+            None => cols,
+        };
 
         // decode once
         if !self.cache.contains_key(&path) {
@@ -213,6 +221,12 @@ fn scaled(img: &image::DynamicImage, (w, h): (u32, u32)) -> image::DynamicImage 
     }
 }
 
+/// The columns `px` pixels cover, at `font_w` pixels a cell: at least one.
+fn px_to_cols(px: u32, font_w: u16) -> u16 {
+    let cols = (px as f32 / font_w.max(1) as f32).ceil();
+    cols.clamp(1.0, u16::MAX as f32) as u16
+}
+
 /// The pixel size an image of `w`x`h` is drawn at on a page `cols` columns
 /// wide, and the rows it then occupies.
 ///
@@ -297,7 +311,7 @@ pub fn band_slice(start: usize, rows: u16, top: usize, height: u16) -> Option<Ba
     }
 }
 
-fn resolve_in(url: &str, note_dir: &Path, attachments: &Path) -> Option<PathBuf> {
+pub fn resolve_in(url: &str, note_dir: &Path, attachments: &Path) -> Option<PathBuf> {
     if url.contains("://") {
         return None; // remote images are not fetched
     }

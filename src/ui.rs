@@ -442,10 +442,10 @@ fn row_height(
         .filter(|b| b.kind == crate::md::BlockKind::Image && !app.revealed(b))
         .and_then(|b| app.editor.lines().get(b.start))
         .and_then(|src| crate::md::image_line(src))
-        .map(|(_, url)| url);
-    if let Some(url) = url {
+        .map(|(_, url, max_px)| (url, max_px));
+    if let Some((url, max_px)) = url {
         // no picture (unsupported terminal, missing file) keeps the text line
-        if let Some(h) = app.images.rows(&url, dir, width) {
+        if let Some(h) = app.images.rows(&url, dir, width, max_px) {
             return (h, Some(url));
         }
     }
@@ -535,7 +535,8 @@ fn layout_preview(app: &mut App, area: Rect) -> PreviewPage {
     for pline in &rendered.lines {
         if let Some(idx) = pline.image {
             let url = rendered.images[idx].url.clone();
-            if let Some(natural) = app.images.rows(&url, &dir, area.width) {
+            let max_px = rendered.images[idx].width;
+            if let Some(natural) = app.images.rows(&url, &dir, area.width, max_px) {
                 // measured once from the full page width, so the rows an image
                 // reserves never change with the scroll
                 let h = crate::images::band_rows(natural, area.height);

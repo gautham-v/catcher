@@ -1339,7 +1339,7 @@ pub fn link_at(line: &str, col: usize) -> Option<LinkTarget> {
                 // an embedded note's `!` is part of the span too
                 let start = if i > 0 && src[i - 1] == '!' { i - 1 } else { w.start };
                 if (start..w.end).contains(&col) {
-                    return Some(LinkTarget::Wiki(w.full_target()));
+                    return Some(LinkTarget::wiki(w.full_target()));
                 }
                 i = w.end;
                 continue;
@@ -2018,6 +2018,9 @@ pub const URL_SCHEME: &str = "url:";
 /// A `#tag`, on its way from a drawn row to the picker it opens.
 pub const TAG_SCHEME: &str = "tag:";
 
+/// An attachment named by a `[[link]]`, on its way to the desktop opener.
+pub const FILE_SCHEME: &str = "attachment:";
+
 /// What a click or ⌥click landed on: a URL for the desktop, or a wikilink for
 /// the vault. The distinction has to survive, because handing `wikilink:spec`
 /// to `open`/`xdg-open` would be nonsense.
@@ -2041,9 +2044,24 @@ pub enum LinkTarget {
     Note(String),
     /// A `#tag`, without its `#`: not a note but a list of them.
     Tag(String),
+    /// An attachment — `[[report.pdf]]`, `[[board.canvas]]` — by the name it
+    /// was linked as. Found the way a picture is and opened by the desktop;
+    /// never something a note is made for.
+    File(String),
 }
 
 impl LinkTarget {
+    /// What a `[[target]]` opens: the attachment it names when the name has
+    /// an attachment's extension (see [`is_attachment_path`]), the note
+    /// otherwise.
+    pub fn wiki(target: String) -> LinkTarget {
+        if is_attachment_path(split_fragment(&target).0) {
+            LinkTarget::File(split_fragment(&target).0.to_string())
+        } else {
+            LinkTarget::Wiki(target)
+        }
+    }
+
     /// What a `[text](href)` written in a note body opens: a note, when the
     /// href is a relative path to a `.md` file (see [`note_href`]), and the
     /// desktop otherwise. Never a [`LinkTarget::Note`] — that names a file by
@@ -2063,7 +2081,8 @@ impl LinkTarget {
             LinkTarget::Url(u)
                 if u.starts_with(NOTE_SCHEME)
                     || u.starts_with(URL_SCHEME)
-                    || u.starts_with(TAG_SCHEME) =>
+                    || u.starts_with(TAG_SCHEME)
+                    || u.starts_with(FILE_SCHEME) =>
             {
                 format!("{URL_SCHEME}{u}")
             }
@@ -2071,6 +2090,7 @@ impl LinkTarget {
             LinkTarget::Wiki(t) => format!("{WIKI_SCHEME}{t}"),
             LinkTarget::Note(p) => format!("{NOTE_SCHEME}{p}"),
             LinkTarget::Tag(t) => format!("{TAG_SCHEME}{t}"),
+            LinkTarget::File(f) => format!("{FILE_SCHEME}{f}"),
         }
     }
 
@@ -2085,6 +2105,9 @@ impl LinkTarget {
         }
         if let Some(t) = href.strip_prefix(TAG_SCHEME) {
             return LinkTarget::Tag(t.to_string());
+        }
+        if let Some(f) = href.strip_prefix(FILE_SCHEME) {
+            return LinkTarget::File(f.to_string());
         }
         match href.strip_prefix(NOTE_SCHEME) {
             Some(p) => LinkTarget::Note(p.to_string()),
@@ -2167,8 +2190,17 @@ pub mod links {
 /// `theme::link()` carries and only its colour changes.
 pub fn wiki_style(base: Style, target: &str) -> Style {
     let base = base.patch(theme::link());
+    let name = split_fragment(target).0;
+    // an attachment is found beside the note, not in the index
+    if is_attachment_path(name) {
+        return if embeds::file(name).is_some() {
+            base
+        } else {
+            base.patch(theme::grey())
+        };
+    }
     // an empty name is `[[#heading]]`: the note on screen, which exists
-    if split_fragment(target).0.is_empty() || links::resolves(target) {
+    if name.is_empty() || links::resolves(target) {
         base
     } else {
         base.patch(theme::grey())
@@ -3148,7 +3180,7 @@ fn is_table_row(line: &str) -> bool {
 
 /// `![alt](url)` or an Obsidian `![[url]]` embed, and nothing else on the
 /// line — split into (alt, url).
-pub fn image_line(line: &str) -> Option<(String, String)> {
+pub fn image_line(line: &str) -> Option<(String, String, Option<u32>)> {
     let t = line.trim();
     if let Some(found) = embed_line(t) {
         return Some(found);
@@ -3160,15 +3192,16 @@ pub fn image_line(line: &str) -> Option<(String, String)> {
     if alt.contains(']') || url.contains(')') || url.is_empty() {
         return None;
     }
-    Some((alt.to_string(), url.to_string()))
+    Some((alt.to_string(), url.to_string(), None))
 }
 
 /// An Obsidian embed alone on a line: `![[picture.png]]` or
-/// `![[picture.png|alt]]`, split into (alt, url). Only pictures: an embed of
-/// another note (`![[plan]]`) is not one, and stays the text it was typed as.
-/// Obsidian also reads a bare number after the pipe as a width; here it is
-/// dropped rather than shown as alt text.
-pub fn embed_line(line: &str) -> Option<(String, String)> {
+/// `![[picture.png|alt]]`, split into (alt, url, width). Only pictures: an
+/// embed of another note (`![[plan]]`) is not one, and stays the text it was
+/// typed as. Obsidian reads a bare number after the pipe as a width in
+/// pixels (`|300`, or `|300x200` for a width and a height): that is the width
+/// the picture is drawn at, never alt text.
+pub fn embed_line(line: &str) -> Option<(String, String, Option<u32>)> {
     let t = line.trim();
     let body = t.strip_prefix("![[")?.strip_suffix("]]")?;
     if body.contains('[') || body.contains(']') || body.contains('\n') {
@@ -3181,12 +3214,43 @@ pub fn embed_line(line: &str) -> Option<(String, String)> {
     if url.is_empty() || !is_image_path(url) {
         return None;
     }
-    let alt = if alt.chars().all(|c| c.is_ascii_digit()) {
-        ""
-    } else {
-        alt
+    match embed_width(alt) {
+        Some(w) => Some((String::new(), url.to_string(), Some(w))),
+        None => Some((alt.to_string(), url.to_string(), None)),
+    }
+}
+
+/// Obsidian's size after the pipe: `300` or `300x200`, as the width in
+/// pixels. Anything else is alt text.
+fn embed_width(alt: &str) -> Option<u32> {
+    let (w, h) = match alt.split_once('x') {
+        Some((w, h)) => (w, Some(h)),
+        None => (alt, None),
     };
-    Some((alt.to_string(), url.to_string()))
+    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    if !digits(w) || h.is_some_and(|h| !digits(h)) {
+        return None;
+    }
+    w.parse().ok().filter(|&w| w > 0)
+}
+
+/// An attachment embedded alone on a line, `![[report.pdf]]` or
+/// `![[report.pdf|label]]`: a file the app cannot draw (see
+/// [`is_attachment_path`]; a picture is [`embed_line`]'s), as (name, label).
+pub fn attachment_embed_line(line: &str) -> Option<(String, Option<String>)> {
+    let t = line.trim();
+    let body = t.strip_prefix("![[")?.strip_suffix("]]")?;
+    if body.contains('[') || body.contains(']') || body.contains('\n') {
+        return None;
+    }
+    let (name, label) = match body.split_once('|') {
+        Some((u, l)) => (u.trim(), Some(l.trim()).filter(|l| !l.is_empty())),
+        None => (body.trim(), None),
+    };
+    if name.is_empty() || is_image_path(name) || !is_attachment_path(name) {
+        return None;
+    }
+    Some((name.to_string(), label.map(str::to_string)))
 }
 
 /// An Obsidian note embed: what `![[Note#Heading|label]]` names.
@@ -3217,7 +3281,7 @@ pub fn note_embed_line(line: &str) -> Option<NoteEmbed> {
         Some((n, h)) => (n.trim(), Some(h.trim()).filter(|h| !h.is_empty())),
         None => (target, None),
     };
-    if note.is_empty() || is_image_path(note) {
+    if note.is_empty() || is_attachment_path(note) {
         return None;
     }
     Some(NoteEmbed {
@@ -3229,14 +3293,30 @@ pub fn note_embed_line(line: &str) -> Option<NoteEmbed> {
 
 /// Whether a path names a picture the preview could draw, by extension.
 pub fn is_image_path(path: &str) -> bool {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase());
     matches!(
-        ext.as_deref(),
+        extension_of(path).as_deref(),
         Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff")
     )
+}
+
+/// Whether a path names an attachment rather than a note: a picture, or a
+/// file Obsidian keeps in a vault and opens outside it — a PDF, a recording,
+/// a video, a canvas. A `[[link]]` to one is handed to the desktop, and
+/// following it never makes a `.md`.
+pub fn is_attachment_path(path: &str) -> bool {
+    is_image_path(path)
+        || matches!(
+            extension_of(path).as_deref(),
+            Some("pdf" | "mp3" | "m4a" | "wav" | "mp4" | "mov" | "canvas")
+        )
+}
+
+/// The lower-cased extension of `path`, when it has one.
+fn extension_of(path: &str) -> Option<String> {
+    std::path::Path::new(path.trim())
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
 }
 
 /// Every block in the buffer, in order and never overlapping.
@@ -3361,7 +3441,9 @@ pub fn blocks_from(lines: &[String], from: usize) -> Vec<Block> {
                 start: i,
                 end: i,
             });
-        } else if links::enabled() && note_embed_line(&lines[i]).is_some() {
+        } else if links::enabled()
+            && (note_embed_line(&lines[i]).is_some() || attachment_embed_line(&lines[i]).is_some())
+        {
             out.push(Block {
                 kind: BlockKind::Embed,
                 start: i,
@@ -3632,7 +3714,7 @@ fn math_line(src: &str, first: bool, last: bool, width: usize) -> RLine {
 /// What an image line shows when the terminal can't draw pictures.
 fn image_fallback_line(src: &str) -> RLine {
     let len = src.chars().count();
-    let (alt, url) = image_line(src).unwrap_or_default();
+    let (alt, url, _) = image_line(src).unwrap_or_default();
     let label = if alt.is_empty() {
         format!("🖼 {url}")
     } else {
@@ -3703,6 +3785,24 @@ pub mod embeds {
             },
             Err(_) => Found::Unknown,
         }
+    }
+
+    /// An attachment name → the file beside the note, in its attachments
+    /// folder or the configured one: the app installs this for the note on
+    /// screen, since it is the note that says where "beside" is.
+    static FILES: RwLock<Option<Resolver>> = RwLock::new(None);
+
+    /// Install the attachment resolver. Called when the note on screen
+    /// changes, never per frame.
+    pub fn set_file_resolver(r: Resolver) {
+        if let Ok(mut w) = FILES.write() {
+            *w = Some(r);
+        }
+    }
+
+    /// The attachment `name` names, when it is there to be found.
+    pub fn file(name: &str) -> Option<PathBuf> {
+        FILES.read().ok()?.as_ref()?(name)
     }
 
     /// Back to "nothing walked yet". Only the tests want this.
@@ -3787,6 +3887,13 @@ pub fn embed_card(embed: &NoteEmbed) -> EmbedCard {
     let body = crate::notes::body_after_front_matter(&content);
     let lines: Vec<&str> = body.lines().collect();
     let section: Vec<&str> = match &embed.heading {
+        Some(h) if h.starts_with('^') => match block_under(&lines, h) {
+            Some(s) => s,
+            None => {
+                card.lines.push("(no such block)".to_string());
+                return card;
+            }
+        },
         Some(h) => match section_under(&lines, h) {
             Some(s) => s,
             None => {
@@ -3871,6 +3978,43 @@ fn section_under<'a>(lines: &[&'a str], name: &str) -> Option<Vec<&'a str>> {
     Some(lines[at + 1..end].to_vec())
 }
 
+/// The block a `^id` names: the list item carrying the id, or the paragraph
+/// — the run of non-blank lines around the line that carries it, a heading
+/// or fence bounding it. `None` when no line ends in ` ^id`.
+fn block_under<'a>(lines: &[&'a str], fragment: &str) -> Option<Vec<&'a str>> {
+    let owned: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    let at = crate::links::find_anchor(&owned, fragment)?;
+    if list_item_indent(lines[at]).is_some() {
+        return Some(vec![lines[at]]);
+    }
+    let bounds = |l: &str| {
+        l.trim().is_empty()
+            || crate::fold::heading_level(l).is_some()
+            || is_fence(l)
+            || list_item_indent(l).is_some()
+    };
+    let start = (0..at).rev().find(|&i| bounds(lines[i])).map_or(0, |i| i + 1);
+    let end = (at + 1..lines.len())
+        .find(|&i| bounds(lines[i]))
+        .unwrap_or(lines.len());
+    Some(lines[start..end].to_vec())
+}
+
+/// The indent of a list item line — `- `, `* `, `+ `, `1. ` — or `None`.
+fn list_item_indent(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    let bullet = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("+ "))
+        .is_some();
+    let numbered = trimmed
+        .find(". ")
+        .is_some_and(|i| i > 0 && trimmed[..i].chars().all(|c| c.is_ascii_digit()));
+    (bullet || numbered).then_some(indent)
+}
+
 /// A remembered read: the file's stamp and size, and what it held.
 type EmbedMemo = (Option<std::time::SystemTime>, u64, std::rc::Rc<String>);
 
@@ -3923,19 +4067,25 @@ fn embed_rail(style: Style, src: usize) -> Vec<Cell> {
 /// line, which reveals the syntax.
 fn embed_title_line(src: &str, width: usize) -> RLine {
     let len = src.chars().count();
-    let Some(embed) = note_embed_line(src) else {
+    let style = embed_style();
+    let (text, text_style) = if let Some((name, label)) = attachment_embed_line(src) {
+        match attachment_card(&name, label.as_deref()) {
+            (text, true) => (text, style.add_modifier(Modifier::BOLD)),
+            (text, false) => (text, theme::grey()),
+        }
+    } else if let Some(embed) = note_embed_line(src) {
+        let card = embed_card(&embed);
+        match card.found {
+            embeds::Found::Missing => (
+                format!("{} (no such note)", card.head()),
+                theme::grey(),
+            ),
+            _ => (card.head(), style.add_modifier(Modifier::BOLD)),
+        }
+    } else {
         return RLine::raw(src);
     };
-    let card = embed_card(&embed);
-    let style = embed_style();
     let mut cells = embed_rail(style, 0);
-    let (text, text_style) = match card.found {
-        embeds::Found::Missing => (
-            format!("{} (no such note)", card.head()),
-            theme::grey(),
-        ),
-        _ => (card.head(), style.add_modifier(Modifier::BOLD)),
-    };
     let room = if width == usize::MAX { usize::MAX } else { width.saturating_sub(2).max(1) };
     let text = if room == usize::MAX { text } else { truncate(&text, room) };
     cells.extend(text.chars().enumerate().map(|(i, ch)| Cell {
@@ -3944,6 +4094,32 @@ fn embed_title_line(src: &str, width: usize) -> RLine {
         src: (i + 2).min(len),
     }));
     done(cells, src)
+}
+
+/// The one row a `![[report.pdf]]` embed draws, in either view: the label
+/// (or the name), the file's size, and whether the file was found — `📎
+/// report.pdf (1.2 MB)`, or `📎 report.pdf (no such file)`.
+pub fn attachment_card(name: &str, label: Option<&str>) -> (String, bool) {
+    let shown = label.unwrap_or(name);
+    match embeds::file(name).and_then(|p| std::fs::metadata(p).ok()) {
+        Some(meta) => (format!("📎 {shown} ({})", human_size(meta.len())), true),
+        None => (format!("📎 {shown} (no such file)"), false),
+    }
+}
+
+/// `812 B`, `1.2 KB`, `3.4 MB`, `1.0 GB`.
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut size = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while size >= 1024.0 && unit + 1 < UNITS.len() {
+        size /= 1024.0;
+        unit += 1;
+    }
+    format!("{size:.1} {}", UNITS[unit])
 }
 
 /// The rows hung under a `![[note]]` line in the editor: the first lines of
@@ -4957,16 +5133,28 @@ mod tests {
     fn an_obsidian_embed_alone_on_a_line_is_an_image() {
         assert_eq!(
             embed_line("![[attachments/hero.jpg]]"),
-            Some((String::new(), "attachments/hero.jpg".into()))
+            Some((String::new(), "attachments/hero.jpg".into(), None))
         );
         assert_eq!(
             image_line("  ![[a.png|a cat]]  "),
-            Some(("a cat".into(), "a.png".into()))
+            Some(("a cat".into(), "a.png".into(), None))
         );
         // a bare number after the pipe is Obsidian's width, not alt text
         assert_eq!(
             image_line("![[a.png|300]]"),
-            Some((String::new(), "a.png".into()))
+            Some((String::new(), "a.png".into(), Some(300)))
+        );
+        assert_eq!(
+            embed_line("![[a.png|300x200]]"),
+            Some((String::new(), "a.png".into(), Some(300)))
+        );
+        assert_eq!(
+            embed_line("![[a.png|300x]]"),
+            Some(("300x".into(), "a.png".into(), None))
+        );
+        assert_eq!(
+            embed_line("![[a.png|0]]"),
+            Some(("0".into(), "a.png".into(), None))
         );
         // a note embed is not a picture, and neither is anything malformed
         assert_eq!(embed_line("![[plan]]"), None);
@@ -4998,6 +5186,17 @@ mod tests {
         );
         // a picture is a picture, and anything malformed is text
         assert_eq!(note_embed_line("![[a.png]]"), None);
+        // a PDF is an attachment, not a note to read the first lines of
+        assert_eq!(note_embed_line("![[report.pdf]]"), None);
+        assert_eq!(
+            attachment_embed_line("![[report.pdf|the report]]"),
+            Some(("report.pdf".into(), Some("the report".into())))
+        );
+        assert_eq!(attachment_embed_line("![[a.png]]"), None);
+        assert_eq!(attachment_embed_line("![[plan]]"), None);
+        assert!(blocks(&["![[board.canvas]]".to_string()])
+            .iter()
+            .any(|b| b.kind == BlockKind::Embed));
         assert_eq!(note_embed_line("![[plan]] tail"), None);
         assert_eq!(note_embed_line("![[#Goals]]"), None);
         assert_eq!(note_embed_line("![[a]b]]"), None);
@@ -5067,6 +5266,20 @@ mod tests {
         assert_eq!(later.more, 0);
         let nope = embed_card(&note_embed_line("![[plan#Nope]]").unwrap());
         assert_eq!(nope.lines, vec!["(no such heading)"]);
+
+        // `^id` names a block: the list item that carries it, or the
+        // paragraph around the line that does
+        crate::testutil::write(
+            &dir,
+            "blocks.md",
+            "# Blocks\n\nOne line.\nTwo line. ^para\nThree line.\n\n- a\n- b ^item\n- c\n",
+        );
+        let para = embed_card(&note_embed_line("![[blocks#^para]]").unwrap());
+        assert_eq!(para.lines, vec!["One line.", "Two line. ^para", "Three line."]);
+        let item = embed_card(&note_embed_line("![[blocks#^ITEM]]").unwrap());
+        assert_eq!(item.lines, vec!["- b ^item"]);
+        let none = embed_card(&note_embed_line("![[blocks#^gone]]").unwrap());
+        assert_eq!(none.lines, vec!["(no such block)"]);
 
         // no such note: the target as typed, and nothing to show
         let gone = embed_card(&note_embed_line("![[gone]]").unwrap());
@@ -5195,11 +5408,11 @@ mod tests {
         assert!(blocks(&buf("see ![cat](cat.png) here\n")).is_empty());
         assert_eq!(
             image_line("  ![a cat](x/cat.png)  "),
-            Some(("a cat".into(), "x/cat.png".into()))
+            Some(("a cat".into(), "x/cat.png".into(), None))
         );
         assert_eq!(
             image_line("![](p.png)"),
-            Some((String::new(), "p.png".into()))
+            Some((String::new(), "p.png".into(), None))
         );
     }
 
@@ -5715,6 +5928,33 @@ mod tests {
             link_at("see [[note]] now", 6),
             Some(LinkTarget::Wiki("note".to_string()))
         );
+    }
+
+    #[test]
+    fn an_attachment_link_is_a_file_for_the_desktop() {
+        assert!(is_attachment_path("report.pdf"));
+        assert!(is_attachment_path("Board.CANVAS"));
+        assert!(is_attachment_path("talk.m4a"));
+        assert!(is_attachment_path("a.png"));
+        assert!(!is_attachment_path("plan"));
+        assert!(!is_attachment_path("plan.md"));
+        assert_eq!(
+            LinkTarget::wiki("report.pdf".into()),
+            LinkTarget::File("report.pdf".into())
+        );
+        assert_eq!(LinkTarget::wiki("plan".into()), LinkTarget::Wiki("plan".into()));
+        let file = LinkTarget::File("board.canvas".into());
+        assert_eq!(LinkTarget::parse(&file.href()), file);
+        // a body href spelled as the scheme comes back as the URL it was
+        let url = LinkTarget::Url("attachment:x".into());
+        assert_eq!(LinkTarget::parse(&url.href()), url);
+        let line: Vec<char> = "see [[board.canvas]] now".chars().collect();
+        assert_eq!(
+            link_at(&line.iter().collect::<String>(), 8),
+            Some(LinkTarget::File("board.canvas".into()))
+        );
+        assert_eq!(human_size(812), "812 B");
+        assert_eq!(human_size(1_300_000), "1.2 MB");
     }
 
     #[test]

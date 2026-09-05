@@ -32,6 +32,8 @@ pub struct PCell {
 pub struct ImageSpec {
     pub alt: String,
     pub url: String,
+    /// Obsidian's `|300`: the width to draw at, in pixels.
+    pub width: Option<u32>,
 }
 
 /// One rendered line, plus what a click on it should do.
@@ -1417,7 +1419,7 @@ impl Ren {
     /// `off` and which has its line to itself, as (alt, url, byte offset just
     /// past the end of the line). Everything pulldown goes on to emit for the
     /// line is skipped the way the rest of a wikilink is.
-    fn embed_here(&self, off: usize) -> Option<(String, String, usize)> {
+    fn embed_here(&self, off: usize) -> Option<(String, String, Option<u32>, usize)> {
         if !crate::md::links::enabled() || !self.src[off..].starts_with("![[") {
             return None;
         }
@@ -1429,8 +1431,27 @@ impl Ren {
         if line.trim_start().len() != line_end - off {
             return None; // the embed is not the first thing on its line
         }
-        let (alt, url) = crate::md::embed_line(line)?;
-        Some((alt, url, line_end))
+        let (alt, url, width) = crate::md::embed_line(line)?;
+        Some((alt, url, width, line_end))
+    }
+
+    /// An attachment embed, `![[report.pdf]]`, whose `!` is at byte offset
+    /// `off` and which has its line to itself: (name, label, byte offset just
+    /// past the end of the line).
+    fn attachment_embed_here(&self, off: usize) -> Option<(String, Option<String>, usize)> {
+        if !crate::md::links::enabled() || !self.src[off..].starts_with("![[") {
+            return None;
+        }
+        let line_start = self.src[..off].rfind('\n').map_or(0, |n| n + 1);
+        let line_end = self.src[off..]
+            .find('\n')
+            .map_or(self.src.len(), |n| off + n);
+        let line = &self.src[line_start..line_end];
+        if line.trim_start().len() != line_end - off {
+            return None; // the embed is not the first thing on its line
+        }
+        let (name, label) = crate::md::attachment_embed_line(line)?;
+        Some((name, label, line_end))
     }
 
     /// An Obsidian note embed, `![[note]]`, whose `!` is at byte offset `off`
@@ -1477,6 +1498,24 @@ impl Ren {
 
     /// A `![[note]]` on a line of its own, as a card: a rail, the note's
     /// title (a link to it), its first lines, and how much was left out.
+    fn emit_attachment_card(&mut self, name: &str, label: Option<&str>) {
+        self.flush();
+        let style = crate::md::embed_style();
+        let idx = self.out.urls.len();
+        self.out
+            .urls
+            .push(crate::md::LinkTarget::File(name.to_string()).href());
+        let rail = format!("{} ", theme::QUOTE_BAR);
+        self.push(&rail, style, None);
+        match crate::md::attachment_card(name, label) {
+            (text, true) => self.push(&text, style.add_modifier(Modifier::BOLD), Some(idx)),
+            (text, false) => self.push(&text, theme::grey(), Some(idx)),
+        }
+        self.flush();
+    }
+
+    /// A `![[report.pdf]]` on a line of its own, as a card: a rail and one
+    /// row naming the file and its size, a link the desktop opens.
     fn emit_embed_card(&mut self, embed: &crate::md::NoteEmbed) {
         self.flush();
         let card = crate::md::embed_card(embed);
@@ -1516,12 +1555,13 @@ impl Ren {
 
     /// One picture on a line of its own: the `🖼 alt (url)` label that stands
     /// in for it, tagged with the image it stands for.
-    fn emit_image(&mut self, alt: String, url: String) {
+    fn emit_image(&mut self, alt: String, url: String, width: Option<u32>) {
         self.flush();
         let idx = self.out.images.len();
         self.out.images.push(ImageSpec {
             alt: alt.clone(),
             url: url.clone(),
+            width,
         });
         let label = if alt.is_empty() {
             format!("🖼 {url}")
@@ -1977,7 +2017,7 @@ impl Ren {
             }
             Event::End(TagEnd::Image) => {
                 if let Some((alt, url)) = self.image_alt.take() {
-                    self.emit_image(alt, url);
+                    self.emit_image(alt, url, None);
                 }
             }
             // tables
@@ -2101,10 +2141,15 @@ impl Ren {
                     // left to arrive as the text it is.
                     self.task_box(glyph, style, src_line, false);
                     self.wiki_until = range.start + 3;
-                } else if let Some((alt, url, end)) = self.embed_here(range.start) {
+                } else if let Some((alt, url, width, end)) = self.embed_here(range.start) {
                     // `![[picture.png]]` on a line of its own is a picture,
                     // the same as `![](picture.png)`; pulldown sees only text
-                    self.emit_image(alt, url);
+                    self.emit_image(alt, url, width);
+                    self.wiki_until = end;
+                } else if let Some((name, label, end)) = self.attachment_embed_here(range.start) {
+                    // `![[report.pdf]]` on a line of its own is a card naming
+                    // the file, for the desktop to open
+                    self.emit_attachment_card(&name, label.as_deref());
                     self.wiki_until = end;
                 } else if let Some((embed, end)) = self.note_embed_here(range.start) {
                     // `![[note]]` on a line of its own is the note, as a card
@@ -2117,7 +2162,7 @@ impl Ren {
                     let idx = self.out.urls.len();
                     self.out
                         .urls
-                        .push(crate::md::LinkTarget::Wiki(target.clone()).href());
+                        .push(crate::md::LinkTarget::wiki(target.clone()).href());
                     let style = crate::md::wiki_style(self.style(), &target);
                     let label = &self.src[ls..le];
                     match label.find('#').filter(|_| !aliased) {
@@ -2141,7 +2186,7 @@ impl Ren {
                     let idx = self.out.urls.len();
                     self.out
                         .urls
-                        .push(crate::md::LinkTarget::Wiki(target.clone()).href());
+                        .push(crate::md::LinkTarget::wiki(target.clone()).href());
                     let style = crate::md::wiki_style(self.style(), &target);
                     // an unaliased `[[note#Heading]]` reads `note › Heading`,
                     // as it does in the editor; the chevron is ours and maps
@@ -3687,6 +3732,23 @@ mod tests {
     }
 
     #[test]
+    fn an_attachment_embed_is_a_card_for_the_desktop() {
+        let r = render("![[report.pdf|the report]]\n");
+        let line = r.lines.iter().find(|l| l.text().contains("📎")).unwrap();
+        assert_eq!(line.text(), "▌ 📎 the report (no such file)");
+        assert_eq!(
+            crate::md::LinkTarget::parse(r.url(0).unwrap()),
+            crate::md::LinkTarget::File("report.pdf".into())
+        );
+        // in a sentence, an attachment link is still a link — to the file
+        let r = render("see [[board.canvas]] now\n");
+        assert_eq!(
+            crate::md::LinkTarget::parse(r.url(0).unwrap()),
+            crate::md::LinkTarget::File("board.canvas".into())
+        );
+    }
+
+    #[test]
     fn an_obsidian_embed_is_an_image_in_the_reading_view() {
         let r = render("before\n\n![[attachments/hero.jpg|the hero]]\n\nafter\n");
         let line = r.lines.iter().find(|l| l.image.is_some()).unwrap();
@@ -3695,6 +3757,7 @@ mod tests {
             ImageSpec {
                 alt: "the hero".into(),
                 url: "attachments/hero.jpg".into(),
+                width: None,
             }
         );
         assert_eq!(line.text(), "🖼 the hero (attachments/hero.jpg)");
@@ -3778,7 +3841,8 @@ mod tests {
             r.images[line.image.unwrap()],
             ImageSpec {
                 alt: "a cat".into(),
-                url: "cat.png".into()
+                url: "cat.png".into(),
+                width: None,
             }
         );
     }
