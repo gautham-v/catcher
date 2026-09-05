@@ -10,7 +10,7 @@ use ratatui::layout::Rect;
 use std::time::Duration;
 
 /// How long the last cell takes to settle.
-pub const DURATION: Duration = Duration::from_millis(800);
+pub const DURATION: Duration = Duration::from_millis(600);
 /// How often an unsettled cell changes its glyph.
 const FLICKER: Duration = Duration::from_millis(45);
 /// How long a cell wears the accent after it settles.
