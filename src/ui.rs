@@ -1130,6 +1130,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let quick = app.overlay == Overlay::QuickOpen;
     let browse = quick && app.tab == QuickTab::Tree;
     let contents = quick && app.tab == QuickTab::Contents;
+    let tags = quick && app.tab == QuickTab::Tags;
     let outline = app.overlay == Overlay::Outline;
     // the box is at most 100 wide and inset 2 from each side of the frame,
     // less the border: what a snippet has to fit in, known before the box is
@@ -1169,6 +1170,10 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             "indexing note contents…"
         } else if contents {
             "type to search note contents"
+        } else if tags && app.tags_scanning() {
+            "gathering tags…"
+        } else if tags {
+            "every tag in the vault — ⏎ lists its notes"
         } else if quick && app.tag_scanning() {
             "scanning for notes carrying this tag…"
         } else if quick && app.tag_filter.is_some() {
@@ -1356,7 +1361,10 @@ fn tab_strip(app: &App) -> Line<'static> {
     // the enum's declaration order is the strip's order
     let on = app.tab as usize;
     let mut spans = vec![Span::raw(" ")];
-    for (i, name) in ["recent", "tree", "contents"].into_iter().enumerate() {
+    for (i, name) in ["recent", "tree", "contents", "tags"]
+        .into_iter()
+        .enumerate()
+    {
         if i > 0 {
             spans.push(Span::styled(" · ", dim()));
         }
@@ -1557,6 +1565,13 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
         // around it is still in hand; it never reaches here
         Item::Folder(_) | Item::Line(..) | Item::Notice | Item::Heading(_) => {
             (String::new(), String::new(), "")
+        }
+        Item::Tag(tag) => {
+            let detail = match app.tag_count(tag) {
+                1 => "1 note".to_string(),
+                n => format!("{n} notes"),
+            };
+            (format!("#{tag}"), detail, "tag")
         }
         Item::MoveTo(dir) => {
             let notes = std::fs::read_dir(dir)

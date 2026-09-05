@@ -1776,9 +1776,12 @@ pub fn front_matter_values(content: &str, key: &str) -> Vec<String> {
 
 /// The other names a note answers to: its front matter `aliases`, each in the
 /// form [`link_key`] compares on. `aliases: a, b` written without brackets is
-/// read as the list it was meant to be.
+/// read as the list it was meant to be. The singular `alias:` counts too.
 pub fn front_matter_aliases(content: &str) -> Vec<String> {
-    front_matter_values(content, "aliases")
+    ["aliases", "alias"]
+        .iter()
+        .flat_map(|key| front_matter_values(content, key))
+        .collect::<Vec<_>>()
         .iter()
         .flat_map(|v| v.split(','))
         .map(link_key)
@@ -5198,6 +5201,23 @@ mod tests {
             image_line("![](p.png)"),
             Some((String::new(), "p.png".into()))
         );
+    }
+
+    #[test]
+    fn front_matter_aliases_come_from_aliases_or_the_singular_alias() {
+        assert_eq!(
+            front_matter_aliases("---\naliases: [The Spec, \"spec sheet\"]\n---\n"),
+            vec!["the spec", "spec sheet"]
+        );
+        assert_eq!(
+            front_matter_aliases("---\nalias: Solo\n---\n"),
+            vec!["solo"]
+        );
+        assert_eq!(
+            front_matter_aliases("---\naliases:\n  - one\nalias: two\n---\n"),
+            vec!["one", "two"]
+        );
+        assert!(front_matter_aliases("# none\nalias: no\n").is_empty());
     }
 
     #[test]

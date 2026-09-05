@@ -118,13 +118,14 @@ pub enum View {
     Preview,
 }
 
-/// Which of ^O's three tabs is on screen: the ranked list, the folder
-/// tree, or a search over note contents.
+/// Which of ^O's four tabs is on screen: the ranked list, the folder
+/// tree, a search over note contents, or every tag in the vault.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum QuickTab {
     Recent,
     Tree,
     Contents,
+    Tags,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -175,12 +176,13 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 32] = [
+const COMMANDS: [Command; 33] = [
     Command::Act(Action::NewNote),
     Command::Act(Action::DailyNote),
     Command::Act(Action::QuickOpen),
     Command::Act(Action::SearchAll),
     Command::Act(Action::Outline),
+    Command::Act(Action::Tags),
     Command::Act(Action::ToggleProperties),
     Command::Act(Action::HideProperties),
     Command::Act(Action::DeleteNote),
@@ -249,6 +251,7 @@ impl Command {
                 Action::OpenSplitDown => ("Open in split down", "this note again, below this one"),
                 Action::OpenTab => ("Open in new tab", "this note again, in a terminal tab"),
                 Action::Outline => ("Outline", "every heading in this note; ⏎ goes there, ⌥⏎ folds"),
+                Action::Tags => ("Tags", "every tag in the vault with its note count; ⏎ lists the notes"),
                 Action::ToggleProperties => ("Toggle properties (hide / show)", "the front matter: box, line or hidden on the page; dim or hidden in the editor"),
                 Action::HideProperties => ("Hide properties", "the front matter off the page entirely; Toggle properties brings it back"),
                 // the rest have no palette row; COMMANDS never names them
@@ -325,7 +328,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("type", "fuzzy-search titles and bodies"),
             ("↑ ↓", "move  ·  ⏎ open or run  ·  esc close"),
-            ("tab", "in ^O, next tab: recent · tree · contents"),
+            ("tab", "in ^O, next tab: recent · tree · contents · tags"),
             ("← →", "in the tree, fold and unfold a folder"),
             (
                 "⌥⏎  ⌥⇧⏎  ⌘⏎",
@@ -367,6 +370,9 @@ pub enum Item {
     /// A heading of the open note, by its line, from the outline picker.
     /// Choosing it puts the cursor there; with ⌥ it folds the section.
     Heading(usize),
+    /// A tag from the tags tab, in [`md::tag_key`] form. Choosing it lists
+    /// the notes carrying it, the way following a `#tag` does.
+    Tag(String),
     Command(Command),
 }
 
@@ -500,8 +506,13 @@ pub struct App {
     /// with. `None` once the answer has landed, so the overlay's hint can
     /// tell "scanning" from "no query yet".
     tag_rx: Option<(String, std::sync::mpsc::Receiver<TagScan>)>,
-    /// The ^O tab on screen: recent, tree, or contents.
+    /// The ^O tab on screen: recent, tree, contents, or tags.
     pub tab: QuickTab,
+    /// Every tag the tags tab lists, with how many notes carry each, most
+    /// used first. Gathered on a thread when the tab is entered.
+    tag_list: Vec<(String, usize)>,
+    /// That gathering in flight; `poll_tags_scan` takes the answer.
+    tags_rx: Option<std::sync::mpsc::Receiver<Vec<(String, usize)>>>,
     /// Every body the contents tab searches, one per `open_index` entry, read
     /// once when the tab is entered so a keystroke never touches the disk.
     contents_bodies: Vec<Option<crate::contents::Body>>,
@@ -813,6 +824,8 @@ impl App {
             index_rx: None,
             tag_rx: None,
             tab: QuickTab::Recent,
+            tag_list: Vec::new(),
+            tags_rx: None,
             tag_filter: None,
             tree_open: BTreeSet::new(),
             contents_bodies: Vec::new(),
@@ -1308,6 +1321,7 @@ impl App {
         changed |= self.follow_system_theme();
         changed |= self.poll_index_scan();
         changed |= self.poll_tag_scan();
+        changed |= self.poll_tags_scan();
         changed |= self.poll_contents_scan();
         changed |= self.maybe_peek();
         // a filename that followed its title on save; the title is the
@@ -1599,10 +1613,14 @@ impl App {
         }
         self.open_index = entries;
         self.refresh_links();
+        if self.overlay == Overlay::QuickOpen && self.tab == QuickTab::Tags {
+            self.count_tags();
+        }
         if self.overlay == Overlay::QuickOpen {
             let rows = match self.tab {
                 QuickTab::Tree => self.browse_rows().len(),
                 QuickTab::Contents => self.contents_rows().len(),
+                QuickTab::Tags => self.tag_items().len(),
                 QuickTab::Recent => self.open_items().len(),
             };
             self.selected = self.selected.min(rows.saturating_sub(1));
@@ -1636,6 +1654,30 @@ impl App {
                 true
             }
         }
+    }
+
+    /// Take the tag count started by [`App::enter_tags`] if it has finished.
+    fn poll_tags_scan(&mut self) -> bool {
+        let Some(rx) = self.tags_rx.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(tags) => {
+                self.tags_rx = None;
+                self.tag_list = tags;
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.tags_rx = None;
+                true
+            }
+        }
+    }
+
+    /// Whether the tags tab's list is still being gathered.
+    pub fn tags_scanning(&self) -> bool {
+        self.tags_rx.is_some()
     }
 
     /// Adopt a fresh set of bodies; rows cached for the old set are stale.
@@ -2454,6 +2496,52 @@ impl App {
         self.enter_contents();
     }
 
+    /// The palette's Tags: ^O, opened straight on the tags tab.
+    fn open_tags(&mut self) {
+        self.open_quick_open();
+        self.tag_filter = None;
+        self.enter_tags();
+    }
+
+    /// Entering the tags tab counts every tag over the index. Every note is
+    /// read, so the count runs on a thread the way the contents read does;
+    /// the tab is on screen at once saying it is gathering.
+    fn enter_tags(&mut self) {
+        self.tab = QuickTab::Tags;
+        self.selected = 0;
+        self.count_tags();
+    }
+
+    /// Count the tags over the index as it stands, on a thread. Run again
+    /// when a walk lands while the tab is up, so the list is the vault's.
+    fn count_tags(&mut self) {
+        let entries = self.open_index.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(index::tag_counts(&entries));
+        });
+        self.tags_rx = Some(rx);
+    }
+
+    /// The tags tab's rows for the current query: every tag that matches,
+    /// most used first.
+    pub fn tag_items(&self) -> Vec<Item> {
+        self.tag_list
+            .iter()
+            .filter(|(t, _)| self.query.is_empty() || search::fuzzy(&self.query, t).is_some())
+            .map(|(t, _)| Item::Tag(t.clone()))
+            .collect()
+    }
+
+    /// How many notes carry `tag`, as the tags tab counted them.
+    pub fn tag_count(&self, tag: &str) -> usize {
+        self.tag_list
+            .iter()
+            .find(|(t, _)| t == tag)
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
+    }
+
     /// Entering the contents tab reads every body the index reaches, once.
     /// A vault of a few thousand notes is a moment's work, done on a thread
     /// so the tab is on screen at once; after it lands each keystroke is
@@ -2602,7 +2690,8 @@ impl App {
         }
         match self.tab {
             QuickTab::Tree => self.enter_contents(),
-            QuickTab::Contents => {
+            QuickTab::Contents => self.enter_tags(),
+            QuickTab::Tags => {
                 self.tab = QuickTab::Recent;
                 self.selected = 0;
             }
@@ -2704,6 +2793,7 @@ impl App {
                     crate::contents::Row::More(_) => Item::Notice,
                 })
                 .collect(),
+            Overlay::QuickOpen if self.tab == QuickTab::Tags => self.tag_items(),
             Overlay::QuickOpen => self.open_items(),
             Overlay::MoveFile => self.move_items(),
             Overlay::Outline => self.outline_items(),
@@ -2940,6 +3030,7 @@ impl App {
             Item::Path(path) => self.open_path(&path),
             Item::Line(entry, line) => self.open_at_line(entry, line),
             Item::Heading(line) => self.goto_heading(line),
+            Item::Tag(tag) => self.open_tag(&tag),
             // handled above, before the overlay was closed
             Item::Folder(_) | Item::Notice => {}
             // palette-only: the one command without a key
@@ -3684,6 +3775,13 @@ impl App {
                     self.overlay = Overlay::None;
                 } else {
                     self.open_outline();
+                }
+            }
+            Action::Tags => {
+                if self.overlay == Overlay::QuickOpen && self.tab == QuickTab::Tags {
+                    self.overlay = Overlay::None;
+                } else {
+                    self.open_tags();
                 }
             }
             Action::ToggleProperties => {
@@ -5174,6 +5272,7 @@ mod tests {
                 "Open note",
                 "Search in all files",
                 "Outline",
+                "Tags",
                 "Toggle properties (hide / show)",
                 "Hide properties",
                 "Delete note",
@@ -5789,6 +5888,19 @@ mod tests {
             .settings_rows()
             .iter()
             .any(|(k, v, _)| *k == "key_outline" && v == "none"));
+    }
+
+    #[test]
+    fn the_tags_list_is_a_palette_command_with_a_rebindable_key() {
+        assert!(COMMANDS.contains(&Command::Act(Action::Tags)));
+        assert_eq!(Command::Act(Action::Tags).action(), Some(Action::Tags));
+        assert_eq!(Command::Act(Action::Tags).label().0, "Tags");
+        let map = crate::keys::Keymap::default();
+        assert_eq!(map.label(Action::Tags), "");
+        assert!(map
+            .settings_rows()
+            .iter()
+            .any(|(k, v, _)| *k == "key_tags" && v == "none"));
     }
 
     #[test]

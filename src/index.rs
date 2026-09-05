@@ -419,10 +419,13 @@ pub fn tags_of(content: &str) -> Vec<String> {
 /// The `tags:` a note's front matter declares, either inline — `tags: a, b`,
 /// with or without brackets — or as a YAML list on the lines under it.
 /// Only a top-level `tags:` counts; an indented one belongs to some other key.
+/// The singular `tag:` is read too, as Obsidian reads it.
 pub fn front_matter_tags(content: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for v in crate::md::front_matter_values(content, "tags") {
-        push_tags(&mut out, &v);
+    for key in ["tags", "tag"] {
+        for v in crate::md::front_matter_values(content, key) {
+            push_tags(&mut out, &v);
+        }
     }
     out
 }
@@ -448,15 +451,40 @@ pub fn tags_at(path: &Path) -> Vec<String> {
 
 /// Which entries carry `tag`, as indices into `entries` in their order.
 /// Reads every file, which is what the linked-mentions scan does too, and
-/// only when a tag is actually followed.
+/// only when a tag is actually followed. A tag covers the ones nested under
+/// it: `#work` lists the `#work/projects` notes too.
 pub fn with_tag(entries: &[Entry], tag: &str) -> Vec<usize> {
     let want = crate::md::tag_key(tag);
     entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| tags_at(&e.path).contains(&want))
+        .filter(|(_, e)| tags_at(&e.path).iter().any(|t| tag_under(t, &want)))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Whether `tag` is `want` itself or nested under it, both in [`tag_key`]
+/// form: `work/projects` is under `work`, `workshop` is not.
+pub fn tag_under(tag: &str, want: &str) -> bool {
+    tag == want
+        || tag
+            .strip_prefix(want)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Every tag the notes at `entries` carry, with how many notes carry each,
+/// most-used first and by name among equals. Reads every file, like
+/// [`with_tag`]; meant for a worker thread.
+pub fn tag_counts(entries: &[Entry]) -> Vec<(String, usize)> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for e in entries {
+        for t in tags_at(&e.path) {
+            *counts.entry(t).or_default() += 1;
+        }
+    }
+    let mut out: Vec<(String, usize)> = counts.into_iter().collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
 }
 
 /// How many paths the recents file keeps. Long enough to cover a week of
@@ -806,6 +834,38 @@ aliases: [launch, \"Go Live\"]
         assert!(front_matter_tags("---\nmeta:\n  tags: a\n---\n").is_empty());
         assert!(front_matter_tags("tags: a\n").is_empty());
         assert!(front_matter_tags("---\ntags:\n---\n").is_empty());
+        // the singular key too, and both when a note has both
+        assert_eq!(front_matter_tags("---\ntag: solo\n---\n"), vec!["solo"]);
+        assert_eq!(
+            front_matter_tags("---\ntags: a\ntag: b\n---\n"),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn a_tag_covers_the_tags_nested_under_it_but_not_its_lookalikes() {
+        assert!(tag_under("work", "work"));
+        assert!(tag_under("work/projects", "work"));
+        assert!(tag_under("work/projects/x", "work"));
+        assert!(!tag_under("workshop", "work"));
+        assert!(!tag_under("work", "work/projects"));
+    }
+
+    #[test]
+    fn tags_are_counted_across_the_index_most_used_first() {
+        let dir = tmpdir("tag-counts");
+        fs::write(dir.join("a.md"), "# A\n#work #home\n").unwrap();
+        fs::write(dir.join("b.md"), "---\ntags: [work]\n---\n# B\n#work\n").unwrap();
+        fs::write(dir.join("c.md"), "# C\n#alpha\n").unwrap();
+        let found = scan(std::slice::from_ref(&dir), &[]);
+        assert_eq!(
+            tag_counts(&found),
+            vec![
+                ("work".to_string(), 2),
+                ("alpha".to_string(), 1),
+                ("home".to_string(), 1)
+            ]
+        );
     }
 
     #[test]
@@ -828,6 +888,15 @@ aliases: [launch, \"Go Live\"]
             |idx: Vec<usize>| -> Vec<String> { idx.iter().map(|i| found[*i].name()).collect() };
         assert_eq!(names(with_tag(&found, "Work")), vec!["a", "b"]);
         assert_eq!(names(with_tag(&found, "#home")), vec!["b"]);
+        // a nested tag is listed under its parent, a lookalike is not
+        fs::write(dir.join("d.md"), "# D\n#work/projects #workshop\n").unwrap();
+        let mut found = scan(std::slice::from_ref(&dir), &[]);
+        found.sort_by(|a, b| a.rel.cmp(&b.rel));
+        let names =
+            |idx: Vec<usize>| -> Vec<String> { idx.iter().map(|i| found[*i].name()).collect() };
+        assert_eq!(names(with_tag(&found, "work")), vec!["a", "b", "d"]);
+        assert_eq!(names(with_tag(&found, "work/projects")), vec!["d"]);
+        assert_eq!(names(with_tag(&found, "workshop")), vec!["d"]);
         assert!(with_tag(&found, "none").is_empty());
         let _ = fs::remove_dir_all(&dir);
     }

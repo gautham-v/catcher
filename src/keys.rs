@@ -52,6 +52,7 @@ pub enum Action {
     Outline,
     ToggleProperties,
     HideProperties,
+    Tags,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -262,6 +263,12 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_outline",
         None,
         "outline — jump to a heading in this note, or fold it",
+    ),
+    (
+        Action::Tags,
+        "key_tags",
+        None,
+        "tags — every tag in the vault with its note count",
     ),
     (
         Action::ToggleProperties,
