@@ -144,40 +144,15 @@ pub enum Overlay {
 
 #[derive(Clone, PartialEq)]
 pub enum Command {
-    NewNote,
-    DailyNote,
-    QuickOpen,
-    SearchAll,
-    DeleteNote,
-    RenameFile,
+    /// A palette row for something a key can also do: one path, either way.
+    Act(Action),
     MoveFile,
-    TogglePreview,
-    Shortcuts,
-    OpenSettings,
-    FoldSection,
-    UnfoldSection,
-    FoldAll,
-    UnfoldAll,
-    Quit,
-    ToggleCheckbox,
-    MoveLineUp,
-    MoveLineDown,
-    ToggleHeading,
-    InsertDate,
-    CopyPath,
-    RevealFile,
-    SplitRight,
-    SplitDown,
-    NewTab,
     InsertTable,
     Table(crate::table::Op),
     TableSource,
     InsertCallout,
     InsertMath,
     InsertFootnote,
-    Outline,
-    ToggleProperties,
-    HideProperties,
 }
 
 /// The palette's row and column commands, in the order they are listed.
@@ -201,34 +176,34 @@ const TABLE_OPS: [crate::table::Op; 13] = {
 };
 
 const COMMANDS: [Command; 32] = [
-    Command::NewNote,
-    Command::DailyNote,
-    Command::QuickOpen,
-    Command::SearchAll,
-    Command::Outline,
-    Command::ToggleProperties,
-    Command::HideProperties,
-    Command::DeleteNote,
-    Command::RenameFile,
+    Command::Act(Action::NewNote),
+    Command::Act(Action::DailyNote),
+    Command::Act(Action::QuickOpen),
+    Command::Act(Action::SearchAll),
+    Command::Act(Action::Outline),
+    Command::Act(Action::ToggleProperties),
+    Command::Act(Action::HideProperties),
+    Command::Act(Action::DeleteNote),
+    Command::Act(Action::RenameFile),
     Command::MoveFile,
-    Command::TogglePreview,
-    Command::Shortcuts,
-    Command::OpenSettings,
-    Command::FoldSection,
-    Command::UnfoldSection,
-    Command::FoldAll,
-    Command::UnfoldAll,
-    Command::Quit,
-    Command::ToggleCheckbox,
-    Command::MoveLineUp,
-    Command::MoveLineDown,
-    Command::ToggleHeading,
-    Command::InsertDate,
-    Command::CopyPath,
-    Command::RevealFile,
-    Command::SplitRight,
-    Command::SplitDown,
-    Command::NewTab,
+    Command::Act(Action::TogglePreview),
+    Command::Act(Action::Help),
+    Command::Act(Action::Settings),
+    Command::Act(Action::FoldSection),
+    Command::Act(Action::UnfoldSection),
+    Command::Act(Action::FoldAll),
+    Command::Act(Action::UnfoldAll),
+    Command::Act(Action::Quit),
+    Command::Act(Action::ToggleCheckbox),
+    Command::Act(Action::MoveLineUp),
+    Command::Act(Action::MoveLineDown),
+    Command::Act(Action::ToggleHeading),
+    Command::Act(Action::InsertDate),
+    Command::Act(Action::CopyPath),
+    Command::Act(Action::RevealFile),
+    Command::Act(Action::OpenSplitRight),
+    Command::Act(Action::OpenSplitDown),
+    Command::Act(Action::OpenTab),
     Command::InsertTable,
     Command::InsertCallout,
     Command::InsertMath,
@@ -239,79 +214,51 @@ impl Command {
     /// The action this command runs, when it is one a key can be bound to —
     /// which is how the palette knows what key to show beside it.
     pub fn action(&self) -> Option<Action> {
-        Some(match self {
+        match self {
+            Command::Act(a) => Some(*a),
             // palette-only: a move is rare enough that it earns no key
-            Command::MoveFile
-            | Command::InsertTable
-            | Command::InsertCallout
-            | Command::InsertMath
-            | Command::InsertFootnote
-            | Command::Table(_)
-            | Command::TableSource => return None,
-            Command::NewNote => Action::NewNote,
-            Command::DailyNote => Action::DailyNote,
-            Command::QuickOpen => Action::QuickOpen,
-            Command::SearchAll => Action::SearchAll,
-            Command::DeleteNote => Action::DeleteNote,
-            Command::RenameFile => Action::RenameFile,
-            Command::TogglePreview => Action::TogglePreview,
-            Command::Shortcuts => Action::Help,
-            Command::OpenSettings => Action::Settings,
-            Command::FoldSection => Action::FoldSection,
-            Command::UnfoldSection => Action::UnfoldSection,
-            Command::FoldAll => Action::FoldAll,
-            Command::UnfoldAll => Action::UnfoldAll,
-            Command::Quit => Action::Quit,
-            Command::ToggleCheckbox => Action::ToggleCheckbox,
-            Command::MoveLineUp => Action::MoveLineUp,
-            Command::MoveLineDown => Action::MoveLineDown,
-            Command::ToggleHeading => Action::ToggleHeading,
-            Command::InsertDate => Action::InsertDate,
-            Command::CopyPath => Action::CopyPath,
-            Command::RevealFile => Action::RevealFile,
-            Command::SplitRight => Action::OpenSplitRight,
-            Command::SplitDown => Action::OpenSplitDown,
-            Command::NewTab => Action::OpenTab,
-            Command::Outline => Action::Outline,
-            Command::ToggleProperties => Action::ToggleProperties,
-            Command::HideProperties => Action::HideProperties,
-        })
+            _ => None,
+        }
     }
 
     pub fn label(&self) -> (&'static str, &'static str) {
         match self {
-            Command::NewNote => ("New note", "an empty note, ready to type"),
-            Command::DailyNote => ("Today's note", "one note a day, made if missing"),
-            Command::QuickOpen => ("Open note", "any folder, recent first"),
-            Command::SearchAll => ("Search in all files", "type to search note contents"),
-            Command::DeleteNote => ("Delete note", "delete the file on disk"),
-            Command::RenameFile => ("Rename file", "change the name on disk"),
+            Command::Act(a) => match a {
+                Action::NewNote => ("New note", "an empty note, ready to type"),
+                Action::DailyNote => ("Today's note", "one note a day, made if missing"),
+                Action::QuickOpen => ("Open note", "any folder, recent first"),
+                Action::SearchAll => ("Search in all files", "type to search note contents"),
+                Action::DeleteNote => ("Delete note", "delete the file on disk"),
+                Action::RenameFile => ("Rename file", "change the name on disk"),
+                Action::TogglePreview => ("Reading view", "the page, rendered"),
+                Action::Help => ("Help", "every key, on one card"),
+                Action::Settings => ("Settings", "edit them here, as a note"),
+                Action::FoldSection => ("Fold section", "hide what is under this heading"),
+                Action::UnfoldSection => ("Unfold section", "show it again"),
+                Action::FoldAll => ("Fold all", "every section, headings only"),
+                Action::UnfoldAll => ("Unfold all", "open every fold in the note"),
+                Action::Quit => ("Quit", "save and exit"),
+                Action::ToggleCheckbox => ("Toggle checkbox", "item → [ ] → [x] → item"),
+                Action::MoveLineUp => ("Move line up", "the line or selection, one up"),
+                Action::MoveLineDown => ("Move line down", "the line or selection, one down"),
+                Action::ToggleHeading => ("Toggle heading", "#, ##, ###, then none"),
+                Action::InsertDate => ("Insert today's date", "2026-09-01, at the cursor"),
+                Action::CopyPath => ("Copy path", "the note's path, to the clipboard"),
+                Action::RevealFile => ("Reveal in Finder", "show the file on disk"),
+                Action::OpenSplitRight => ("Open in split right", "this note again, beside this one"),
+                Action::OpenSplitDown => ("Open in split down", "this note again, below this one"),
+                Action::OpenTab => ("Open in new tab", "this note again, in a terminal tab"),
+                Action::Outline => ("Outline", "every heading in this note; ⏎ goes there, ⌥⏎ folds"),
+                Action::ToggleProperties => ("Toggle properties (hide / show)", "the front matter: box, line or hidden on the page; dim or hidden in the editor"),
+                Action::HideProperties => ("Hide properties", "the front matter off the page entirely; Toggle properties brings it back"),
+                // the rest have no palette row; COMMANDS never names them
+                _ => ("", ""),
+            },
             Command::MoveFile => ("Move to folder", "another folder under this one"),
-            Command::TogglePreview => ("Reading view", "the page, rendered"),
-            Command::Shortcuts => ("Help", "every key, on one card"),
-            Command::OpenSettings => ("Settings", "edit them here, as a note"),
-            Command::FoldSection => ("Fold section", "hide what is under this heading"),
-            Command::UnfoldSection => ("Unfold section", "show it again"),
-            Command::FoldAll => ("Fold all", "every section, headings only"),
-            Command::UnfoldAll => ("Unfold all", "open every fold in the note"),
-            Command::Quit => ("Quit", "save and exit"),
-            Command::ToggleCheckbox => ("Toggle checkbox", "item → [ ] → [x] → item"),
-            Command::MoveLineUp => ("Move line up", "the line or selection, one up"),
-            Command::MoveLineDown => ("Move line down", "the line or selection, one down"),
-            Command::ToggleHeading => ("Toggle heading", "#, ##, ###, then none"),
-            Command::InsertDate => ("Insert today's date", "2026-09-01, at the cursor"),
-            Command::CopyPath => ("Copy path", "the note's path, to the clipboard"),
-            Command::RevealFile => ("Reveal in Finder", "show the file on disk"),
-            Command::SplitRight => ("Open in split right", "this note again, beside this one"),
-            Command::SplitDown => ("Open in split down", "this note again, below this one"),
-            Command::NewTab => ("Open in new tab", "this note again, in a terminal tab"),
             Command::InsertTable => ("Table: Insert table", "a 2×2 grid at the cursor"),
             Command::InsertCallout => ("Insert callout", "> [!note] with a title and a body"),
             Command::InsertMath => ("Insert math block", "$$ … $$ on lines of their own"),
             Command::InsertFootnote => ("Insert footnote", "[^n] here, its text at the end of the note"),
-            Command::Outline => ("Outline", "every heading in this note; ⏎ goes there, ⌥⏎ folds"),
-            Command::ToggleProperties => ("Toggle properties (hide / show)", "the front matter: box, line or hidden on the page; dim or hidden in the editor"),
-            Command::HideProperties => ("Hide properties", "the front matter off the page entirely; Toggle properties brings it back"),
             Command::TableSource => ("Table: Edit source", "the pipes, until the cursor leaves"),
             Command::Table(op) => {
                 use crate::table::Op;
@@ -5184,23 +5131,52 @@ fn beside_place(m: KeyModifiers) -> Option<crate::terminal::Place> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn every_palette_command_but_move_is_an_action() {
-        // run_item dispatches the palette through action(); a command that
-        // returned None would silently do nothing when picked
+    fn palette_order_and_labels_are_unchanged() {
+        // the palette lists COMMANDS in this order, under these names; a
+        // reshuffle or rename here is a change users notice
+        let labels: Vec<&str> = super::COMMANDS.iter().map(|c| c.label().0).collect();
+        assert_eq!(
+            labels,
+            [
+                "New note",
+                "Today's note",
+                "Open note",
+                "Search in all files",
+                "Outline",
+                "Toggle properties (hide / show)",
+                "Hide properties",
+                "Delete note",
+                "Rename file",
+                "Move to folder",
+                "Reading view",
+                "Help",
+                "Settings",
+                "Fold section",
+                "Unfold section",
+                "Fold all",
+                "Unfold all",
+                "Quit",
+                "Toggle checkbox",
+                "Move line up",
+                "Move line down",
+                "Toggle heading",
+                "Insert today's date",
+                "Copy path",
+                "Reveal in Finder",
+                "Open in split right",
+                "Open in split down",
+                "Open in new tab",
+                "Table: Insert table",
+                "Insert callout",
+                "Insert math block",
+                "Insert footnote",
+            ]
+        );
+        // every Act row names an action with a label; the palette-only ones
+        // have none and are dispatched by run_item directly
         for c in super::COMMANDS {
-            assert_eq!(
-                c.action().is_none(),
-                matches!(
-                    c,
-                    super::Command::MoveFile
-                        | super::Command::InsertTable
-                        | super::Command::InsertCallout
-                        | super::Command::InsertMath
-                        | super::Command::InsertFootnote
-                ),
-                "{}",
-                c.label().0
-            );
+            assert!(!c.label().0.is_empty());
+            assert_eq!(c.action().is_none(), !matches!(c, super::Command::Act(_)));
         }
     }
 
@@ -5736,10 +5712,10 @@ mod tests {
     #[test]
     fn every_fold_command_has_a_palette_row_and_an_action() {
         for c in [
-            Command::FoldSection,
-            Command::UnfoldSection,
-            Command::FoldAll,
-            Command::UnfoldAll,
+            Command::Act(Action::FoldSection),
+            Command::Act(Action::UnfoldSection),
+            Command::Act(Action::FoldAll),
+            Command::Act(Action::UnfoldAll),
         ] {
             assert!(COMMANDS.contains(&c));
             assert!(c.action().is_some());
@@ -5749,15 +5725,15 @@ mod tests {
 
     #[test]
     fn toggle_properties_is_a_palette_command_with_a_rebindable_key() {
-        assert!(COMMANDS.contains(&Command::ToggleProperties));
-        assert_eq!(Command::ToggleProperties.action(), Some(Action::ToggleProperties));
-        assert_eq!(Command::ToggleProperties.label().0, "Toggle properties (hide / show)");
+        assert!(COMMANDS.contains(&Command::Act(Action::ToggleProperties)));
+        assert_eq!(Command::Act(Action::ToggleProperties).action(), Some(Action::ToggleProperties));
+        assert_eq!(Command::Act(Action::ToggleProperties).label().0, "Toggle properties (hide / show)");
         for q in ["toggle", "hide", "show", "prop"] {
-            assert!(crate::search::fuzzy(q, Command::ToggleProperties.label().0).is_some(), "{q}");
+            assert!(crate::search::fuzzy(q, Command::Act(Action::ToggleProperties).label().0).is_some(), "{q}");
         }
-        assert!(COMMANDS.contains(&Command::HideProperties));
-        assert_eq!(Command::HideProperties.action(), Some(Action::HideProperties));
-        assert_eq!(Command::HideProperties.label().0, "Hide properties");
+        assert!(COMMANDS.contains(&Command::Act(Action::HideProperties)));
+        assert_eq!(Command::Act(Action::HideProperties).action(), Some(Action::HideProperties));
+        assert_eq!(Command::Act(Action::HideProperties).label().0, "Hide properties");
         let map = crate::keys::Keymap::default();
         assert!(map
             .settings_rows()
@@ -5772,9 +5748,9 @@ mod tests {
 
     #[test]
     fn the_outline_is_a_palette_command_with_a_rebindable_key() {
-        assert!(COMMANDS.contains(&Command::Outline));
-        assert_eq!(Command::Outline.action(), Some(Action::Outline));
-        assert_eq!(Command::Outline.label().0, "Outline");
+        assert!(COMMANDS.contains(&Command::Act(Action::Outline)));
+        assert_eq!(Command::Act(Action::Outline).action(), Some(Action::Outline));
+        assert_eq!(Command::Act(Action::Outline).label().0, "Outline");
         // unbound out of the box, and settable as key_outline
         let map = crate::keys::Keymap::default();
         assert_eq!(map.label(Action::Outline), "");
