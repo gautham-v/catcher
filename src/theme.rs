@@ -317,6 +317,11 @@ pub fn highlight() -> Style {
 pub fn done() -> Style {
     Style::new().fg(palette().accent)
 }
+/// A forwarded task's `➔`: the heading colour, so it stands apart from
+/// both the accent of a done box and the dim of an open one.
+pub fn forwarded() -> Style {
+    Style::new().fg(palette().heading)
+}
 /// The text of a finished task: struck through, in `grey` rather than
 /// `dim`. It is still content you sometimes need to read, so it sits one
 /// step above hints and markers.
@@ -415,6 +420,22 @@ pub fn color_to_string(c: Color) -> String {
 
 pub const CHECKED: &str = "\u{2713}";
 pub const UNCHECKED: &str = "\u{2610}";
+/// The other states a task box can hold, in the Obsidian Tasks / Minimal
+/// convention: `[/]` in progress, `[-]` cancelled, `[>]` forwarded, `[?]`
+/// a question.
+pub const IN_PROGRESS: &str = "\u{25d0}";
+pub const CANCELLED: &str = "\u{2298}";
+pub const FORWARDED: &str = "\u{2794}";
+pub const QUESTION: &str = "?";
+/// Every glyph a task box is drawn as, so a click can tell a box from text.
+pub const TASK_GLYPHS: [&str; 6] = [
+    CHECKED,
+    UNCHECKED,
+    IN_PROGRESS,
+    CANCELLED,
+    FORWARDED,
+    QUESTION,
+];
 pub const BULLET: &str = "\u{2022}";
 /// In front of a folded heading.
 pub const FOLDED: &str = "\u{25b8} ";

@@ -26,13 +26,25 @@ fn marker_end(line: &str) -> Option<usize> {
 /// Walk a line through the three states a task can be in: plain item,
 /// unchecked, checked, and round to plain again. A line that is not a list
 /// item at all becomes an unchecked one, so the command is never a no-op.
+/// A box in one of the other states — `[/]`, `[-]`, `[>]`, `[?]` — is
+/// finished with, so it goes straight to checked.
 pub fn toggle_checkbox(line: &str) -> String {
     let Some(end) = marker_end(line) else {
         let indent = line.len() - line.trim_start().len();
         return format!("{}- [ ] {}", &line[..indent], &line[indent..]);
     };
     let (head, body) = line.split_at(end);
+    // `[/] `, `[-] `, `[>] `, `[?] `: a box in any other known state
+    let other_state = body.strip_prefix('[').and_then(|b| {
+        let c = b.chars().next()?;
+        if matches!(c, ' ' | 'x' | 'X') || crate::md::task_state(c).is_none() {
+            return None;
+        }
+        b[c.len_utf8()..].strip_prefix("] ")
+    });
     if let Some(rest) = body.strip_prefix("[ ] ") {
+        format!("{head}[x] {rest}")
+    } else if let Some(rest) = other_state {
         format!("{head}[x] {rest}")
     } else if let Some(rest) = body
         .strip_prefix("[x] ")
@@ -73,6 +85,16 @@ mod tests {
         assert_eq!(toggle_checkbox("- [ ] item"), "- [x] item");
         assert_eq!(toggle_checkbox("- [x] item"), "- item");
         assert_eq!(toggle_checkbox("- [X] item"), "- item");
+    }
+
+    #[test]
+    fn the_other_task_states_go_straight_to_checked() {
+        assert_eq!(toggle_checkbox("- [/] item"), "- [x] item");
+        assert_eq!(toggle_checkbox("- [-] item"), "- [x] item");
+        assert_eq!(toggle_checkbox("- [>] item"), "- [x] item");
+        assert_eq!(toggle_checkbox("  1. [?] item"), "  1. [x] item");
+        // an unknown state is text, so the item gets a box in front of it
+        assert_eq!(toggle_checkbox("- [z] item"), "- [ ] [z] item");
     }
 
     #[test]
