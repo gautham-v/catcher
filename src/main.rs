@@ -314,16 +314,25 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Result<()
 
 fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Result<()> {
     use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+    // the first frame is unconditional; after that the screen is painted
+    // only when an event came in (a resize included) or the tick changed
+    // something, rather than ten times a second while idle
+    let mut changed = true;
     while !app.quit {
-        // a frame goes to the terminal as one piece: ratatui clears the screen
-        // on a resize and paints it again, and without this the terminal
-        // shows the blank in between, which is the flicker a window drag had
-        let _ = crossterm::execute!(std::io::stdout(), BeginSynchronizedUpdate);
-        let drawn = terminal.draw(|f| ui::draw(f, app));
-        let _ = crossterm::execute!(std::io::stdout(), EndSynchronizedUpdate);
-        drawn?;
+        if changed {
+            // a frame goes to the terminal as one piece: ratatui clears the
+            // screen on a resize and paints it again, and without this the
+            // terminal shows the blank in between, which is the flicker a
+            // window drag had
+            let _ = crossterm::execute!(std::io::stdout(), BeginSynchronizedUpdate);
+            let drawn = terminal.draw(|f| ui::draw(f, app));
+            let _ = crossterm::execute!(std::io::stdout(), EndSynchronizedUpdate);
+            drawn?;
+        }
+        let mut handled = false;
         if event::poll(Duration::from_millis(100))? {
             handle(app, event::read()?);
+            handled = true;
             // a wheel flick or a window drag arrives as a burst; the whole
             // burst is taken before the next frame, so the screen is painted
             // once for where things ended up rather than once per step
@@ -331,7 +340,8 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Resu
                 handle(app, event::read()?);
             }
         }
-        app.tick();
+        let ticked = app.tick();
+        changed = handled || ticked;
     }
     Ok(())
 }

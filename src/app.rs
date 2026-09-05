@@ -1263,11 +1263,13 @@ impl App {
         report.describe()
     }
 
-    pub fn maybe_autosave(&mut self) {
+    pub fn maybe_autosave(&mut self) -> bool {
         let after = Duration::from_millis(self.config.autosave_ms);
         if self.dirty && self.last_edit.elapsed() >= after {
             self.save_now();
+            return true;
         }
+        false
     }
 
     pub fn flash(&mut self, msg: String) {
@@ -1277,19 +1279,23 @@ impl App {
     /// Every half second, ask whether another program has touched the open
     /// note's file. A change is taken as it stands; a deletion is announced
     /// once and the buffer kept, so the next save puts the file back.
-    fn watch_disk(&mut self) {
+    fn watch_disk(&mut self) -> bool {
         if self.disk_checked.elapsed() < Duration::from_millis(500) {
-            return;
+            return false;
         }
         self.disk_checked = Instant::now();
         match notes::sync_disk(&mut self.notes[self.active]) {
-            notes::Disk::Unchanged => {}
-            notes::Disk::Changed => self.reload_from_disk(),
+            notes::Disk::Unchanged => false,
+            notes::Disk::Changed => {
+                self.reload_from_disk();
+                true
+            }
             notes::Disk::Gone => {
                 // forget the stamp so this is said once, and so the file
                 // coming back reads as a change
                 self.notes[self.active].stamp = None;
                 self.flash("deleted on disk".to_string());
+                true
             }
         }
     }
@@ -1325,19 +1331,25 @@ impl App {
         });
     }
 
-    pub fn tick(&mut self) {
-        self.watch_disk();
-        self.maybe_autosave();
-        self.follow_system_theme();
-        self.poll_index_scan();
-        self.maybe_peek();
-        // a filename that followed its title on save
+    /// Housekeeping between frames. Returns whether anything on screen may
+    /// have changed, so the loop can skip the draw while idle; anything
+    /// unsure says yes.
+    pub fn tick(&mut self) -> bool {
+        let mut changed = self.watch_disk();
+        changed |= self.maybe_autosave();
+        changed |= self.follow_system_theme();
+        changed |= self.poll_index_scan();
+        changed |= self.maybe_peek();
+        // a filename that followed its title on save; the title is the
+        // terminal's, not the frame's
         self.sync_title();
         if let Some((_, at)) = self.status {
             if at.elapsed() > Duration::from_secs(3) {
                 self.status = None;
+                changed = true;
             }
         }
+        changed
     }
 
     /// With `theme: auto` on a terminal that was found to track the system
@@ -1345,16 +1357,16 @@ impl App {
     /// already repainted itself by then, and the old palette reads wrong on
     /// it. Checked every couple of seconds; a change reloads the settings so
     /// colour overrides still sit on top of the new base.
-    fn follow_system_theme(&mut self) {
+    fn follow_system_theme(&mut self) -> bool {
         if self.config.theme != crate::config::Theme::Auto
             || !crate::theme::follows_system()
             || self.theme_checked.elapsed() < Duration::from_secs(2)
         {
-            return;
+            return false;
         }
         self.theme_checked = Instant::now();
         let Some(mode) = crate::theme::system_mode() else {
-            return;
+            return false;
         };
         if mode != crate::theme::detected() {
             crate::theme::set_detected(mode);
@@ -1363,7 +1375,9 @@ impl App {
                 self.config = config;
                 self.config_gen += 1;
             }
+            return true;
         }
+        false
     }
 
     /// Every way of opening a note that already exists ends here or in
@@ -1556,20 +1570,24 @@ impl App {
     }
 
     /// Take a walk started by [`App::start_index_scan`] if it has finished.
-    fn poll_index_scan(&mut self) {
+    fn poll_index_scan(&mut self) -> bool {
         let Some(rx) = self.index_rx.as_ref() else {
-            return;
+            return false;
         };
         match rx.try_recv() {
             Ok(entries) => {
                 self.open_index = entries;
                 self.index_rx = None;
                 self.refresh_links();
+                true
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
             // only a panic in the walk can do this; there is nothing to wait
             // for any more, and ^O will walk again itself
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.index_rx = None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.index_rx = None;
+                true
+            }
         }
     }
 
@@ -1954,12 +1972,12 @@ impl App {
     }
 
     /// Open the peek for a hover that has lasted long enough.
-    fn maybe_peek(&mut self) {
+    fn maybe_peek(&mut self) -> bool {
         let Some((url, rect, since)) = self.hover.clone() else {
-            return;
+            return false;
         };
         if since.elapsed() < PEEK_DWELL || self.peek.as_ref().is_some_and(|p| p.target == url) {
-            return;
+            return false;
         }
         if let Some(peek) = self.load_peek(&url, rect) {
             self.peek = Some(peek);
@@ -1968,6 +1986,7 @@ impl App {
             // tick for as long as the pointer sits there
             self.hover = None;
         }
+        true
     }
 
     /// ⌥P: peek at the [[wikilink]] under the editor cursor, which is the
