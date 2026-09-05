@@ -1,10 +1,10 @@
 use crate::app::{App, EditRow, Item, Overlay, PageRow, PreviewPage, QuickTab, TableEdge, View};
 use crate::config::BorderStyle;
 use crate::md::truncate;
-use crate::theme;
-use crate::render::PCell;
 #[cfg(test)]
 use crate::render::wrap_pcells as wrap_cells;
+use crate::render::PCell;
+use crate::theme;
 use crate::tree::RowKind;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -195,7 +195,8 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                         .filter(|c| block.contains(*c))
                         .map(|c| c - block.start);
                     let inner = width.saturating_sub(crate::app::TABLE_GUTTER);
-                    let spans = crate::md::table_column_spans(app.editor.lines(), &block, inner, raw);
+                    let spans =
+                        crate::md::table_column_spans(app.editor.lines(), &block, inner, raw);
                     let mut text = " ".repeat(crate::app::TABLE_GUTTER);
                     let mut x = crate::app::TABLE_GUTTER;
                     for (ci, (at, w)) in spans.iter().enumerate() {
@@ -230,7 +231,9 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                         seg: i,
                     });
                     // the grip in a table row's gutter selects the row
-                    if i == 0 && matches!(app.table_hover, Some((_, crate::app::TableEdge::Left(r))) if r == *row) {
+                    if i == 0
+                        && matches!(app.table_hover, Some((_, crate::app::TableEdge::Left(r))) if r == *row)
+                    {
                         app.table_handles.push((
                             Rect::new(area.x, y, crate::app::TABLE_GUTTER as u16, 1),
                             crate::app::TableHandle::SelectRow(*row),
@@ -248,23 +251,26 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                 // the rows a table row carries under it: its rule, and at
                 // the bottom edge the add-row handle
                 let mut used = segs.len();
-                let mut extra = |app: &mut App, line: Line<'static>, handle: Option<(u16, u16, crate::app::TableHandle)>| {
-                    if used >= *h as usize {
-                        return;
-                    }
-                    let yy = y + used as u16;
-                    app.edit_rows.push(EditRow {
-                        rect: Rect::new(area.x, yy, area.width, 1),
-                        line: *row,
-                        seg: used,
-                    });
-                    if let Some((x, w, handle)) = handle {
-                        app.table_handles
-                            .push((Rect::new(area.x + x, yy, w, 1), handle));
-                    }
-                    lines.push(line);
-                    used += 1;
-                };
+                let mut extra =
+                    |app: &mut App,
+                     line: Line<'static>,
+                     handle: Option<(u16, u16, crate::app::TableHandle)>| {
+                        if used >= *h as usize {
+                            return;
+                        }
+                        let yy = y + used as u16;
+                        app.edit_rows.push(EditRow {
+                            rect: Rect::new(area.x, yy, area.width, 1),
+                            line: *row,
+                            seg: used,
+                        });
+                        if let Some((x, w, handle)) = handle {
+                            app.table_handles
+                                .push((Rect::new(area.x + x, yy, w, 1), handle));
+                        }
+                        lines.push(line);
+                        used += 1;
+                    };
                 for close in app.callout_close_rows(&blocks, *row, width) {
                     extra(app, close.to_line(None), None);
                 }
@@ -279,16 +285,23 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                         app.editor.lines(),
                         &block,
                         inner,
-                        Some(app.editor.cursor.0).filter(|c| block.contains(*c)).map(|c| c - block.start),
+                        Some(app.editor.cursor.0)
+                            .filter(|c| block.contains(*c))
+                            .map(|c| c - block.start),
                     );
                     // under two selected rows the rule is part of the block
                     if let Some(sel) = app.cell_sel.filter(|s| s.start == block.start) {
-                        if let Some(t) = crate::table::Table::parse(&app.editor.lines()[block.start..=block.end]) {
+                        if let Some(t) =
+                            crate::table::Table::parse(&app.editor.lines()[block.start..=block.end])
+                        {
                             let rect = sel.rect(t.rows.len(), t.cols());
                             let r = t.row_of(*row - block.start);
                             if r.is_some_and(|r| r >= rect.r0 && r < rect.r1) {
                                 for cell in &mut rule.cells {
-                                    if cell.src != usize::MAX && cell.src >= rect.c0 && cell.src <= rect.c1 {
+                                    if cell.src != usize::MAX
+                                        && cell.src >= rect.c0
+                                        && cell.src <= rect.c1
+                                    {
                                         cell.style = cell.style.patch(theme::row());
                                     }
                                 }
@@ -296,7 +309,8 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                         }
                     }
                     let mut line = rule.to_line(None);
-                    line.spans.insert(0, Span::raw(" ".repeat(crate::app::TABLE_GUTTER)));
+                    line.spans
+                        .insert(0, Span::raw(" ".repeat(crate::app::TABLE_GUTTER)));
                     // the add-column handle, when the table's middle is this rule
                     let mut handle = None;
                     if app.hovered_table_edge(&blocks, *row, TableEdge::Right)
@@ -318,7 +332,8 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                         .filter(|c| block.contains(*c))
                         .map(|c| c - block.start);
                     let inner = width.saturating_sub(crate::app::TABLE_GUTTER);
-                    let spans = crate::md::table_column_spans(app.editor.lines(), &block, inner, raw);
+                    let spans =
+                        crate::md::table_column_spans(app.editor.lines(), &block, inner, raw);
                     let cols_w = spans.last().map(|(at, w)| at + w).unwrap_or(1);
                     let grid = crate::app::TABLE_GUTTER + cols_w;
                     let line = Line::from(vec![
@@ -389,7 +404,9 @@ fn table_handle(
     let Some(block) = crate::md::block_at(blocks, row) else {
         return;
     };
-    if block.kind != crate::md::BlockKind::Table || !app.hovered_table_edge(blocks, row, TableEdge::Right) {
+    if block.kind != crate::md::BlockKind::Table
+        || !app.hovered_table_edge(blocks, row, TableEdge::Right)
+    {
         return;
     }
     // one handle, on the row at the middle of the drawn table, rules
@@ -455,7 +472,9 @@ fn row_height(
     let extra = usize::from(app.table_rule_under(blocks, row))
         + usize::from(app.hovered_table_edge(blocks, row, TableEdge::Bottom))
         + usize::from(app.hovered_table_edge(blocks, row, TableEdge::Top))
-        + app.callout_close_rows(blocks, row, width.max(1) as usize).len()
+        + app
+            .callout_close_rows(blocks, row, width.max(1) as usize)
+            .len()
         + app.embed_rows(blocks, row, width.max(1) as usize).len();
     ((rows.max(1) + extra) as u16, None)
 }
@@ -562,7 +581,10 @@ fn layout_preview(app: &mut App, area: Rect) -> PreviewPage {
             });
             continue;
         }
-        for (i, cells) in crate::render::wrap_pline(pline, width).into_iter().enumerate() {
+        for (i, cells) in crate::render::wrap_pline(pline, width)
+            .into_iter()
+            .enumerate()
+        {
             rows.push(PageRow {
                 cells,
                 checkbox: if i == 0 { pline.checkbox } else { None },

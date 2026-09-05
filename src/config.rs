@@ -80,8 +80,10 @@ pub enum PreviewClick {
 }
 
 impl Words for PreviewClick {
-    const WORDS: &'static [(Self, &'static str)] =
-        &[(PreviewClick::Select, "select"), (PreviewClick::Edit, "edit")];
+    const WORDS: &'static [(Self, &'static str)] = &[
+        (PreviewClick::Select, "select"),
+        (PreviewClick::Edit, "edit"),
+    ];
 }
 
 /// What the editor does with a note's YAML front matter. The reading view has
@@ -222,6 +224,10 @@ impl Theme {
 pub struct Config {
     pub notes_dir: PathBuf,
     pub attachments_dir: PathBuf,
+    /// The per-note attachments subfolder a link is also looked for in:
+    /// `attachments`, or what an Obsidian vault's `./sub` setting names. Not
+    /// a setting of its own — read from the vault, never written.
+    pub attachment_subfolder: String,
     pub theme: Theme,
     /// User colour overrides, already applied on top of the theme's palette.
     pub palette: Palette,
@@ -284,6 +290,7 @@ impl Default for Config {
         let notes_dir = default_notes_dir(&home);
         Config {
             attachments_dir: notes_dir.join("attachments"),
+            attachment_subfolder: "attachments".to_string(),
             notes_dir,
             theme: Theme::Auto,
             palette: theme::base(theme::detected()),
@@ -405,9 +412,50 @@ impl Config {
             c.notes_dir = PathBuf::from(d);
             if value(text, "attachments_dir").is_none() {
                 c.attachments_dir = c.notes_dir.join("attachments");
+                c.adopt_obsidian_attachments();
             }
         }
         c
+    }
+
+    /// When `attachments_dir` is not set (or is just the default), take the
+    /// vault's own answer: Obsidian keeps where it puts attachments in
+    /// `.obsidian/app.json`, and a link written there points where that says.
+    fn adopt_obsidian_attachments(&mut self) {
+        if self.attachments_dir != self.notes_dir.join("attachments") {
+            return;
+        }
+        let Ok(text) = fs::read_to_string(self.notes_dir.join(".obsidian/app.json")) else {
+            return;
+        };
+        if let Some(setting) = obsidian_attachment_setting(&text) {
+            self.set_obsidian_attachments(&setting);
+        }
+    }
+
+    /// Apply an Obsidian `attachmentFolderPath`: `./` means beside the note,
+    /// `./sub` a subfolder beside the note, anything else a vault folder.
+    fn set_obsidian_attachments(&mut self, setting: &str) {
+        let setting = setting.trim().trim_end_matches('/');
+        match setting
+            .strip_prefix("./")
+            .or(if setting == "." { Some("") } else { None })
+        {
+            Some("") => {
+                self.attachments_dir = self.notes_dir.clone();
+                self.attachment_subfolder = ".".to_string();
+            }
+            Some(sub) => {
+                self.attachments_dir = self.notes_dir.join(sub);
+                self.attachment_subfolder = sub.to_string();
+            }
+            None if setting.is_empty() || setting == "/" => {
+                self.attachments_dir = self.notes_dir.clone();
+            }
+            None => {
+                self.attachments_dir = self.notes_dir.join(setting.trim_start_matches('/'));
+            }
+        }
     }
 
     /// The file alone, as it would be written back.
@@ -422,6 +470,7 @@ impl Config {
         if let Some(v) = value(text, "attachments_dir") {
             c.attachments_dir = expand(&v, &home);
         }
+        c.adopt_obsidian_attachments();
 
         // anything unrecognised is auto: a typo should leave the terminal's
         // own polarity standing rather than pin a palette that reads wrong
@@ -573,11 +622,7 @@ impl Config {
         );
 
         d.section("Appearance");
-        d.row(
-            "theme",
-            self.theme.name(),
-            "auto · dark · light",
-        );
+        d.row("theme", self.theme.name(), "auto · dark · light");
         d.row(
             "page_width",
             if self.page_width == 0 {
@@ -587,11 +632,7 @@ impl Config {
             },
             "columns of note, or full",
         );
-        d.row(
-            "borders",
-            self.borders.name(),
-            "rounded · square · none",
-        );
+        d.row("borders", self.borders.name(), "rounded · square · none");
         d.row("bold_headings", yn(self.bold_headings), "yes · no");
         d.row("status_bar", yn(self.status_bar), "the bottom line at all");
         d.row("key_hints", yn(self.key_hints), "the shortcuts in it");
@@ -654,11 +695,7 @@ impl Config {
             self.table_style.name(),
             "auto · scroll · fit · wrap · cards",
         );
-        d.row(
-            "preview_click",
-            self.preview_click.name(),
-            "select · edit",
-        );
+        d.row("preview_click", self.preview_click.name(), "select · edit");
         d.row(
             "properties",
             self.properties.name(),
@@ -870,6 +907,36 @@ impl Doc {
 ///
 /// Both separators are accepted so a `key = value` typed out of habit still
 /// works.
+/// The `attachmentFolderPath` string in an Obsidian `app.json`, found by
+/// looking rather than parsing: the file is flat and the value is a plain
+/// string, and a JSON reader would be a dependency for one key.
+pub fn obsidian_attachment_setting(json: &str) -> Option<String> {
+    let key = "\"attachmentFolderPath\"";
+    let rest = &json[json.find(key)? + key.len()..];
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    let code = u32::from_str_radix(&hex, 16).ok()?;
+                    out.push(char::from_u32(code)?);
+                }
+                other => out.push(other),
+            },
+            c => out.push(c),
+        }
+    }
+    None
+}
+
 fn value(text: &str, key: &str) -> Option<String> {
     for line in text.lines() {
         let line = strip_comment(line);
@@ -1326,7 +1393,10 @@ mod tests {
     fn properties_is_a_reading_setting_that_round_trips() {
         let c = Config::from_str("- properties: line\n");
         assert_eq!(c.properties, Properties::Line);
-        assert_eq!(Config::from_str("- properties: hide\n").properties, Properties::Hide);
+        assert_eq!(
+            Config::from_str("- properties: hide\n").properties,
+            Properties::Hide
+        );
         assert_eq!(Config::from_str("").properties, Properties::Box);
         assert!(c.to_document().contains("- properties: line"));
     }
@@ -1344,7 +1414,10 @@ mod tests {
         let out = with_value("- wikilinks: yes\n", "properties", "hide");
         assert!(out.ends_with("- wikilinks: yes\n- properties: hide\n"));
         // a value without a hint
-        assert_eq!(with_value("- front_matter: dim\n", "front_matter", "hide"), "- front_matter: hide\n");
+        assert_eq!(
+            with_value("- front_matter: dim\n", "front_matter", "hide"),
+            "- front_matter: hide\n"
+        );
     }
 
     #[test]
@@ -1354,6 +1427,73 @@ mod tests {
         assert!(Config::from_str("- key_hints: yes").key_hints);
         // unset leaves the default
         assert!(Config::from_str("").key_hints);
+    }
+
+    #[test]
+    fn reads_the_attachment_folder_from_obsidian_app_json() {
+        let json = r#"{ "promptDelete": false, "attachmentFolderPath": "Files/img", "x": 1 }"#;
+        assert_eq!(
+            obsidian_attachment_setting(json).as_deref(),
+            Some("Files/img")
+        );
+        let json = "{\n  \"attachmentFolderPath\" : \"./\"\n}";
+        assert_eq!(obsidian_attachment_setting(json).as_deref(), Some("./"));
+        assert_eq!(
+            obsidian_attachment_setting(r#"{"attachmentFolderPath":"a \"q\" \u0041"}"#).as_deref(),
+            Some("a \"q\" A")
+        );
+        assert_eq!(obsidian_attachment_setting(r#"{"other": "x"}"#), None);
+        assert_eq!(
+            obsidian_attachment_setting(r#"{"attachmentFolderPath": 3}"#),
+            None
+        );
+        assert_eq!(
+            obsidian_attachment_setting(r#"{"attachmentFolderPath": "open"#),
+            None
+        );
+    }
+
+    #[test]
+    fn obsidian_attachment_settings_map_onto_the_lookup() {
+        let mut c = Config {
+            notes_dir: PathBuf::from("/v"),
+            attachments_dir: PathBuf::from("/v/attachments"),
+            ..Default::default()
+        };
+        c.set_obsidian_attachments("Files");
+        assert_eq!(c.attachments_dir, PathBuf::from("/v/Files"));
+        assert_eq!(c.attachment_subfolder, "attachments");
+        c.set_obsidian_attachments("./");
+        assert_eq!(c.attachments_dir, PathBuf::from("/v"));
+        assert_eq!(c.attachment_subfolder, ".");
+        c.set_obsidian_attachments("./_media");
+        assert_eq!(c.attachments_dir, PathBuf::from("/v/_media"));
+        assert_eq!(c.attachment_subfolder, "_media");
+
+        // a named attachments_dir is left alone; the default is replaced
+        let dir = std::env::temp_dir().join("catcher-obsidian-cfg-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".obsidian")).unwrap();
+        std::fs::write(
+            dir.join(".obsidian/app.json"),
+            r#"{"attachmentFolderPath": "Files"}"#,
+        )
+        .unwrap();
+        let mut c = Config {
+            notes_dir: dir.clone(),
+            attachments_dir: dir.join("attachments"),
+            ..Default::default()
+        };
+        c.adopt_obsidian_attachments();
+        assert_eq!(c.attachments_dir, dir.join("Files"));
+        let mut c = Config {
+            notes_dir: dir.clone(),
+            attachments_dir: PathBuf::from("/pics"),
+            ..Default::default()
+        };
+        c.adopt_obsidian_attachments();
+        assert_eq!(c.attachments_dir, PathBuf::from("/pics"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

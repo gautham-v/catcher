@@ -654,7 +654,9 @@ pub fn apply_folds(
             }
             // a card's `│   │` spacer row under a folded title went with the body
             None if !line.cells.is_empty()
-                && out.last().is_some_and(|p| p.src_line.is_some_and(|l| folded.contains(&l))) =>
+                && out
+                    .last()
+                    .is_some_and(|p| p.src_line.is_some_and(|l| folded.contains(&l))) =>
             {
                 continue
             }
@@ -713,7 +715,11 @@ fn mark_folded_card(line: &mut PLine, src: usize, hidden: usize) {
     let mut tail = str_cells(" ", style);
     tail.extend(str_cells(&label, theme::marker()));
     tail.extend(str_cells(" ─", style));
-    close = line.cells.iter().rposition(|c| c.ch == '╮').unwrap_or(close);
+    close = line
+        .cells
+        .iter()
+        .rposition(|c| c.ch == '╮')
+        .unwrap_or(close);
     line.cells.splice(close - need..close, tail);
 }
 
@@ -2155,7 +2161,9 @@ impl Ren {
                     // `![[note]]` on a line of its own is the note, as a card
                     self.emit_embed_card(&embed);
                     self.wiki_until = end;
-                } else if let Some((end, target, ls, le, aliased)) = self.note_link_here(range.start) {
+                } else if let Some((end, target, ls, le, aliased)) =
+                    self.note_link_here(range.start)
+                {
                     // `![[note]]` in a sentence is the link it also is, the
                     // `!` swallowed with the brackets; a bare `Note#Heading`
                     // reads as `Note › Heading`
@@ -2167,7 +2175,8 @@ impl Ren {
                     let label = &self.src[ls..le];
                     match label.find('#').filter(|_| !aliased) {
                         Some(h) => {
-                            let (note, heading) = (label[..h].to_string(), label[h + 1..].to_string());
+                            let (note, heading) =
+                                (label[..h].to_string(), label[h + 1..].to_string());
                             self.push_at(&note, style, Some(idx), Some(ls));
                             self.push(" › ", style, Some(idx));
                             self.push_at(&heading, style, Some(idx), Some(ls + h + 1));
@@ -2949,7 +2958,11 @@ mod tests {
     #[test]
     fn wrapped_list_item_hangs_under_its_text() {
         let r = render_wide("1. alpha beta gamma delta epsilon zeta\n", 20);
-        let item = r.lines.iter().find(|l| l.text().starts_with("1. ")).unwrap();
+        let item = r
+            .lines
+            .iter()
+            .find(|l| l.text().starts_with("1. "))
+            .unwrap();
         assert_eq!(item.hang, 3);
         let rows: Vec<String> = wrap_pline(item, 20)
             .iter()
@@ -2957,13 +2970,20 @@ mod tests {
             .collect();
         assert!(rows.len() > 1, "{rows:?}");
         assert!(rows[0].starts_with("1. alpha"), "{rows:?}");
-        assert!(rows[1].starts_with("   ") && !rows[1].starts_with("    "), "{rows:?}");
+        assert!(
+            rows[1].starts_with("   ") && !rows[1].starts_with("    "),
+            "{rows:?}"
+        );
     }
 
     #[test]
     fn rule_spans_the_page() {
         let r = render_wide("a\n\n---\n\nb\n", 60);
-        assert!(r.lines.iter().any(|l| l.text() == "─".repeat(60)), "{}", flat(&r));
+        assert!(
+            r.lines.iter().any(|l| l.text() == "─".repeat(60)),
+            "{}",
+            flat(&r)
+        );
     }
 
     #[test]
@@ -3016,12 +3036,23 @@ mod tests {
 
     #[test]
     fn footnotes_and_maths_render_on_the_page() {
-        let r = render_wide("Tea[^1] and $x$.\n\n$$\nE = mc^2\n$$\n\n[^1]: Tickles\n", 20);
+        let r = render_wide(
+            "Tea[^1] and $x$.\n\n$$\nE = mc^2\n$$\n\n[^1]: Tickles\n",
+            20,
+        );
         let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
         assert!(rows.iter().any(|t| t == "Tea¹ and x."), "{rows:?}");
-        assert!(rows.iter().any(|t| t.trim() == "E = mc^2" && t.starts_with("     ")), "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|t| t.trim() == "E = mc^2" && t.starts_with("     ")),
+            "{rows:?}"
+        );
         assert!(rows.iter().any(|t| t == "¹ Tickles"), "{rows:?}");
-        assert!(rows.iter().all(|t| !t.contains("[^1]") && !t.contains("$$")), "{rows:?}");
+        assert!(
+            rows.iter()
+                .all(|t| !t.contains("[^1]") && !t.contains("$$")),
+            "{rows:?}"
+        );
     }
 
     #[test]
@@ -3185,15 +3216,31 @@ mod tests {
         let w = 40;
         let r = render_wide(md, w);
         let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
-        let outer = rows.iter().position(|t| t.starts_with("╭─ i note · Outer")).expect("outer top");
-        let inner = rows.iter().position(|t| t.starts_with("│ ╭─ ✓ tip · Inner")).expect("inner top");
+        let outer = rows
+            .iter()
+            .position(|t| t.starts_with("╭─ i note · Outer"))
+            .expect("outer top");
+        let inner = rows
+            .iter()
+            .position(|t| t.starts_with("│ ╭─ ✓ tip · Inner"))
+            .expect("inner top");
         assert!(inner > outer);
         assert!(rows[inner].ends_with("╮ │"), "{:?}", rows[inner]);
         let b = rows.iter().find(|t| t.contains(" b ")).expect("inner body");
         assert!(b.starts_with("│ │ b") && b.ends_with("│ │"), "{b:?}");
-        let inner_close = rows.iter().position(|t| t.starts_with("│ ╰")).expect("inner bottom");
-        assert!(inner_close > inner && rows[inner_close].ends_with("╯ │"), "{:?}", rows[inner_close]);
-        let c = rows.iter().position(|t| t.starts_with("│ c")).expect("outer body after");
+        let inner_close = rows
+            .iter()
+            .position(|t| t.starts_with("│ ╰"))
+            .expect("inner bottom");
+        assert!(
+            inner_close > inner && rows[inner_close].ends_with("╯ │"),
+            "{:?}",
+            rows[inner_close]
+        );
+        let c = rows
+            .iter()
+            .position(|t| t.starts_with("│ c"))
+            .expect("outer body after");
         assert!(c > inner_close);
         let outer_close = rows.iter().rposition(|t| t.starts_with('╰')).unwrap();
         assert!(outer_close > c);
@@ -3211,14 +3258,21 @@ mod tests {
         // open, the marker says it can fold
         let open = folded(md, &[], 30);
         let rows: Vec<String> = open.lines.iter().map(|l| l.text()).collect();
-        assert!(rows.iter().any(|t| t.starts_with("╭─ ▾ ✓ tip · Go")), "{rows:?}");
+        assert!(
+            rows.iter().any(|t| t.starts_with("╭─ ▾ ✓ tip · Go")),
+            "{rows:?}"
+        );
         // folded, the body is gone and the edge sits right under the title
         let r = folded(md, &[0], 30);
         let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
         let top = rows.iter().position(|t| t.starts_with('╭')).expect("top");
         assert_eq!(rows[top], "╭─ ▸ ✓ tip · Go ─── 2 lines ─╮");
         assert!(rows[top + 1].starts_with('╰'), "{rows:?}");
-        assert!(rows.iter().all(|t| !t.contains(" a ") && !t.contains(" b ")), "{rows:?}");
+        assert!(
+            rows.iter()
+                .all(|t| !t.contains(" a ") && !t.contains(" b ")),
+            "{rows:?}"
+        );
         assert!(rows.iter().any(|t| t == "after"));
         // a callout with no marker folds too, and keeps its width doing so
         let r = folded("> [!tip] Go\n> a\n", &[0], 30);
@@ -3313,10 +3367,14 @@ mod tests {
 
     #[test]
     fn comments_are_dropped_inline_and_as_blocks() {
-        let md = "a <!-- hush --> b\n\n<!-- block\nstill hidden -->\n\nafter <!-- multi\nline --> end\n";
+        let md =
+            "a <!-- hush --> b\n\n<!-- block\nstill hidden -->\n\nafter <!-- multi\nline --> end\n";
         let r = render(md);
         let f = flat(&r);
-        assert!(!f.contains("hush") && !f.contains("hidden") && !f.contains("line"), "{f:?}");
+        assert!(
+            !f.contains("hush") && !f.contains("hidden") && !f.contains("line"),
+            "{f:?}"
+        );
         assert!(f.contains("a  b"), "{f:?}");
         assert!(f.contains("after  end"), "{f:?}");
         assert!(!f.contains("<!--") && !f.contains("-->"), "{f:?}");
@@ -3324,7 +3382,9 @@ mod tests {
 
     #[test]
     fn unknown_tags_are_stripped_and_their_text_kept() {
-        let r = render("<div class=\"x\">\nhello <b>there</b>\n</div>\n\n<span>after</span> <i>x</i>\n");
+        let r = render(
+            "<div class=\"x\">\nhello <b>there</b>\n</div>\n\n<span>after</span> <i>x</i>\n",
+        );
         let t = texts(&r);
         assert!(t.iter().any(|l| l == "hello there"), "{t:?}");
         assert!(t.iter().any(|l| l == "after x"), "{t:?}");
@@ -3339,7 +3399,10 @@ mod tests {
     fn an_unclosed_tag_does_not_leak_past_its_paragraph() {
         let r = render("<u>open\n\nnext\n\n- <mark>item\n- other\n");
         let next = r.lines.iter().find(|l| l.text() == "next").unwrap();
-        assert!(!next.cells[0].style.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!next.cells[0]
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
         let other = r.lines.iter().find(|l| l.text().contains("other")).unwrap();
         let o = other.cells.iter().find(|c| c.ch == 'h').unwrap();
         assert_eq!(o.style.bg, None);
@@ -3465,7 +3528,13 @@ mod tests {
     fn front_matter_is_drawn_as_a_box_of_properties_above_the_body() {
         let content = "---\ntitle: Launch\ndue: 2026-10-10\ntags: [work, q3]\naliases:\n  - launch\n  - go live\n---\n# Title\n";
         let mut r = body_of(content);
-        prepend_properties(&mut r, content, 60, (2026, 9, 5), crate::config::Properties::Box);
+        prepend_properties(
+            &mut r,
+            content,
+            60,
+            (2026, 9, 5),
+            crate::config::Properties::Box,
+        );
         let page: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
         assert!(page[0].starts_with("┌ properties ─"));
         assert!(page[0].ends_with('┐'));
@@ -3491,7 +3560,13 @@ mod tests {
         assert_eq!(tag.style.fg, theme::tag().fg);
         // and a note without front matter is left exactly as it was
         let mut plain = body_of("# Title\n");
-        prepend_properties(&mut plain, "# Title\n", 60, (2026, 9, 5), crate::config::Properties::Box);
+        prepend_properties(
+            &mut plain,
+            "# Title\n",
+            60,
+            (2026, 9, 5),
+            crate::config::Properties::Box,
+        );
         assert!(plain.lines[0].text().contains("Title"));
     }
 
@@ -3773,7 +3848,10 @@ mod tests {
         // a note embed is not a picture: it is a card (see the embed tests)
         let r = render("![[plan]]\n");
         assert!(r.lines.iter().all(|l| l.image.is_none()));
-        assert!(r.lines.iter().any(|l| l.text().to_lowercase().contains("▌ plan")));
+        assert!(r
+            .lines
+            .iter()
+            .any(|l| l.text().to_lowercase().contains("▌ plan")));
     }
 
     #[test]
@@ -3789,10 +3867,19 @@ mod tests {
 
         let r = render("before\n\n![[plan#Goals]]\n\nafter\n");
         let texts: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
-        let at = texts.iter().position(|t| t == "▌ Plan › Goals").expect("a title row");
+        let at = texts
+            .iter()
+            .position(|t| t == "▌ Plan › Goals")
+            .expect("a title row");
         assert_eq!(
             &texts[at..at + 5],
-            &["▌ Plan › Goals", "▌ - ship it", "▌ - test it", "▌ - doc it", "▌ 1 more line"]
+            &[
+                "▌ Plan › Goals",
+                "▌ - ship it",
+                "▌ - test it",
+                "▌ - doc it",
+                "▌ 1 more line"
+            ]
         );
         // the title is a link to the note, in the callout colour
         let title = &r.lines[at];
@@ -3805,7 +3892,10 @@ mod tests {
         let texts: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
         assert_eq!(texts[0], "▌ Plan");
         assert_eq!(texts[1], "▌ First line.");
-        assert!(r.lines[1].cells[8].style.add_modifier.contains(Modifier::BOLD));
+        assert!(r.lines[1].cells[8]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
         assert!(texts.iter().all(|t| !t.contains("]]")), "{texts:?}");
         assert_eq!(texts.last().unwrap(), "▌ 5 more lines");
 

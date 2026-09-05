@@ -1,7 +1,7 @@
 use crate::commands;
 use crate::config::{Config, FrontMatter, PreviewClick};
 use crate::editor::{Editor, Pos};
-use crate::images::Images;
+use crate::images::{FileIndex, Images, Lookup};
 use crate::index;
 use crate::keys::Action;
 use crate::md;
@@ -296,12 +296,21 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⌥⌫", "delete the word before the cursor"),
             ("⌘⌫", "delete to the start of the line"),
             ("tab", "indent (tab_width spaces)"),
-            ("tab / ⇧tab", "in a table: next / previous cell; past the last, a new row"),
+            (
+                "tab / ⇧tab",
+                "in a table: next / previous cell; past the last, a new row",
+            ),
             ("↵", "in a table: a row below"),
             ("esc", "in a table: show its source, and back"),
-            ("⇧↑↓←→ / drag", "in a table: select cells; the grips beside and above select rows and columns"),
+            (
+                "⇧↑↓←→ / drag",
+                "in a table: select cells; the grips beside and above select rows and columns",
+            ),
             ("⌥↑↓←→", "in a table: move the selected rows or columns"),
-            ("⌫ ⌘C ⌘X ⌘V", "on selected cells: clear, copy, cut, paste (tabs and newlines)"),
+            (
+                "⌫ ⌘C ⌘X ⌘V",
+                "on selected cells: clear, copy, cut, paste (tabs and newlines)",
+            ),
         ],
     ),
     (
@@ -501,6 +510,10 @@ pub struct App {
     /// A walk started on a thread and not yet collected — the launch one,
     /// which must not hold up the first frame.
     index_rx: Option<std::sync::mpsc::Receiver<Vec<index::Entry>>>,
+    /// The vault-wide walk of non-note files by name, started with every
+    /// index scan and taken here when it lands: the root it was walked from,
+    /// and the answer on its way.
+    file_index_rx: Option<(PathBuf, std::sync::mpsc::Receiver<FileIndex>)>,
     /// The tag scan in flight for `tag_filter`, if one is: the tag it is
     /// for, and the fresh index plus the hits in it that the worker answers
     /// with. `None` once the answer has landed, so the overlay's hint can
@@ -782,7 +795,10 @@ impl App {
         let mut app = App {
             rename_input: String::new(),
             help_query: String::new(),
-            images: Images::new(config.attachments_dir.clone()),
+            images: Images::new(Lookup::new(
+                config.attachments_dir.clone(),
+                config.attachment_subfolder.clone(),
+            )),
             config,
             config_gen: 0,
             preview_page: PreviewPage::default(),
@@ -822,6 +838,7 @@ impl App {
             dragging: false,
             open_index: Vec::new(),
             index_rx: None,
+            file_index_rx: None,
             tag_rx: None,
             tab: QuickTab::Recent,
             tag_list: Vec::new(),
@@ -958,7 +975,8 @@ impl App {
             View::Edit => Some(self.editor.cursor.0),
             View::Preview => {
                 let blocks = self.blocks();
-                let heading = |line: usize| crate::fold::foldable_at(self.editor.lines(), &blocks, line);
+                let heading =
+                    |line: usize| crate::fold::foldable_at(self.editor.lines(), &blocks, line);
                 let at_sel = self.preview_span().and_then(|((row, _), _)| {
                     self.preview_rows
                         .iter()
@@ -1321,6 +1339,7 @@ impl App {
         changed |= self.maybe_autosave();
         changed |= self.follow_system_theme();
         changed |= self.poll_index_scan();
+        changed |= self.poll_file_index_scan();
         changed |= self.poll_tag_scan();
         changed |= self.poll_tags_scan();
         changed |= self.poll_contents_scan();
@@ -1553,6 +1572,7 @@ impl App {
     /// notes are files, and anything could have written one since.
     fn refresh_index(&mut self) {
         self.open_index = index::scan(&self.index_roots(), &self.recents);
+        self.start_file_index_scan();
         // a walk started earlier answers with an older vault than the one just
         // read, so whatever it says is no longer wanted
         self.index_rx = None;
@@ -1573,6 +1593,58 @@ impl App {
             let _ = tx.send(index::scan(&roots, &recents));
         });
         self.index_rx = Some(rx);
+        self.start_file_index_scan();
+    }
+
+    /// Walk the vault for every file that is not a note, on a thread, so a
+    /// `[[report.pdf]]` finds its file wherever Obsidian put it. Run alongside
+    /// every index scan; the answer is taken by [`App::poll_file_index_scan`].
+    fn start_file_index_scan(&mut self) {
+        let root = self.file_index_root();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let walk_root = root.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(FileIndex::scan(&walk_root));
+        });
+        self.file_index_rx = Some((root, rx));
+    }
+
+    /// The vault the file index covers: the notes dir, unless this session
+    /// is rooted somewhere outside it.
+    fn file_index_root(&self) -> PathBuf {
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let dir = canon(&self.dir);
+        let vault = canon(&self.config.notes_dir);
+        if dir.starts_with(&vault) {
+            vault
+        } else {
+            dir
+        }
+    }
+
+    /// Take a finished file walk as the lookup's index, if it is for the root
+    /// the app is still on.
+    fn poll_file_index_scan(&mut self) -> bool {
+        let Some((root, rx)) = self.file_index_rx.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(index) => {
+                if *root == self.file_index_root() {
+                    let mut lookup = self.images.lookup().clone();
+                    lookup.index = std::sync::Arc::new(index);
+                    self.images.set_lookup(lookup);
+                    self.refresh_file_resolver();
+                }
+                self.file_index_rx = None;
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.file_index_rx = None;
+                false
+            }
+        }
     }
 
     /// Take a walk started by [`App::start_index_scan`] if it has finished.
@@ -1978,7 +2050,11 @@ impl App {
         table.clear(rect);
         let (r, c) = self.cell_sel.map(|s| s.head).unwrap_or((rect.r0, rect.c0));
         let keep = self.cell_sel;
-        self.write_table(block, &table, (r.min(table.rows.len() - 1), c.min(table.cols() - 1)));
+        self.write_table(
+            block,
+            &table,
+            (r.min(table.rows.len() - 1), c.min(table.cols() - 1)),
+        );
         self.cell_sel = keep;
     }
 
@@ -3043,7 +3119,11 @@ impl App {
                 self.insert_block(vec!["> [!note] ".to_string(), "> ".to_string()], 0, 10);
             }
             Item::Command(Command::InsertMath) => {
-                self.insert_block(vec!["$$".to_string(), String::new(), "$$".to_string()], 1, 0);
+                self.insert_block(
+                    vec!["$$".to_string(), String::new(), "$$".to_string()],
+                    1,
+                    0,
+                );
             }
             Item::Command(Command::InsertFootnote) => self.insert_footnote(),
             Item::Command(Command::Table(op)) => self.table_op(op),
@@ -3215,7 +3295,9 @@ impl App {
         // ⏎ with a modifier on a ^O row opens the note beside this one; it
         // must get there before the keymap, where ⌥⏎ is follow-link; and
         // ⌥⏎ on an outline row folds it, for the same reason
-        if matches!(self.overlay, Overlay::QuickOpen | Overlay::Outline) && key.code == KeyCode::Enter {
+        if matches!(self.overlay, Overlay::QuickOpen | Overlay::Outline)
+            && key.code == KeyCode::Enter
+        {
             self.on_palette_key(key);
             return;
         }
@@ -3333,7 +3415,10 @@ impl App {
 
     /// The table block at `pos`, parsed, with `pos`'s row and column in its
     /// matrix. `None` outside a table or on its separator.
-    fn table_cell_at(&self, (row, col): (usize, usize)) -> Option<(md::Block, crate::table::Table, usize, usize)> {
+    fn table_cell_at(
+        &self,
+        (row, col): (usize, usize),
+    ) -> Option<(md::Block, crate::table::Table, usize, usize)> {
         let blocks = self.blocks();
         let block = *md::block_at(&blocks, row).filter(|b| b.kind == md::BlockKind::Table)?;
         let lines = self.editor.lines();
@@ -3346,11 +3431,19 @@ impl App {
     /// The bottom edges drawn under `row`: one for every callout card whose
     /// last line on screen it is — the block's own card, a card nested in
     /// it, or one folded down to its title.
-    pub fn callout_close_rows(&self, blocks: &[md::Block], row: usize, width: usize) -> Vec<md::RLine> {
-        let Some(block) = md::block_at(blocks, row).filter(|b| b.kind == md::BlockKind::Callout) else {
+    pub fn callout_close_rows(
+        &self,
+        blocks: &[md::Block],
+        row: usize,
+        width: usize,
+    ) -> Vec<md::RLine> {
+        let Some(block) = md::block_at(blocks, row).filter(|b| b.kind == md::BlockKind::Callout)
+        else {
             return Vec::new();
         };
-        md::callout_closes(self.editor.lines(), block, row, width, &|l| self.visible.is_hidden(l))
+        md::callout_closes(self.editor.lines(), block, row, width, &|l| {
+            self.visible.is_hidden(l)
+        })
     }
 
     /// The rows hung under `row` when it is a `![[note]]` embed drawn as a
@@ -3363,7 +3456,12 @@ impl App {
         if block.kind != md::BlockKind::Embed || self.revealed(block) {
             return Vec::new();
         }
-        let src = self.editor.lines().get(row).map(String::as_str).unwrap_or("");
+        let src = self
+            .editor
+            .lines()
+            .get(row)
+            .map(String::as_str)
+            .unwrap_or("");
         md::embed_rows(src, width, &self.config.keys.label(Action::FollowLink))
     }
 
@@ -3385,8 +3483,8 @@ impl App {
     fn step_below_table(&mut self) -> bool {
         let n = self.editor.lines().len();
         let blocks = self.blocks();
-        let ends_note = md::block_at(&blocks, n - 1)
-            .is_some_and(|b| b.kind == md::BlockKind::Table);
+        let ends_note =
+            md::block_at(&blocks, n - 1).is_some_and(|b| b.kind == md::BlockKind::Table);
         if !ends_note {
             return false;
         }
@@ -3399,9 +3497,8 @@ impl App {
     fn in_table_grid(&self) -> bool {
         let row = self.editor.cursor.0;
         let blocks = self.blocks();
-        md::block_at(&blocks, row).is_some_and(|b| {
-            b.kind == md::BlockKind::Table && self.table_source != Some(b.start)
-        })
+        md::block_at(&blocks, row)
+            .is_some_and(|b| b.kind == md::BlockKind::Table && self.table_source != Some(b.start))
     }
 
     /// The keys that mean something else with the cursor in a grid: tab and
@@ -3476,7 +3573,13 @@ impl App {
                 let line = &self.editor.lines()[row];
                 let edge = crate::table::cell_at(line, col, true)
                     .and_then(|i| crate::table::cell_span(line, i))
-                    .is_some_and(|(s, e)| if key.code == KeyCode::Left { col <= s } else { col >= e });
+                    .is_some_and(|(s, e)| {
+                        if key.code == KeyCode::Left {
+                            col <= s
+                        } else {
+                            col >= e
+                        }
+                    });
                 if selected || edge {
                     self.editor.clear_selection();
                     self.extend_cell_sel(0, if key.code == KeyCode::Left { -1 } else { 1 });
@@ -3609,13 +3712,19 @@ impl App {
 
     /// Put `table` back over `block`'s lines and leave the cursor in cell
     /// `(r, c)` of it.
-    fn write_table(&mut self, block: md::Block, table: &crate::table::Table, (r, c): (usize, usize)) {
+    fn write_table(
+        &mut self,
+        block: md::Block,
+        table: &crate::table::Table,
+        (r, c): (usize, usize),
+    ) {
         let lines = table.emit();
         let src = block.start + table.src_row(r);
         let col = lines
             .get(table.src_row(r))
             .map_or(0, |l| crate::table::cell_end(l, c));
-        self.editor.replace_lines(block.start, block.end, lines, (src, col));
+        self.editor
+            .replace_lines(block.start, block.end, lines, (src, col));
         self.sync_editor_to_note();
     }
 
@@ -4229,7 +4338,8 @@ impl App {
         };
         // a callout draws its own fold: the marker inside the card's top
         // edge, and the count with it
-        if let Some(block) = md::block_at(blocks, row).filter(|b| b.kind == md::BlockKind::Callout) {
+        if let Some(block) = md::block_at(blocks, row).filter(|b| b.kind == md::BlockKind::Callout)
+        {
             let hidden = self
                 .folded_here(row)
                 .then(|| self.visible.hidden_under(row))
@@ -4472,9 +4582,9 @@ impl App {
     /// changes, never per frame.
     fn refresh_file_resolver(&self) {
         let note_dir = self.note_dir();
-        let attachments = self.config.attachments_dir.clone();
+        let lookup = self.images.lookup().clone();
         crate::md::embeds::set_file_resolver(Box::new(move |name| {
-            crate::images::resolve_in(name, &note_dir, &attachments)
+            crate::images::resolve_in(name, &note_dir, &lookup)
         }));
     }
 
@@ -4662,7 +4772,10 @@ impl App {
                 let moved = config.notes_dir != self.config.notes_dir;
                 // keep the probed graphics support: it is only asked for once,
                 // in raw mode at startup, and cannot be asked for again here
-                self.images.set_attachments(config.attachments_dir.clone());
+                let mut lookup = self.images.lookup().clone();
+                lookup.attachments = config.attachments_dir.clone();
+                lookup.subfolder = config.attachment_subfolder.clone();
+                self.images.set_lookup(lookup);
                 config.apply();
                 self.editor.tab_width = config.tab_width;
                 self.config = config;
@@ -4845,7 +4958,10 @@ impl App {
                 .edit_rows
                 .last()
                 .is_some_and(|r| y >= r.rect.y + r.rect.height)
-                && self.edit_rows.iter().any(|r| r.line + 1 == self.editor.lines().len());
+                && self
+                    .edit_rows
+                    .iter()
+                    .any(|r| r.line + 1 == self.editor.lines().len());
             if below && self.step_below_table() {
                 return;
             }
@@ -4916,7 +5032,8 @@ impl App {
         let Some(block) = md::block_at(&blocks, start).copied() else {
             return;
         };
-        let Some(mut table) = crate::table::Table::parse(&self.editor.lines()[block.start..=block.end])
+        let Some(mut table) =
+            crate::table::Table::parse(&self.editor.lines()[block.start..=block.end])
         else {
             return;
         };
@@ -5531,11 +5648,21 @@ mod tests {
             .collect();
         let blocks = md::blocks(&lines);
         let view = |row, cursor| {
-            view_line(&lines, &blocks, row, 20, (cursor, 0), None, None, None, None)
-                .cells
-                .iter()
-                .map(|c| c.ch)
-                .collect::<String>()
+            view_line(
+                &lines,
+                &blocks,
+                row,
+                20,
+                (cursor, 0),
+                None,
+                None,
+                None,
+                None,
+            )
+            .cells
+            .iter()
+            .map(|c| c.ch)
+            .collect::<String>()
         };
         // cursor outside the fence: the caps are drawn, the body is code
         assert_eq!(view(2, 0), "let x = 1;");
@@ -5560,8 +5687,8 @@ mod tests {
         };
         // a grid carries its two-column gutter, where the row grip goes
         assert_eq!(raw(0, 9), "  a │ bbbb"); // cursor elsewhere: laid out
-        // a table is the exception: the grid stays with the cursor in it,
-        // and its source shows only when asked for
+                                             // a table is the exception: the grid stays with the cursor in it,
+                                             // and its source shows only when asked for
         assert_eq!(raw(0, 2), "  a │ bbbb");
         assert_eq!(raw(1, 2), "  ──┼─────");
         let source = |row, cursor| {
@@ -5664,11 +5791,21 @@ mod tests {
             .collect();
         let blocks = blocks_with(&lines, FrontMatter::Dim);
         let view = |row, cursor| {
-            view_line(&lines, &blocks, row, 20, (cursor, 0), None, None, None, None)
-                .cells
-                .iter()
-                .map(|c| c.ch)
-                .collect::<String>()
+            view_line(
+                &lines,
+                &blocks,
+                row,
+                20,
+                (cursor, 0),
+                None,
+                None,
+                None,
+                None,
+            )
+            .cells
+            .iter()
+            .map(|c| c.ch)
+            .collect::<String>()
         };
         // cursor outside: shown exactly as typed, fences and all — never
         // stretched into a rule the way a thematic break would be
@@ -5883,14 +6020,29 @@ mod tests {
     #[test]
     fn toggle_properties_is_a_palette_command_with_a_rebindable_key() {
         assert!(COMMANDS.contains(&Command::Act(Action::ToggleProperties)));
-        assert_eq!(Command::Act(Action::ToggleProperties).action(), Some(Action::ToggleProperties));
-        assert_eq!(Command::Act(Action::ToggleProperties).label().0, "Toggle properties (hide / show)");
+        assert_eq!(
+            Command::Act(Action::ToggleProperties).action(),
+            Some(Action::ToggleProperties)
+        );
+        assert_eq!(
+            Command::Act(Action::ToggleProperties).label().0,
+            "Toggle properties (hide / show)"
+        );
         for q in ["toggle", "hide", "show", "prop"] {
-            assert!(crate::search::fuzzy(q, Command::Act(Action::ToggleProperties).label().0).is_some(), "{q}");
+            assert!(
+                crate::search::fuzzy(q, Command::Act(Action::ToggleProperties).label().0).is_some(),
+                "{q}"
+            );
         }
         assert!(COMMANDS.contains(&Command::Act(Action::HideProperties)));
-        assert_eq!(Command::Act(Action::HideProperties).action(), Some(Action::HideProperties));
-        assert_eq!(Command::Act(Action::HideProperties).label().0, "Hide properties");
+        assert_eq!(
+            Command::Act(Action::HideProperties).action(),
+            Some(Action::HideProperties)
+        );
+        assert_eq!(
+            Command::Act(Action::HideProperties).label().0,
+            "Hide properties"
+        );
         let map = crate::keys::Keymap::default();
         assert!(map
             .settings_rows()
@@ -5906,7 +6058,10 @@ mod tests {
     #[test]
     fn the_outline_is_a_palette_command_with_a_rebindable_key() {
         assert!(COMMANDS.contains(&Command::Act(Action::Outline)));
-        assert_eq!(Command::Act(Action::Outline).action(), Some(Action::Outline));
+        assert_eq!(
+            Command::Act(Action::Outline).action(),
+            Some(Action::Outline)
+        );
         assert_eq!(Command::Act(Action::Outline).label().0, "Outline");
         // unbound out of the box, and settable as key_outline
         let map = crate::keys::Keymap::default();

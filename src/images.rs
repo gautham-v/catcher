@@ -10,6 +10,7 @@ use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Tallest an inline image may get, in terminal rows.
 const MAX_ROWS: u16 = 20;
@@ -55,26 +56,30 @@ struct Zoomed {
 pub struct Images {
     picker: Option<Picker>,
     zoomed: Option<Zoomed>,
-    /// The configured attachments directory, searched after the note's folder.
-    attachments: PathBuf,
+    /// Where attachments are looked for after the note's own folder.
+    lookup: Lookup,
     /// Resolved path → decoded image; a `None` entry keeps the fallback line.
     cache: HashMap<PathBuf, Option<Cached>>,
 }
 
 impl Images {
-    pub fn new(attachments: PathBuf) -> Images {
+    pub fn new(lookup: Lookup) -> Images {
         Images {
-            attachments,
+            lookup,
             ..Default::default()
         }
     }
 
-    /// Point at a new attachments directory, keeping the probed graphics
-    /// support (the terminal is only asked once, at startup) and dropping the
-    /// cache, since the same file name may now resolve elsewhere.
-    pub fn set_attachments(&mut self, attachments: PathBuf) {
-        self.attachments = attachments;
+    /// Point at new attachment places, keeping the probed graphics support
+    /// (the terminal is only asked once, at startup) and dropping the cache,
+    /// since the same file name may now resolve elsewhere.
+    pub fn set_lookup(&mut self, lookup: Lookup) {
+        self.lookup = lookup;
         self.cache.clear();
+    }
+
+    pub fn lookup(&self) -> &Lookup {
+        &self.lookup
     }
 
     /// Ask the terminal what it supports. Call once, with the terminal in raw
@@ -98,9 +103,10 @@ impl Images {
     }
 
     /// Where an image reference points: beside the note, under the note's own
-    /// `attachments/`, or in the configured attachments directory.
+    /// attachments subfolder, in the configured attachments directory, or
+    /// anywhere in the vault by bare file name.
     pub fn resolve(&self, url: &str, note_dir: &Path) -> Option<PathBuf> {
-        resolve_in(url, note_dir, &self.attachments)
+        resolve_in(url, note_dir, &self.lookup)
     }
 
     /// Height in rows for an image drawn into a page `cols` columns wide,
@@ -113,7 +119,13 @@ impl Images {
     /// `max_px` is a width the note asked for (Obsidian's `![[a.png|300]]`),
     /// in pixels: the picture is fitted to that many columns, or the page
     /// when the page is narrower.
-    pub fn rows(&mut self, url: &str, note_dir: &Path, cols: u16, max_px: Option<u32>) -> Option<u16> {
+    pub fn rows(
+        &mut self,
+        url: &str,
+        note_dir: &Path,
+        cols: u16,
+        max_px: Option<u32>,
+    ) -> Option<u16> {
         let picker = self.picker.as_ref()?;
         let path = self.resolve(url, note_dir)?;
         let (font_w, font_h) = picker.font_size();
@@ -311,18 +323,118 @@ pub fn band_slice(start: usize, rows: u16, top: usize, height: u16) -> Option<Ba
     }
 }
 
-pub fn resolve_in(url: &str, note_dir: &Path, attachments: &Path) -> Option<PathBuf> {
+/// The places an attachment is looked for beyond the note's own folder.
+#[derive(Clone, Debug, Default)]
+pub struct Lookup {
+    /// The configured (or Obsidian's) attachments directory.
+    pub attachments: PathBuf,
+    /// The per-note subfolder name: `attachments`, or what Obsidian's
+    /// `./sub` setting names.
+    pub subfolder: String,
+    /// Every non-note file in the vault by bare name, for the link that names
+    /// a file and nothing about where it is.
+    pub index: Arc<FileIndex>,
+}
+
+impl Lookup {
+    pub fn new(attachments: PathBuf, subfolder: impl Into<String>) -> Lookup {
+        Lookup {
+            attachments,
+            subfolder: subfolder.into(),
+            index: Arc::default(),
+        }
+    }
+}
+
+/// Every non-`.md` file under a vault root by bare file name, the shortest
+/// path winning when two share a name — Obsidian's rule for `[[a.png]]`.
+#[derive(Clone, Debug, Default)]
+pub struct FileIndex {
+    by_name: HashMap<String, PathBuf>,
+}
+
+/// Enough files to cover any vault worth eyeballing; past that the walk is
+/// cut short rather than hold up the app.
+const INDEX_MAX_FILES: usize = 20_000;
+const INDEX_MAX_DEPTH: usize = 12;
+
+impl FileIndex {
+    /// Walk `root` once. Dotted folders (`.obsidian`, `.trash`, `.git`) and
+    /// the build folders quick-open skips are not entered.
+    pub fn scan(root: &Path) -> FileIndex {
+        fn walk(dir: &Path, depth: usize, index: &mut FileIndex, seen: &mut usize) {
+            if depth > INDEX_MAX_DEPTH || *seen >= INDEX_MAX_FILES {
+                return;
+            }
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let p = e.path();
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false) || p.is_dir();
+                if is_dir {
+                    if !skip_dir(&name) {
+                        walk(&p, depth + 1, index, seen);
+                    }
+                } else if !name.starts_with('.') && !p.extension().is_some_and(|x| x == "md") {
+                    *seen += 1;
+                    index.insert(p);
+                    if *seen >= INDEX_MAX_FILES {
+                        return;
+                    }
+                }
+            }
+        }
+        let mut index = FileIndex::default();
+        let mut seen = 0;
+        walk(root, 0, &mut index, &mut seen);
+        index
+    }
+
+    /// Record a file; when its name is already known the shorter path stays
+    /// (fewer folders down, then fewer characters).
+    pub fn insert(&mut self, path: PathBuf) {
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            return;
+        };
+        let depth = |p: &Path| (p.components().count(), p.as_os_str().len());
+        match self.by_name.get(&name) {
+            Some(have) if depth(have) <= depth(&path) => {}
+            _ => {
+                self.by_name.insert(name, path);
+            }
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Path> {
+        self.by_name.get(name).map(|p| p.as_path())
+    }
+}
+
+fn skip_dir(name: &str) -> bool {
+    name.starts_with('.') || matches!(name, "node_modules" | "target")
+}
+
+pub fn resolve_in(url: &str, note_dir: &Path, lookup: &Lookup) -> Option<PathBuf> {
     if url.contains("://") {
         return None; // remote images are not fetched
     }
     let raw = PathBuf::from(shellexpand(url));
+    let name = raw.file_name().unwrap_or(raw.as_os_str());
     let candidates = [
         raw.clone(),
         note_dir.join(&raw),
-        note_dir.join("attachments").join(&raw),
-        attachments.join(raw.file_name().unwrap_or(raw.as_os_str())),
+        note_dir.join(&lookup.subfolder).join(&raw),
+        lookup.attachments.join(name),
     ];
-    candidates.into_iter().find(|p| p.is_file())
+    candidates.into_iter().find(|p| p.is_file()).or_else(|| {
+        lookup
+            .index
+            .get(&name.to_string_lossy())
+            .filter(|p| p.is_file())
+            .map(Path::to_path_buf)
+    })
 }
 
 /// The pixel size that fills `area` cells as nearly as a picture's shape
@@ -447,7 +559,7 @@ mod tests {
         std::fs::create_dir_all(&att).unwrap();
         std::fs::write(dir.join("a.png"), b"x").unwrap();
         std::fs::write(att.join("b.png"), b"x").unwrap();
-        let images = Images::new(att.clone());
+        let images = Images::new(Lookup::new(att.clone(), "attachments"));
         assert_eq!(images.resolve("a.png", &dir), Some(dir.join("a.png")));
         assert_eq!(images.resolve("b.png", &dir), Some(att.join("b.png")));
         assert_eq!(images.resolve("missing.png", &dir), None);
@@ -460,6 +572,55 @@ mod tests {
             images.resolve("attachments/b.png", &elsewhere),
             Some(att.join("b.png"))
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_index_keeps_the_shortest_path_per_name() {
+        let mut index = FileIndex::default();
+        index.insert(PathBuf::from("/v/deep/er/a.png"));
+        index.insert(PathBuf::from("/v/deep/a.png"));
+        index.insert(PathBuf::from("/v/deep/er/a.png"));
+        assert_eq!(index.get("a.png"), Some(Path::new("/v/deep/a.png")));
+        // same depth: the shorter spelling
+        index.insert(PathBuf::from("/v/longer-name/b.png"));
+        index.insert(PathBuf::from("/v/short/b.png"));
+        assert_eq!(index.get("b.png"), Some(Path::new("/v/short/b.png")));
+        assert_eq!(index.get("c.png"), None);
+    }
+
+    #[test]
+    fn the_scan_finds_files_anywhere_but_in_skipped_folders() {
+        let dir = std::env::temp_dir().join("catcher-fileindex-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("notes/pics")).unwrap();
+        std::fs::create_dir_all(dir.join(".obsidian")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules")).unwrap();
+        std::fs::write(dir.join("notes/pics/deep.png"), b"x").unwrap();
+        std::fs::write(dir.join("notes/note.md"), b"x").unwrap();
+        std::fs::write(dir.join(".obsidian/hidden.png"), b"x").unwrap();
+        std::fs::write(dir.join("node_modules/dep.png"), b"x").unwrap();
+        let index = FileIndex::scan(&dir);
+        assert_eq!(
+            index.get("deep.png"),
+            Some(dir.join("notes/pics/deep.png").as_path())
+        );
+        assert_eq!(index.get("note.md"), None);
+        assert_eq!(index.get("hidden.png"), None);
+        assert_eq!(index.get("dep.png"), None);
+
+        // and resolve_in falls back to it after the fixed places
+        let lookup = Lookup {
+            attachments: dir.join("attachments"),
+            subfolder: "attachments".into(),
+            index: Arc::new(index),
+        };
+        let note_dir = dir.join("notes");
+        assert_eq!(
+            resolve_in("deep.png", &note_dir, &lookup),
+            Some(dir.join("notes/pics/deep.png"))
+        );
+        assert_eq!(resolve_in("nope.png", &note_dir, &lookup), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

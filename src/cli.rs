@@ -177,7 +177,10 @@ mod tests {
                 file: "/v/a/b.md".into()
             })
         );
-        assert!(matches!(parse(&args(&["--root", "/v"]), nothing), Cli::Error(_)));
+        assert!(matches!(
+            parse(&args(&["--root", "/v"]), nothing),
+            Cli::Error(_)
+        ));
     }
 
     #[test]
@@ -213,7 +216,10 @@ mod tests {
             Cli::Tui(Launch::New("meeting notes".into()))
         );
         assert!(matches!(parse(&args(&["new"]), nothing), Cli::Error(_)));
-        assert!(matches!(parse(&args(&["new", " "]), nothing), Cli::Error(_)));
+        assert!(matches!(
+            parse(&args(&["new", " "]), nothing),
+            Cli::Error(_)
+        ));
     }
 
     #[test]

@@ -375,7 +375,11 @@ impl Table {
         }
         let a = self.aligns.remove(other);
         self.aligns.insert(if right { c0 } else { c1 }, a);
-        Some(if right { (c0 + 1, c1 + 1) } else { (c0 - 1, c1 - 1) })
+        Some(if right {
+            (c0 + 1, c1 + 1)
+        } else {
+            (c0 - 1, c1 - 1)
+        })
     }
 }
 
@@ -529,9 +533,20 @@ mod tests {
 
     #[test]
     fn selections_clear_copy_paste_delete_and_move() {
-        let base = Table::parse(&lines("| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |")).unwrap();
+        let base = Table::parse(&lines(
+            "| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |",
+        ))
+        .unwrap();
         let rect = Rect::between((2, 2), (1, 1));
-        assert_eq!(rect, Rect { r0: 1, c0: 1, r1: 2, c1: 2 });
+        assert_eq!(
+            rect,
+            Rect {
+                r0: 1,
+                c0: 1,
+                r1: 2,
+                c1: 2
+            }
+        );
         assert_eq!(base.tsv(rect), "2\t3\n5\t6");
         let mut t = base.clone();
         t.clear(rect);
@@ -540,7 +555,15 @@ mod tests {
         let block = parse_tsv("x\ty\tz\nq\n");
         assert_eq!(block, vec![vec!["x", "y", "z"], vec!["q"]]);
         let wrote = t.paste(2, 2, &block);
-        assert_eq!(wrote, Rect { r0: 2, c0: 2, r1: 3, c1: 4 });
+        assert_eq!(
+            wrote,
+            Rect {
+                r0: 2,
+                c0: 2,
+                r1: 3,
+                c1: 4
+            }
+        );
         assert_eq!(t.cols(), 5);
         assert_eq!(t.rows.len(), 4);
         assert_eq!(t.rows[2], vec!["4", "5", "x", "y", "z"]);

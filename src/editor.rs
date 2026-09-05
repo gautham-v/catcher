@@ -836,7 +836,10 @@ mod tests {
 
     #[test]
     fn joined_clusters_move_and_delete_as_one() {
-        for cluster in ["\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "\u{1F1FA}\u{1F1F8}"] {
+        for cluster in [
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            "\u{1F1FA}\u{1F1F8}",
+        ] {
             let text = format!("a{cluster}b");
             let mut e = Editor::new(&text);
             e.set_cursor((0, 1));
@@ -970,7 +973,10 @@ mod tests {
     #[test]
     fn mixed_line_endings_follow_the_majority() {
         assert_eq!(Editor::new("a\nb\r\nc\nd\n").text(), "a\nb\nc\nd\n");
-        assert_eq!(Editor::new("a\r\nb\nc\r\nd\r\n").text(), "a\r\nb\r\nc\r\nd\r\n");
+        assert_eq!(
+            Editor::new("a\r\nb\nc\r\nd\r\n").text(),
+            "a\r\nb\r\nc\r\nd\r\n"
+        );
     }
 
     #[test]

@@ -7,11 +7,11 @@
 //! click, and selection highlighting from source columns — even when markers
 //! like `## ` or `- [ ] ` are hidden or replaced.
 
+use crate::theme;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use crate::theme;
 
 /// How many terminal columns a character occupies. Zero-width characters are
 /// still given a column so the cursor has somewhere to sit.
@@ -916,7 +916,11 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
 
     // ![[note]] in a sentence — an embedded note, drawn as the link it also
     // is: the `!` goes with the brackets, and a `#heading` reads as ` › `
-    if c == '!' && b.src.get(i + 1) == Some(&'[') && b.src.get(i + 2) == Some(&'[') && links::enabled() {
+    if c == '!'
+        && b.src.get(i + 1) == Some(&'[')
+        && b.src.get(i + 2) == Some(&'[')
+        && links::enabled()
+    {
         if let Some(w) = wikilink_at(b.src, i + 1) {
             let style = wiki_style(base, &w.target);
             b.sub("", style, i);
@@ -1337,7 +1341,11 @@ pub fn link_at(line: &str, col: usize) -> Option<LinkTarget> {
         if src[i] == '[' && src.get(i + 1) == Some(&'[') && links::enabled() {
             if let Some(w) = wikilink_at(&src, i) {
                 // an embedded note's `!` is part of the span too
-                let start = if i > 0 && src[i - 1] == '!' { i - 1 } else { w.start };
+                let start = if i > 0 && src[i - 1] == '!' {
+                    i - 1
+                } else {
+                    w.start
+                };
                 if (start..w.end).contains(&col) {
                     return Some(LinkTarget::wiki(w.full_target()));
                 }
@@ -2442,7 +2450,9 @@ pub fn callout_cards(lines: &[String], block: &Block) -> Vec<Card> {
 /// The card whose title is on `row`, when the line opens one.
 pub fn callout_card_at(lines: &[String], blocks: &[Block], row: usize) -> Option<Card> {
     let block = block_at(blocks, row).filter(|b| b.kind == BlockKind::Callout)?;
-    callout_cards(lines, block).into_iter().find(|c| c.start == row)
+    callout_cards(lines, block)
+        .into_iter()
+        .find(|c| c.start == row)
 }
 
 /// The width a callout card is drawn at on a page `width` wide. A width no
@@ -2611,9 +2621,7 @@ pub fn callout_line_folded(
     // the count sits in the top edge, with a dash or more before it; a
     // title that leaves it no room keeps its text, and the marker in front
     // already says the card is folded
-    let tail = hidden
-        .map(fold_count)
-        .filter(|l| dashes > str_width(l) + 3);
+    let tail = hidden.map(fold_count).filter(|l| dashes > str_width(l) + 3);
     if let Some(l) = &tail {
         dashes -= str_width(l) + 3;
     }
@@ -3700,7 +3708,11 @@ fn math_line(src: &str, first: bool, last: bool, width: usize) -> RLine {
     let mut cells: Vec<Cell> = Vec::new();
     if a < b {
         let w: usize = chars[a..b].iter().map(|c| char_width(*c)).sum();
-        let pad = if width == usize::MAX { 0 } else { width.saturating_sub(w) / 2 };
+        let pad = if width == usize::MAX {
+            0
+        } else {
+            width.saturating_sub(w) / 2
+        };
         cells.extend(at(&" ".repeat(pad), theme::PLAIN, a));
         cells.extend(chars[a..b].iter().enumerate().map(|(k, ch)| Cell {
             ch: *ch,
@@ -3993,7 +4005,10 @@ fn block_under<'a>(lines: &[&'a str], fragment: &str) -> Option<Vec<&'a str>> {
             || is_fence(l)
             || list_item_indent(l).is_some()
     };
-    let start = (0..at).rev().find(|&i| bounds(lines[i])).map_or(0, |i| i + 1);
+    let start = (0..at)
+        .rev()
+        .find(|&i| bounds(lines[i]))
+        .map_or(0, |i| i + 1);
     let end = (at + 1..lines.len())
         .find(|&i| bounds(lines[i]))
         .unwrap_or(lines.len());
@@ -4076,18 +4091,23 @@ fn embed_title_line(src: &str, width: usize) -> RLine {
     } else if let Some(embed) = note_embed_line(src) {
         let card = embed_card(&embed);
         match card.found {
-            embeds::Found::Missing => (
-                format!("{} (no such note)", card.head()),
-                theme::grey(),
-            ),
+            embeds::Found::Missing => (format!("{} (no such note)", card.head()), theme::grey()),
             _ => (card.head(), style.add_modifier(Modifier::BOLD)),
         }
     } else {
         return RLine::raw(src);
     };
     let mut cells = embed_rail(style, 0);
-    let room = if width == usize::MAX { usize::MAX } else { width.saturating_sub(2).max(1) };
-    let text = if room == usize::MAX { text } else { truncate(&text, room) };
+    let room = if width == usize::MAX {
+        usize::MAX
+    } else {
+        width.saturating_sub(2).max(1)
+    };
+    let text = if room == usize::MAX {
+        text
+    } else {
+        truncate(&text, room)
+    };
     cells.extend(text.chars().enumerate().map(|(i, ch)| Cell {
         ch,
         style: text_style,
@@ -4135,18 +4155,22 @@ pub fn embed_rows(src: &str, width: usize, open_key: &str) -> Vec<RLine> {
         return Vec::new();
     }
     let style = embed_style();
-    let room = if width == usize::MAX { usize::MAX } else { width.saturating_sub(2).max(1) };
+    let room = if width == usize::MAX {
+        usize::MAX
+    } else {
+        width.saturating_sub(2).max(1)
+    };
     let row = |text: &str, text_style: Style| {
         let mut cells = embed_rail(style, 0);
-        let text = if room == usize::MAX { text.to_string() } else { truncate(text, room) };
+        let text = if room == usize::MAX {
+            text.to_string()
+        } else {
+            truncate(text, room)
+        };
         cells.extend(at(&text, text_style, 0));
         RLine { cells, src_len: 0 }
     };
-    let mut out: Vec<RLine> = card
-        .lines
-        .iter()
-        .map(|l| row(l, theme::marker()))
-        .collect();
+    let mut out: Vec<RLine> = card.lines.iter().map(|l| row(l, theme::marker())).collect();
     if card.more > 0 {
         out.push(row(
             &format!("{open_key} opens · {}", more_lines(card.more)),
@@ -4331,16 +4355,32 @@ fn table_line(rows: &[String], row: usize, width: usize) -> RLine {
 /// `lines[block.start..=block.end]`, with the cursor's own row (`raw_row`,
 /// block-relative) shown as typed so every source column has a place on
 /// screen for the cursor to sit.
-pub fn table_line_editing(lines: &[String], block: &Block, row: usize, width: usize, raw_row: usize) -> RLine {
+pub fn table_line_editing(
+    lines: &[String],
+    block: &Block,
+    row: usize,
+    width: usize,
+    raw_row: usize,
+) -> RLine {
     let rows = &lines[block.start..=block.end];
     let r = row - block.start;
-    table_row(&layout_memo(rows, width, Some(raw_row)), rows, r, r == raw_row)
+    table_row(
+        &layout_memo(rows, width, Some(raw_row)),
+        rows,
+        r,
+        r == raw_row,
+    )
 }
 
 /// The rule drawn between two body rows of a table in the editor, to the
 /// same column widths as its rows. `raw_row` is the cursor's row, as for
 /// [`table_line_editing`], so the layout is the one the rows use.
-pub fn table_rule_editing(lines: &[String], block: &Block, width: usize, raw_row: Option<usize>) -> RLine {
+pub fn table_rule_editing(
+    lines: &[String],
+    block: &Block,
+    width: usize,
+    raw_row: Option<usize>,
+) -> RLine {
     let rows = &lines[block.start..=block.end];
     let l = layout_memo(rows, width, raw_row);
     // each cell says which column it is under, so a selection can tint the
@@ -4365,7 +4405,12 @@ pub fn table_rule_editing(lines: &[String], block: &Block, width: usize, raw_row
 
 /// The display column each table column starts at, and its width, for the
 /// grid drawn from `lines[block]` — the grips above a table go by these.
-pub fn table_column_spans(lines: &[String], block: &Block, width: usize, raw_row: Option<usize>) -> Vec<(usize, usize)> {
+pub fn table_column_spans(
+    lines: &[String],
+    block: &Block,
+    width: usize,
+    raw_row: Option<usize>,
+) -> Vec<(usize, usize)> {
     let rows = &lines[block.start..=block.end];
     let l = layout_memo(rows, width, raw_row);
     let mut x = 0;
@@ -4382,7 +4427,12 @@ pub fn table_column_spans(lines: &[String], block: &Block, width: usize, raw_row
 /// Tint the cells of a drawn table row that `selected(column)` says are
 /// selected, and the separator between two selected neighbours, with
 /// `style`. `src` is the row's source, whose pipes say where columns are.
-pub fn tint_table_cells(line: &mut RLine, src: &str, selected: &dyn Fn(usize) -> bool, style: Style) {
+pub fn tint_table_cells(
+    line: &mut RLine,
+    src: &str,
+    selected: &dyn Fn(usize) -> bool,
+    style: Style,
+) {
     let (_, pipes) = split_row(src);
     if pipes.len() < 2 {
         return;
@@ -4455,7 +4505,11 @@ fn table_row(l: &TableLayout, rows: &[String], row: usize, raw: bool) -> RLine {
             cell.text
                 .chars()
                 .enumerate()
-                .map(|(i, ch)| Cell { ch, style: body, src: i })
+                .map(|(i, ch)| Cell {
+                    ch,
+                    style: body,
+                    src: i,
+                })
                 .collect()
         } else {
             styled_cell(&cell.text, body)
@@ -4477,12 +4531,18 @@ fn table_row(l: &TableLayout, rows: &[String], row: usize, raw: bool) -> RLine {
 mod tests {
     #[test]
     fn str_width_counts_joined_clusters_once() {
-        assert_eq!(super::str_width("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"), 2);
+        assert_eq!(
+            super::str_width("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            2
+        );
         assert_eq!(super::str_width("\u{1F1FA}\u{1F1F8}"), 2);
         assert_eq!(super::str_width("a\u{1F1FA}\u{1F1F8}b"), 4);
         // Combining marks keep their own column.
         assert_eq!(super::str_width("e\u{301}"), 2);
-        assert_eq!(super::joined_cluster_at("a\u{1F1FA}\u{1F1F8}b", 2), Some((1, 3)));
+        assert_eq!(
+            super::joined_cluster_at("a\u{1F1FA}\u{1F1F8}b", 2),
+            Some((1, 3))
+        );
         assert_eq!(super::joined_cluster_at("a\u{1F1FA}\u{1F1F8}b", 3), None);
     }
 
@@ -4586,10 +4646,10 @@ mod tests {
         assert_eq!(l.cells[6].style, theme::marker()); // <
         assert_eq!(l.cells[10].style, theme::marker()); // >
         assert_eq!(l.cells[15].style, theme::marker()); // < of </kbd>
-        // the body is inline code, and the prose around it is plain
+                                                        // the body is inline code, and the prose around it is plain
         assert_eq!(l.cells[11].style.fg, theme::inline_code().fg); // C
         assert_eq!(l.cells[22].style, theme::PLAIN); // n
-        // every column is its own cell, so the cursor maps straight through
+                                                     // every column is its own cell, so the cursor maps straight through
         for col in 0..l.cells.len() {
             assert_eq!(l.one_row().display_to_source(col), col);
         }
@@ -4625,7 +4685,11 @@ mod tests {
         assert_eq!(text(&l), "a↵b <!-- hush --> c↵d");
         assert_eq!(l.one_row().display_to_source(1), 1); // ↵ is the <
         assert_eq!(l.one_row().display_to_source(2), 5); // b
-        let hush: Vec<&Cell> = l.cells.iter().filter(|c| "<!-hush>".contains(c.ch)).collect();
+        let hush: Vec<&Cell> = l
+            .cells
+            .iter()
+            .filter(|c| "<!-hush>".contains(c.ch))
+            .collect();
         assert!(hush.iter().all(|c| c.style == theme::marker()));
         let d = l.cells.last().unwrap();
         assert_eq!(d.ch, 'd');
@@ -4659,7 +4723,10 @@ mod tests {
         let kbd = t("<kbd>x").unwrap();
         assert_eq!((kbd.name.as_str(), kbd.closing, kbd.end), ("kbd", false, 5));
         let close = t("</KBD >").unwrap();
-        assert_eq!((close.name.as_str(), close.closing, close.end), ("kbd", true, 7));
+        assert_eq!(
+            (close.name.as_str(), close.closing, close.end),
+            ("kbd", true, 7)
+        );
         let br = t("<br/>").unwrap();
         assert!(br.self_closing && br.name == "br" && br.end == 5);
         let attr = t("<a href=\"a>b\" title='c'>t</a>").unwrap();
@@ -4883,16 +4950,30 @@ mod tests {
 
     #[test]
     fn a_selection_tints_its_cells_and_the_separator_between_them() {
-        let lines: Vec<String> = "| a | b | c |\n|---|---|---|".lines().map(String::from).collect();
-        let block = Block { kind: BlockKind::Table, start: 0, end: 1 };
+        let lines: Vec<String> = "| a | b | c |\n|---|---|---|"
+            .lines()
+            .map(String::from)
+            .collect();
+        let block = Block {
+            kind: BlockKind::Table,
+            start: 0,
+            end: 1,
+        };
         let mut l = table_line_editing(&lines, &block, 0, 40, 0);
         let tint = Style::new().bg(ratatui::style::Color::Red);
         tint_table_cells(&mut l, &lines[0], &|c| c >= 1, tint);
         let text: String = l.cells.iter().map(|c| c.ch).collect();
         assert_eq!(text, "a │ b │ c");
-        let tinted: Vec<bool> = l.cells.iter().map(|c| c.style.bg == Some(ratatui::style::Color::Red)).collect();
+        let tinted: Vec<bool> = l
+            .cells
+            .iter()
+            .map(|c| c.style.bg == Some(ratatui::style::Color::Red))
+            .collect();
         // "a │ " untinted, then "b │ c" tinted, separator included
-        assert_eq!(tinted, vec![false, false, false, false, true, true, true, true, true]);
+        assert_eq!(
+            tinted,
+            vec![false, false, false, false, true, true, true, true, true]
+        );
     }
 
     #[test]
@@ -4928,7 +5009,10 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(footnote_ordinal(&lines, 3), 1);
-        let lines: Vec<String> = ["%%", "^[shown]", "A^[two]"].iter().map(|s| s.to_string()).collect();
+        let lines: Vec<String> = ["%%", "^[shown]", "A^[two]"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(footnote_ordinal(&lines, 2), 2);
     }
 
@@ -4944,7 +5028,9 @@ mod tests {
 
     #[test]
     fn footnote_counts_number_every_line() {
-        let lines = ["a^[1]", "```", "^[x]", "```", "%%", "^[y]", "%%", "b[^z]", "c"];
+        let lines = [
+            "a^[1]", "```", "^[x]", "```", "%%", "^[y]", "%%", "b[^z]", "c",
+        ];
         assert_eq!(footnote_counts(&lines), vec![1, 2, 2, 2, 2, 2, 2, 2, 3, 3]);
     }
 
@@ -4989,11 +5075,17 @@ mod tests {
     fn callouts_footnotes_and_maths_are_styled_in_the_editor() {
         let text = |l: &RLine| l.cells.iter().map(|c| c.ch).collect::<String>();
         // a callout's title line: glyph, type, title
-        assert_eq!(text(&style_line("> [!todo] Warning!")), "▌ i todo · Warning!");
+        assert_eq!(
+            text(&style_line("> [!todo] Warning!")),
+            "▌ i todo · Warning!"
+        );
         assert_eq!(text(&style_line("> [!danger]- ")), "▌ ✗ danger");
         assert_eq!(text(&style_line("> [!custom] T")), "▌ custom · T");
         // a plain quote is untouched
-        assert_eq!(text(&style_line("> [x] not a callout")), "▌ [x] not a callout");
+        assert_eq!(
+            text(&style_line("> [x] not a callout")),
+            "▌ [x] not a callout"
+        );
         // footnotes: the reference and the definition
         assert_eq!(text(&style_line("word[^1] more")), "word¹ more");
         assert_eq!(text(&style_line("[^12]: Tickles")), "¹² Tickles");
@@ -5007,7 +5099,10 @@ mod tests {
         assert_eq!(blocks[0].kind, BlockKind::Math);
         assert_eq!((blocks[0].start, blocks[0].end), (0, 2));
         assert_eq!(text(&style_block_line(&lines, &blocks[0], 0, 20)), "");
-        assert_eq!(text(&style_block_line(&lines, &blocks[0], 1, 20)), "      E = mc^2");
+        assert_eq!(
+            text(&style_block_line(&lines, &blocks[0], 1, 20)),
+            "      E = mc^2"
+        );
         let one: Vec<String> = vec!["$$a+b$$".to_string()];
         let b1 = super::blocks(&one);
         assert_eq!((b1[0].start, b1[0].end), (0, 0));
@@ -5019,15 +5114,30 @@ mod tests {
     #[test]
     fn a_callout_is_a_card_in_the_editor_too() {
         let text = |l: &RLine| l.cells.iter().map(|c| c.ch).collect::<String>();
-        let lines: Vec<String> = "> [!tip] Go\n> body **b**\nafter".lines().map(String::from).collect();
+        let lines: Vec<String> = "> [!tip] Go\n> body **b**\nafter"
+            .lines()
+            .map(String::from)
+            .collect();
         let bs = blocks(&lines);
         assert_eq!(bs[0].kind, BlockKind::Callout);
         assert_eq!((bs[0].start, bs[0].end), (0, 1));
-        assert_eq!(text(&callout_line(&lines, &bs[0], 0, 20, false)), "╭─ ✓ tip · Go ─────╮");
-        assert_eq!(text(&callout_line(&lines, &bs[0], 1, 20, false)), "│ body b           │");
+        assert_eq!(
+            text(&callout_line(&lines, &bs[0], 0, 20, false)),
+            "╭─ ✓ tip · Go ─────╮"
+        );
+        assert_eq!(
+            text(&callout_line(&lines, &bs[0], 1, 20, false)),
+            "│ body b           │"
+        );
         // the cursor's line shows the syntax, inside the card
-        assert_eq!(text(&callout_line(&lines, &bs[0], 0, 20, true)), "╭─ [!tip] Go ──────╮");
-        assert_eq!(text(&callout_line(&lines, &bs[0], 1, 20, true)), "│ body **b**       │");
+        assert_eq!(
+            text(&callout_line(&lines, &bs[0], 0, 20, true)),
+            "╭─ [!tip] Go ──────╮"
+        );
+        assert_eq!(
+            text(&callout_line(&lines, &bs[0], 1, 20, true)),
+            "│ body **b**       │"
+        );
         assert_eq!(text(&callout_close("tip", 20)), "╰──────────────────╯");
         // a click on the rail lands at the line's start, on the text after `> `
         let l = callout_line(&lines, &bs[0], 1, 20, false);
@@ -5046,16 +5156,34 @@ mod tests {
         let cards = callout_cards(&lines, &bs[0]);
         assert_eq!(cards.len(), 2);
         assert_eq!((cards[0].start, cards[0].end, cards[0].depth), (0, 4, 1));
-        assert_eq!((cards[0].kind.as_str(), cards[0].marker), ("note", Some('+')));
+        assert_eq!(
+            (cards[0].kind.as_str(), cards[0].marker),
+            ("note", Some('+'))
+        );
         assert_eq!((cards[1].start, cards[1].end, cards[1].depth), (2, 3, 2));
-        assert_eq!((cards[1].kind.as_str(), cards[1].marker), ("tip", Some('-')));
+        assert_eq!(
+            (cards[1].kind.as_str(), cards[1].marker),
+            ("tip", Some('-'))
+        );
         assert_eq!(callout_card_at(&lines, &bs, 2).map(|c| c.depth), Some(2));
         assert!(callout_card_at(&lines, &bs, 1).is_none());
         // the open card that can fold carries ▾ ; the inner card sits inside the outer rails
-        assert_eq!(text(&callout_line(&lines, &bs[0], 0, 30, false)), "╭─ ▾ i note · Outer ─────────╮");
-        assert_eq!(text(&callout_line(&lines, &bs[0], 2, 30, false)), "│ ╭─ ▾ ✓ tip · Inner ──────╮ │");
-        assert_eq!(text(&callout_line(&lines, &bs[0], 3, 30, false)), "│ │ b                      │ │");
-        assert_eq!(text(&callout_line(&lines, &bs[0], 4, 30, false)), "│ c                          │");
+        assert_eq!(
+            text(&callout_line(&lines, &bs[0], 0, 30, false)),
+            "╭─ ▾ i note · Outer ─────────╮"
+        );
+        assert_eq!(
+            text(&callout_line(&lines, &bs[0], 2, 30, false)),
+            "│ ╭─ ▾ ✓ tip · Inner ──────╮ │"
+        );
+        assert_eq!(
+            text(&callout_line(&lines, &bs[0], 3, 30, false)),
+            "│ │ b                      │ │"
+        );
+        assert_eq!(
+            text(&callout_line(&lines, &bs[0], 4, 30, false)),
+            "│ c                          │"
+        );
         // the inner card closes under its last line, inside the outer rails;
         // the outer closes under the block
         let closes = callout_closes(&lines, &bs[0], 3, 30, &|_| false);
@@ -5086,7 +5214,10 @@ mod tests {
         assert_eq!(text(&l), "╭─ ▸ ✓ tip · Go ─── 2 lines ─╮");
         assert_eq!(l.cells[3].style, theme::fold());
         // open, it says it can fold
-        assert_eq!(text(&callout_line(&lines, &bs[0], 0, 30, false)), "╭─ ▾ ✓ tip · Go ─────────────╮");
+        assert_eq!(
+            text(&callout_line(&lines, &bs[0], 0, 30, false)),
+            "╭─ ▾ ✓ tip · Go ─────────────╮"
+        );
         // a title with no room for the count keeps its text
         let tight = callout_line_folded(&lines, &bs[0], 0, 18, false, Some(2));
         assert_eq!(text(&tight), "╭─ ▸ ✓ tip · Go ─╮");
@@ -5098,7 +5229,10 @@ mod tests {
         // a callout without a marker has no ▾
         let plain: Vec<String> = vec!["> [!tip] Go".to_string()];
         let pb = blocks(&plain);
-        assert_eq!(text(&callout_line(&plain, &pb[0], 0, 20, false)), "╭─ ✓ tip · Go ─────╮");
+        assert_eq!(
+            text(&callout_line(&plain, &pb[0], 0, 20, false)),
+            "╭─ ✓ tip · Go ─────╮"
+        );
         assert_eq!(fold_count(1), "1 line");
     }
 
@@ -5227,7 +5361,10 @@ mod tests {
         // and the mentions scan counts an embed as the link it is
         assert_eq!(wikilinks("![[plan]]")[0].target, "plan");
         // a picture is still not a link
-        assert_eq!(text(&style_line("see ![[pic.png]] now")), "see ![[pic.png]] now");
+        assert_eq!(
+            text(&style_line("see ![[pic.png]] now")),
+            "see ![[pic.png]] now"
+        );
         assert_eq!(link_at("see ![[pic.png]] now", 6), None);
     }
 
@@ -5252,7 +5389,10 @@ mod tests {
         assert_eq!(whole.title, "Plan");
         assert_eq!(whole.head(), "Plan");
         // the front matter and the title line are not the body
-        assert_eq!(whole.lines, vec!["First line.", "Second **line**.", "## Goals"]);
+        assert_eq!(
+            whole.lines,
+            vec!["First line.", "Second **line**.", "## Goals"]
+        );
         assert_eq!(whole.more, 7);
         assert!(matches!(whole.found, embeds::Found::Note(_)));
 
@@ -5275,7 +5415,10 @@ mod tests {
             "# Blocks\n\nOne line.\nTwo line. ^para\nThree line.\n\n- a\n- b ^item\n- c\n",
         );
         let para = embed_card(&note_embed_line("![[blocks#^para]]").unwrap());
-        assert_eq!(para.lines, vec!["One line.", "Two line. ^para", "Three line."]);
+        assert_eq!(
+            para.lines,
+            vec!["One line.", "Two line. ^para", "Three line."]
+        );
         let item = embed_card(&note_embed_line("![[blocks#^ITEM]]").unwrap());
         assert_eq!(item.lines, vec!["- b ^item"]);
         let none = embed_card(&note_embed_line("![[blocks#^gone]]").unwrap());
@@ -5336,7 +5479,10 @@ mod tests {
         assert_eq!(embed_rows("![[plan#Later]]", 40, "⌥⏎").len(), 1);
         // a narrow page cuts the rows rather than overrunning it
         let narrow = embed_rows("![[plan#Goals]]", 8, "⌥⏎");
-        assert!(narrow.iter().all(|r| str_width(&text(r)) <= 8), "{narrow:?}");
+        assert!(
+            narrow.iter().all(|r| str_width(&text(r)) <= 8),
+            "{narrow:?}"
+        );
 
         // a note that is not there says so, in grey, and hangs nothing
         let gone = style_block_line(&buf("![[gone]]"), &bs[0], 0, 40);
@@ -5346,7 +5492,10 @@ mod tests {
 
         // an un-walked vault: the title alone, nothing declared missing
         embeds::forget();
-        assert_eq!(text(&style_block_line(&lines, &bs[0], 0, 40)), "▌ plan › Goals");
+        assert_eq!(
+            text(&style_block_line(&lines, &bs[0], 0, 40)),
+            "▌ plan › Goals"
+        );
         assert!(embed_rows("![[plan#Goals]]", 40, "⌥⏎").is_empty());
     }
 
@@ -5942,7 +6091,10 @@ mod tests {
             LinkTarget::wiki("report.pdf".into()),
             LinkTarget::File("report.pdf".into())
         );
-        assert_eq!(LinkTarget::wiki("plan".into()), LinkTarget::Wiki("plan".into()));
+        assert_eq!(
+            LinkTarget::wiki("plan".into()),
+            LinkTarget::Wiki("plan".into())
+        );
         let file = LinkTarget::File("board.canvas".into());
         assert_eq!(LinkTarget::parse(&file.href()), file);
         // a body href spelled as the scheme comes back as the URL it was
@@ -6425,9 +6577,12 @@ mod tests {
         // the backslash check runs before every other inline construct
         let l = style_line(r"\%% not a comment %% and \<u>not underlined</u>");
         assert_eq!(text(&l), r"\%% not a comment %% and \<u>not underlined</u>");
-        assert!(l.cells.iter().all(|c| c.style == theme::PLAIN || c.style == theme::marker()));
-        let r = crate::render::render_page(r"\%% kept %%", 40, crate::config::TableStyle::default());
+        assert!(l
+            .cells
+            .iter()
+            .all(|c| c.style == theme::PLAIN || c.style == theme::marker()));
+        let r =
+            crate::render::render_page(r"\%% kept %%", 40, crate::config::TableStyle::default());
         assert_eq!(r.lines[0].text(), "%% kept %%");
     }
-
 }

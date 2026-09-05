@@ -76,7 +76,11 @@ pub struct ColorKey {
 /// lists them. The single source of truth: a name that isn't here can't be
 /// set and isn't documented.
 pub const COLORS: [ColorKey; 13] = [
-    color("accent", |p| &mut p.accent, "h1, ticked boxes, the status bar"),
+    color(
+        "accent",
+        |p| &mut p.accent,
+        "h1, ticked boxes, the status bar",
+    ),
     color("bright", |p| &mut p.bright, "h3, and the step that leads"),
     color("grey", |p| &mut p.grey, "structure that recedes"),
     color("heading", |p| &mut p.heading, "h2"),
