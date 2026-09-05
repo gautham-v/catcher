@@ -249,6 +249,20 @@ impl Seg {
         self.end_src
     }
 
+    /// The cell drawn at display column `col` of this row, if any.
+    pub fn cell_at_display(&self, col: usize) -> Option<&Cell> {
+        let col = col.checked_sub(self.indent)?;
+        let mut x = 0;
+        for c in &self.cells {
+            let w = char_width(c.ch);
+            if col < x + w {
+                return Some(c);
+            }
+            x += w;
+        }
+        None
+    }
+
     /// Source column → display column within this row.
     pub fn source_to_display(&self, col: usize) -> usize {
         let mut x = 0;
@@ -551,6 +565,54 @@ pub fn style_line(src: &str) -> RLine {
     }
 
     inline(&mut b, i, base);
+    RLine {
+        cells: b.cells,
+        src_len,
+    }
+}
+
+/// The source columns `start..end` of the `- [ ] ` prefix of a task line,
+/// indent excluded from `start`. `None` for any other line.
+pub fn task_prefix(src: &str) -> Option<(usize, usize)> {
+    let chars: Vec<char> = src.chars().collect();
+    let mut i = 0;
+    while matches!(chars.get(i), Some(' ') | Some('\t')) {
+        i += 1;
+    }
+    match list_marker(&chars, i) {
+        Some((_, _, 6)) => Some((i, i + 6)),
+        _ => None,
+    }
+}
+
+/// The cursor's own line, raw except for its checkbox: the `- [ ] ` stays a
+/// box unless the cursor is inside those six columns, which is when the
+/// syntax is what is being edited. Obsidian's rule.
+pub fn raw_with_task(src: &str, cursor_col: usize) -> RLine {
+    let Some((start, end)) = task_prefix(src) else {
+        return RLine::raw(src);
+    };
+    if cursor_col < end {
+        return RLine::raw(src);
+    }
+    let chars: Vec<char> = src.chars().collect();
+    let src_len = chars.len();
+    let mut b = Builder {
+        src: &chars,
+        cells: Vec::with_capacity(src_len),
+    };
+    for k in 0..start {
+        b.keep(k, theme::PLAIN);
+    }
+    let (marker, style, _) = list_marker(&chars, start).expect("task_prefix said so");
+    b.sub(marker, style, start);
+    b.sub(" ", style, start + 1);
+    for k in start + 2..end {
+        b.sub("", style, k);
+    }
+    for k in end..src_len {
+        b.keep(k, theme::PLAIN);
+    }
     RLine {
         cells: b.cells,
         src_len,
@@ -1977,6 +2039,28 @@ mod tests {
         assert_eq!(text(&l), "▌ hi");
         assert_eq!(l.one_row().display_to_source(0), 0);
         assert_eq!(l.one_row().display_to_source(2), 2);
+    }
+
+    #[test]
+    fn cursor_line_keeps_its_checkbox_unless_the_cursor_is_in_it() {
+        let text = |l: &RLine| l.cells.iter().map(|c| c.ch).collect::<String>();
+        // cursor past the marker: drawn as a box, body raw
+        let l = raw_with_task("- [ ] **hi**", 6);
+        assert_eq!(text(&l), format!("{} **hi**", theme::UNCHECKED));
+        assert_eq!(l.src_len, 12);
+        // cursor inside the marker: the syntax comes back
+        assert_eq!(text(&raw_with_task("- [ ] hi", 5)), "- [ ] hi");
+        assert_eq!(text(&raw_with_task("- [ ] hi", 0)), "- [ ] hi");
+        // indent is kept, a checked box is checked
+        assert_eq!(
+            text(&raw_with_task("  - [x] hi", 10)),
+            format!("  {} hi", theme::CHECKED)
+        );
+        // not a task: plain raw
+        assert_eq!(text(&raw_with_task("- [ ]", 5)), "- [ ]");
+        assert_eq!(text(&raw_with_task("hi", 2)), "hi");
+        assert_eq!(task_prefix("  - [ ] a"), Some((2, 8)));
+        assert_eq!(task_prefix("- a"), None);
     }
 
     #[test]

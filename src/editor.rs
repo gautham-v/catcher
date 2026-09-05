@@ -400,6 +400,36 @@ impl Editor {
         self.cursor = (row + 1, 0);
     }
 
+    /// Enter in a list item: carry the marker onto the new line the way
+    /// Obsidian does. `- a` continues as `- `, `3. a` as `4. `, `- [x] a`
+    /// as `- [ ] `. Enter on an item with no text clears the marker instead,
+    /// so a double Enter ends the list. Anywhere but the end of a line this
+    /// is a plain newline.
+    pub fn insert_newline_continuing_list(&mut self) {
+        let (row, col) = self.cursor;
+        if self.anchor.is_some() || col != self.line_len(row) {
+            self.insert_newline();
+            return;
+        }
+        let Some((prefix, body_empty)) = list_continuation(&self.lines[row]) else {
+            self.insert_newline();
+            return;
+        };
+        self.record(EditKind::Other);
+        self.batch += 1;
+        if body_empty {
+            self.lines[row].clear();
+            self.cursor.1 = 0;
+        } else {
+            self.insert_newline();
+            for c in prefix.chars() {
+                self.insert_char(c);
+            }
+        }
+        self.batch -= 1;
+        self.last_kind = None;
+    }
+
     pub fn backspace(&mut self) {
         self.record(EditKind::Delete);
         if self.remove_selection() {
@@ -543,7 +573,7 @@ impl Editor {
                 return true;
             }
             KeyCode::Enter => {
-                self.insert_newline();
+                self.insert_newline_continuing_list();
                 return true;
             }
             KeyCode::Backspace => {
@@ -705,6 +735,40 @@ impl Editor {
     }
 }
 
+/// If `line` is a list item, the prefix its successor should start with and
+/// whether the item has no text after its marker.
+fn list_continuation(line: &str) -> Option<(String, bool)> {
+    let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let (indent, rest) = line.split_at(indent_len);
+    let (marker, body) = if let Some(rest) = rest
+        .strip_prefix("- ")
+        .or_else(|| rest.strip_prefix("* "))
+        .or_else(|| rest.strip_prefix("+ "))
+    {
+        let mark = &line[indent_len..indent_len + 2];
+        if let Some(body) = rest
+            .strip_prefix("[ ] ")
+            .or_else(|| rest.strip_prefix("[x] "))
+            .or_else(|| rest.strip_prefix("[X] "))
+        {
+            (format!("{mark}[ ] "), body)
+        } else {
+            (mark.to_string(), rest)
+        }
+    } else {
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits == 0 {
+            return None;
+        }
+        let after = &rest[digits..];
+        let punct = after.chars().next().filter(|c| matches!(c, '.' | ')'))?;
+        let body = after[1..].strip_prefix(' ')?;
+        let n: u64 = rest[..digits].parse().ok()?;
+        (format!("{}{punct} ", n + 1), body)
+    };
+    Some((format!("{indent}{marker}"), body.trim().is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,6 +797,53 @@ mod tests {
         e.backspace();
         assert_eq!(e.text(), "hello");
         assert_eq!(e.cursor, (0, 2));
+    }
+
+    #[test]
+    fn enter_continues_lists() {
+        let cases = [
+            ("- a", "- a\n- "),
+            ("  * a", "  * a\n  * "),
+            ("3. a", "3. a\n4. "),
+            ("9) a", "9) a\n10) "),
+            ("- [x] a", "- [x] a\n- [ ] "),
+            ("plain", "plain\n"),
+            ("-a", "-a\n"),
+        ];
+        for (before, after) in cases {
+            let mut e = Editor::new(before);
+            e.set_cursor((0, before.chars().count()));
+            e.insert_newline_continuing_list();
+            assert_eq!(e.text(), after, "{before:?}");
+            assert_eq!(e.cursor, (1, after.len() - before.len() - 1));
+        }
+    }
+
+    #[test]
+    fn enter_on_empty_item_ends_the_list() {
+        let mut e = Editor::new("- a\n- ");
+        e.set_cursor((1, 2));
+        e.insert_newline_continuing_list();
+        assert_eq!(e.text(), "- a\n");
+        assert_eq!(e.cursor, (1, 0));
+        // one undo restores the marker
+        e.undo();
+        assert_eq!(e.text(), "- a\n- ");
+    }
+
+    #[test]
+    fn enter_mid_item_is_a_plain_newline() {
+        let mut e = Editor::new("1. ab");
+        e.set_cursor((0, 4));
+        e.insert_newline_continuing_list();
+        assert_eq!(e.text(), "1. a\nb");
+        e.undo();
+        assert_eq!(e.text(), "1. ab");
+        e.set_cursor((0, 5));
+        e.insert_newline_continuing_list();
+        assert_eq!(e.text(), "1. ab\n2. ");
+        e.undo();
+        assert_eq!(e.text(), "1. ab");
     }
 
     #[test]

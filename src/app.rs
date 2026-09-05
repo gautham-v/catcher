@@ -2615,6 +2615,25 @@ impl App {
         self.editor.clamp((row, col))
     }
 
+    /// The source line whose drawn checkbox sits at screen cell (x, y), if
+    /// that is what is there. A line showing its raw `[ ]` has no box to hit.
+    fn checkbox_at(&self, x: u16, y: u16) -> Option<usize> {
+        let hit = self
+            .edit_rows
+            .iter()
+            .find(|r| r.rect.height == 1 && y == r.rect.y && r.seg == 0)?;
+        let row = hit.line;
+        let (start, _) = md::task_prefix(self.editor.lines().get(row)?)?;
+        let blocks = self.blocks();
+        let width = self.editor_area.width.max(1) as usize;
+        let segs = self.wrapped(row, &blocks, width);
+        let dcol = x.checked_sub(self.editor_area.x)? as usize;
+        let cell = segs.first()?.cell_at_display(dcol)?;
+        let glyph = cell.ch.to_string();
+        (cell.src == start && (glyph == crate::theme::CHECKED || glyph == crate::theme::UNCHECKED))
+            .then_some(row)
+    }
+
     /// The wrapped rows of one source line, as the draw lays them out.
     pub fn wrapped(&self, row: usize, blocks: &[md::Block], width: usize) -> Vec<md::Seg> {
         md::wrap_rline(&self.line_view_in(row, blocks, width), width)
@@ -2722,7 +2741,7 @@ impl App {
             blocks,
             row,
             width,
-            self.editor.cursor.0,
+            self.editor.cursor,
             self.editor.selection(),
         );
         if self.folded_here(row) {
@@ -3258,6 +3277,12 @@ impl App {
                 .editor_area
                 .contains(ratatui::layout::Position { x, y })
         {
+            // a click on a drawn checkbox flips it, the way it does in the
+            // reading view; the cursor stays where it was
+            if let Some(row) = self.checkbox_at(x, y) {
+                self.toggle_checkbox(row);
+                return;
+            }
             let pos = self.pos_at(x, y);
             // modifier-click follows a link instead of moving the cursor
             if follows_link(modifiers) {
@@ -3351,9 +3376,10 @@ fn view_line(
     blocks: &[md::Block],
     row: usize,
     width: usize,
-    cursor_row: usize,
+    cursor: Pos,
     selection: Option<(Pos, Pos)>,
 ) -> md::RLine {
+    let cursor_row = cursor.0;
     let src = lines.get(row).map(String::as_str).unwrap_or("");
     if let Some(block) = md::block_at(blocks, row) {
         return if revealed_by(block, cursor_row, selection) {
@@ -3363,7 +3389,7 @@ fn view_line(
         };
     }
     if row == cursor_row {
-        md::RLine::raw(src)
+        md::raw_with_task(src, cursor.1)
     } else {
         md::style_line(src)
     }
@@ -3754,7 +3780,7 @@ mod tests {
             .collect();
         let blocks = md::blocks(&lines);
         let view = |row, cursor| {
-            view_line(&lines, &blocks, row, 20, cursor, None)
+            view_line(&lines, &blocks, row, 20, (cursor, 0), None)
                 .cells
                 .iter()
                 .map(|c| c.ch)
@@ -3775,7 +3801,7 @@ mod tests {
             .collect();
         let bs = md::blocks(&table);
         let raw = |row, cursor| {
-            view_line(&table, &bs, row, 20, cursor, None)
+            view_line(&table, &bs, row, 20, (cursor, 0), None)
                 .cells
                 .iter()
                 .map(|c| c.ch)
@@ -3852,7 +3878,7 @@ mod tests {
             .collect();
         let blocks = blocks_with(&lines, FrontMatter::Dim);
         let view = |row, cursor| {
-            view_line(&lines, &blocks, row, 20, cursor, None)
+            view_line(&lines, &blocks, row, 20, (cursor, 0), None)
                 .cells
                 .iter()
                 .map(|c| c.ch)
