@@ -722,8 +722,9 @@ impl App {
             Launch::Today => {
                 let path = crate::daily::ensure(
                     &config.daily_dir(),
+                    &config.daily_format,
                     &config.daily_template(),
-                    crate::dates::today(),
+                    crate::dates::now(),
                 )?;
                 (config.notes_dir.clone(), Some(Want::Path(path)))
             }
@@ -2959,9 +2960,10 @@ impl App {
     fn open_daily(&mut self) {
         self.save_now();
         let (dir, template) = (self.config.daily_dir(), self.config.daily_template());
-        let today = crate::dates::today();
-        let made = !crate::daily::path(&dir, today).exists();
-        match crate::daily::ensure(&dir, &template, today) {
+        let format = self.config.daily_format.clone();
+        let now = crate::dates::now();
+        let made = !crate::daily::path(&dir, &format, now).exists();
+        match crate::daily::ensure(&dir, &format, &template, now) {
             Ok(path) => {
                 self.open_path(&path);
                 self.view = View::Edit;

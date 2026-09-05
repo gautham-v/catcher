@@ -277,6 +277,9 @@ pub struct Config {
     /// Where daily notes go, under the notes dir unless absolute. Kept as
     /// written so the settings file reads back the way it was typed.
     pub daily_dir: PathBuf,
+    /// The file name of a daily note, in moment-style tokens; a slash in it
+    /// is a subfolder under `daily_dir`.
+    pub daily_format: String,
     /// The template a new daily note is filled from; a heading when the
     /// file is missing.
     pub daily_template: PathBuf,
@@ -316,6 +319,7 @@ impl Default for Config {
             quick_open_browse: false,
             quick_open_dirs: Vec::new(),
             daily_dir: PathBuf::from("journal"),
+            daily_format: crate::daily::DEFAULT_FORMAT.to_string(),
             daily_template: PathBuf::from("journal/template.md"),
             keys: Keymap::default(),
         }
@@ -543,6 +547,9 @@ impl Config {
         if let Some(v) = value(text, "daily_dir") {
             c.daily_dir = expand(&v, &home);
         }
+        if let Some(v) = value(text, "daily_format") {
+            c.daily_format = v.trim_matches('/').to_string();
+        }
         if let Some(v) = value(text, "daily_template") {
             c.daily_template = expand(&v, &home);
         }
@@ -613,12 +620,17 @@ impl Config {
         d.row(
             "daily_dir",
             short(&self.daily_dir),
-            "one note a day, YYYY-MM-DD.md, under notes_dir unless absolute",
+            "one note a day, under notes_dir unless absolute",
+        );
+        d.row(
+            "daily_format",
+            &self.daily_format,
+            "the file name: YYYY MM DD MMMM ddd Do HH mm A, [literal], / for subfolders",
         );
         d.row(
             "daily_template",
             short(&self.daily_template),
-            "{{title}} {{date}} {{yesterday}} {{tomorrow}}; a heading if missing",
+            "{{title}} {{date}} {{date:FMT}} {{time}} {{yesterday}} {{tomorrow}}; a heading if missing",
         );
 
         d.section("Appearance");
@@ -1279,17 +1291,25 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.daily_dir, PathBuf::from("journal"));
         assert_eq!(c.daily_template, PathBuf::from("journal/template.md"));
+        assert_eq!(c.daily_format, "YYYY-MM-DD");
         assert_eq!(c.daily_dir(), c.notes_dir.join("journal"));
         assert_eq!(c.daily_template(), c.notes_dir.join("journal/template.md"));
         let c = Config {
             daily_dir: PathBuf::from("/vault/daily"),
             daily_template: PathBuf::from("templates/day.md"),
+            daily_format: "YYYY/MM/DD-MM-YYYY".to_string(),
             ..Default::default()
         };
         assert_eq!(c.daily_dir(), PathBuf::from("/vault/daily"));
         let back = Config::from_str(&c.to_document());
         assert_eq!(back.daily_dir, c.daily_dir);
         assert_eq!(back.daily_template, c.daily_template);
+        assert_eq!(back.daily_format, c.daily_format);
+        // a leading or trailing slash is not a folder
+        assert_eq!(
+            Config::from_str("- daily_format: /YYYY/").daily_format,
+            "YYYY"
+        );
         // a hand-typed value reads back, tilde and all
         let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let c = Config::from_str("- daily_dir: ~/days\n");

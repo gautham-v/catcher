@@ -1,16 +1,21 @@
 //! The daily note: one file per day, `journal/2026-09-01.md`, made from a
 //! template the first time it is asked for and never written by catcher
-//! again. The ISO stem sorts in `ls` and is not a slug of the title, so the
-//! rename-to-follow-title machinery in `notes::save` leaves it alone.
+//! again. The stem is `daily_format` — ISO by default, which sorts in `ls`
+//! and is not a slug of the title, so the rename-to-follow-title machinery
+//! in `notes::save` leaves it alone. A slash in the format is a subfolder.
 
-use crate::dates;
+use crate::dates::{self, Now};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Where today's note lives, whether or not it exists.
-pub fn path(daily_dir: &Path, (y, m, d): (i32, u32, u32)) -> PathBuf {
-    daily_dir.join(format!("{}.md", dates::iso(y, m, d)))
+/// The default `daily_format`.
+pub const DEFAULT_FORMAT: &str = "YYYY-MM-DD";
+
+/// Where the note for `now` lives, whether or not it exists: the format
+/// filled in, `.md` on the end, under the daily dir.
+pub fn path(daily_dir: &Path, format: &str, now: Now) -> PathBuf {
+    daily_dir.join(format!("{}.md", dates::format(format, now)))
 }
 
 /// A setting that is a folder or file under the notes dir unless it is
@@ -23,17 +28,42 @@ pub fn resolve(notes_dir: &Path, setting: &Path) -> PathBuf {
     }
 }
 
-/// The template with its variables filled in for `day`. `{{title}}` is the
-/// long date, the rest are ISO.
-pub fn render(template: &str, day: (i32, u32, u32)) -> String {
-    let (y, m, d) = day;
-    let (py, pm, pd) = dates::shift(y, m, d, -1);
-    let (ny, nm, nd) = dates::shift(y, m, d, 1);
-    template
-        .replace("{{date}}", &dates::iso(y, m, d))
-        .replace("{{title}}", &dates::long(y, m, d))
-        .replace("{{yesterday}}", &dates::iso(py, pm, pd))
-        .replace("{{tomorrow}}", &dates::iso(ny, nm, nd))
+/// The template with its variables filled in for `now`. `{{title}}` is the
+/// long date; `{{date}}`, `{{yesterday}}` and `{{tomorrow}}` are in
+/// `daily_format` so they link to the notes those days get; `{{time}}` is
+/// `HH:mm`; `{{date:FMT}}` and `{{time:FMT}}` take any format. An unknown
+/// variable is left as it was typed.
+pub fn render(template: &str, format: &str, now: Now) -> String {
+    let ((y, m, d), time) = now;
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let (name, fmt) = match after[..end].split_once(':') {
+            Some((n, f)) => (n.trim(), Some(f)),
+            None => (after[..end].trim(), None),
+        };
+        let value = match (name, fmt) {
+            ("title", None) => Some(dates::long(y, m, d)),
+            ("date", fmt) => Some(dates::format(fmt.unwrap_or(format), now)),
+            ("time", fmt) => Some(dates::format(fmt.unwrap_or("HH:mm"), now)),
+            ("yesterday", None) => Some(dates::format(format, (dates::shift(y, m, d, -1), time))),
+            ("tomorrow", None) => Some(dates::format(format, (dates::shift(y, m, d, 1), time))),
+            _ => None,
+        };
+        match value {
+            Some(v) => out.push_str(&v),
+            None => out.push_str(&rest[start..start + 2 + end + 2]),
+        }
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// What a fresh note holds when there is no template file: a heading.
@@ -41,17 +71,18 @@ pub fn fallback_template() -> &'static str {
     "# {{title}}\n\n"
 }
 
-/// Make sure the note for `day` exists and return its path. An existing file
+/// Make sure the note for `now` exists and return its path. An existing file
 /// is not touched — not even to refresh a template variable — because it is
 /// the user's journal by then.
-pub fn ensure(daily_dir: &Path, template: &Path, day: (i32, u32, u32)) -> Result<PathBuf> {
-    let path = path(daily_dir, day);
+pub fn ensure(daily_dir: &Path, format: &str, template: &Path, now: Now) -> Result<PathBuf> {
+    let path = path(daily_dir, format, now);
     if path.exists() {
         return Ok(path);
     }
-    fs::create_dir_all(daily_dir).with_context(|| format!("creating {}", daily_dir.display()))?;
+    let parent = path.parent().unwrap_or(daily_dir);
+    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     let template = fs::read_to_string(template).unwrap_or_else(|_| fallback_template().to_string());
-    fs::write(&path, render(&template, day))
+    fs::write(&path, render(&template, format, now))
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
 }
@@ -70,8 +101,21 @@ mod tests {
     #[test]
     fn the_file_is_the_iso_date_under_the_daily_dir() {
         assert_eq!(
-            path(Path::new("/n/journal"), (2026, 9, 1)),
+            path(
+                Path::new("/n/journal"),
+                DEFAULT_FORMAT,
+                ((2026, 9, 1), (0, 0, 0))
+            ),
             PathBuf::from("/n/journal/2026-09-01.md")
+        );
+        // a slash in the format is a subfolder
+        assert_eq!(
+            path(
+                Path::new("/n/journal"),
+                "YYYY/MM/DD-MM-YYYY",
+                ((2026, 9, 1), (0, 0, 0))
+            ),
+            PathBuf::from("/n/journal/2026/09/01-09-2026.md")
         );
     }
 
@@ -94,13 +138,28 @@ mod tests {
 
     #[test]
     fn every_template_variable_is_filled_in() {
+        let now = ((2026, 9, 1), (14, 5, 0));
         let t = "# {{title}}\n{{date}} ← {{yesterday}} → {{tomorrow}}\n{{date}}\n";
         assert_eq!(
-            render(t, (2026, 9, 1)),
+            render(t, DEFAULT_FORMAT, now),
             "# Tuesday 1 September 2026\n2026-09-01 ← 2026-08-31 → 2026-09-02\n2026-09-01\n"
         );
         // a template with no variables is copied as it is
-        assert_eq!(render("plain\n", (2026, 9, 1)), "plain\n");
+        assert_eq!(render("plain\n", DEFAULT_FORMAT, now), "plain\n");
+        // the links follow daily_format; time and custom formats fill in
+        assert_eq!(
+            render(
+                "[[{{yesterday}}]] {{time}} {{date:dddd Do MMMM}} {{time:h:mm a}}",
+                "DD-MM-YYYY",
+                now
+            ),
+            "[[31-08-2026]] 14:05 Tuesday 1st September 2:05 pm"
+        );
+        // an unknown variable and an unclosed one are left alone
+        assert_eq!(
+            render("{{who}} {{date", DEFAULT_FORMAT, now),
+            "{{who}} {{date"
+        );
     }
 
     #[test]
@@ -108,7 +167,7 @@ mod tests {
         let dir = scratch("once");
         let template = dir.join("template.md");
         let day = (2026, 9, 1);
-        let p = ensure(&dir, &template, day).unwrap();
+        let p = ensure(&dir, DEFAULT_FORMAT, &template, (day, (0, 0, 0))).unwrap();
         assert_eq!(p, dir.join("2026-09-01.md"));
         assert_eq!(
             fs::read_to_string(&p).unwrap(),
@@ -117,7 +176,7 @@ mod tests {
         // the user has written in it; a second open must not rewrite it
         fs::write(&p, "# mine\n").unwrap();
         fs::write(&template, "# {{date}}\n").unwrap();
-        ensure(&dir, &template, day).unwrap();
+        ensure(&dir, DEFAULT_FORMAT, &template, (day, (0, 0, 0))).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), "# mine\n");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -127,10 +186,36 @@ mod tests {
         let dir = scratch("template");
         let template = dir.join("template.md");
         fs::write(&template, "# {{title}}\n\n[[{{yesterday}}]]\n").unwrap();
-        let p = ensure(&dir.join("journal"), &template, (2026, 1, 1)).unwrap();
+        let p = ensure(
+            &dir.join("journal"),
+            DEFAULT_FORMAT,
+            &template,
+            ((2026, 1, 1), (0, 0, 0)),
+        )
+        .unwrap();
         assert_eq!(
             fs::read_to_string(&p).unwrap(),
             "# Thursday 1 January 2026\n\n[[2025-12-31]]\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_nested_format_makes_the_subfolders() {
+        let dir = scratch("nested");
+        let template = dir.join("template.md");
+        fs::write(&template, "{{date}} after {{yesterday}}\n").unwrap();
+        let p = ensure(
+            &dir.join("journal"),
+            "YYYY/MM/DD-MM-YYYY",
+            &template,
+            ((2026, 9, 1), (0, 0, 0)),
+        )
+        .unwrap();
+        assert_eq!(p, dir.join("journal/2026/09/01-09-2026.md"));
+        assert_eq!(
+            fs::read_to_string(&p).unwrap(),
+            "2026/09/01-09-2026 after 2026/08/31-08-2026\n"
         );
         let _ = fs::remove_dir_all(&dir);
     }

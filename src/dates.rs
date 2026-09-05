@@ -11,14 +11,99 @@
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// A date and a clock time: `((year, month, day), (hour, minute, second))`.
+pub type Now = ((i32, u32, u32), (u32, u32, u32));
+
 /// Today, as (year, month, day) in local time.
 pub fn today() -> (i32, u32, u32) {
+    now().0
+}
+
+/// The date and the time of day, in local time.
+pub fn now() -> Now {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let local = secs + i64::from(local_offset());
-    civil_from_days(local.div_euclid(86_400))
+    let day = civil_from_days(local.div_euclid(86_400));
+    let s = local.rem_euclid(86_400) as u32;
+    (day, (s / 3600, s / 60 % 60, s % 60))
+}
+
+/// A moment-style format filled in for `now`: `YYYY-MM-DD`, `dddd Do MMMM`,
+/// `[week] W`... Tokens are `YYYY YY MM M DD D MMMM MMM dddd ddd Do HH H hh
+/// h mm ss A a`; text in `[brackets]` is copied without being read for
+/// tokens, and anything else is copied as it is.
+pub fn format(fmt: &str, now: Now) -> String {
+    const TOKENS: [&str; 19] = [
+        "YYYY", "MMMM", "dddd", "MMM", "ddd", "YY", "MM", "DD", "Do", "HH", "hh", "mm", "ss", "M",
+        "D", "H", "h", "A", "a",
+    ];
+    let ((y, m, d), (hh, mi, ss)) = now;
+    let mut out = String::new();
+    let mut rest = fmt;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix('[') {
+            let end = after.find(']').unwrap_or(after.len());
+            out.push_str(&after[..end]);
+            rest = after.get(end + 1..).unwrap_or("");
+            continue;
+        }
+        let Some(tok) = TOKENS.iter().find(|t| rest.starts_with(**t)) else {
+            let c = rest.chars().next().unwrap();
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+            continue;
+        };
+        rest = &rest[tok.len()..];
+        match *tok {
+            "YYYY" => out.push_str(&format!("{y:04}")),
+            "YY" => out.push_str(&format!("{:02}", y.rem_euclid(100))),
+            "MMMM" => out.push_str(month_name(m)),
+            "MMM" => out.push_str(&month_name(m)[..3]),
+            "MM" => out.push_str(&format!("{m:02}")),
+            "M" => out.push_str(&m.to_string()),
+            "dddd" => out.push_str(weekday(y, m, d)),
+            "ddd" => out.push_str(&weekday(y, m, d)[..3]),
+            "DD" => out.push_str(&format!("{d:02}")),
+            "Do" => out.push_str(&ordinal(d)),
+            "D" => out.push_str(&d.to_string()),
+            "HH" => out.push_str(&format!("{hh:02}")),
+            "H" => out.push_str(&hh.to_string()),
+            "hh" => out.push_str(&format!("{:02}", twelve(hh))),
+            "h" => out.push_str(&twelve(hh).to_string()),
+            "mm" => out.push_str(&format!("{mi:02}")),
+            "ss" => out.push_str(&format!("{ss:02}")),
+            "A" => out.push_str(if hh < 12 { "AM" } else { "PM" }),
+            "a" => out.push_str(if hh < 12 { "am" } else { "pm" }),
+            _ => unreachable!(),
+        }
+    }
+    out
+}
+
+fn twelve(h: u32) -> u32 {
+    match h % 12 {
+        0 => 12,
+        n => n,
+    }
+}
+
+/// `1st`, `2nd`, `3rd`, `4th`... `11th`, `12th`, `13th`, `21st`.
+fn ordinal(n: u32) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+fn month_name(m: u32) -> &'static str {
+    MONTHS[(m as usize).saturating_sub(1) % 12]
 }
 
 /// `YYYY-MM-DD`.
@@ -28,11 +113,7 @@ pub fn iso(y: i32, m: u32, d: u32) -> String {
 
 /// The long form a heading wants: `Tuesday 1 September 2026`.
 pub fn long(y: i32, m: u32, d: u32) -> String {
-    format!(
-        "{} {d} {} {y}",
-        weekday(y, m, d),
-        MONTHS[(m as usize).saturating_sub(1) % 12]
-    )
+    format!("{} {d} {} {y}", weekday(y, m, d), month_name(m))
 }
 
 /// The date `n` days on (or back, when negative).
@@ -271,11 +352,56 @@ mod tests {
     }
 
     #[test]
+    fn every_format_token_is_filled_in() {
+        let now = ((2026, 9, 1), (14, 5, 9));
+        for (fmt, want) in [
+            ("YYYY", "2026"),
+            ("YY", "26"),
+            ("MM", "09"),
+            ("M", "9"),
+            ("DD", "01"),
+            ("D", "1"),
+            ("MMMM", "September"),
+            ("MMM", "Sep"),
+            ("dddd", "Tuesday"),
+            ("ddd", "Tue"),
+            ("Do", "1st"),
+            ("HH", "14"),
+            ("H", "14"),
+            ("hh", "02"),
+            ("h", "2"),
+            ("mm", "05"),
+            ("ss", "09"),
+            ("A", "PM"),
+            ("a", "pm"),
+            ("[Day] D [of] MMMM", "Day 1 of September"),
+            ("YYYY-MM-DD", "2026-09-01"),
+            ("YYYY/MM/DD-MM-YYYY", "2026/09/01-09-2026"),
+            ("[unclosed", "unclosed"),
+            ("", ""),
+        ] {
+            assert_eq!(format(fmt, now), want, "{fmt}");
+        }
+        // midnight and noon on the twelve-hour clock, and the ordinals
+        assert_eq!(format("h A", ((2026, 9, 1), (0, 0, 0))), "12 AM");
+        assert_eq!(format("hh a", ((2026, 9, 1), (12, 0, 0))), "12 pm");
+        assert_eq!(format("Do", ((2026, 9, 2), (0, 0, 0))), "2nd");
+        assert_eq!(format("Do", ((2026, 9, 3), (0, 0, 0))), "3rd");
+        assert_eq!(format("Do", ((2026, 9, 11), (0, 0, 0))), "11th");
+        assert_eq!(format("Do", ((2026, 9, 12), (0, 0, 0))), "12th");
+        assert_eq!(format("Do", ((2026, 9, 13), (0, 0, 0))), "13th");
+        assert_eq!(format("Do", ((2026, 9, 21), (0, 0, 0))), "21st");
+        assert_eq!(format("Do", ((2026, 9, 22), (0, 0, 0))), "22nd");
+    }
+
+    #[test]
     fn today_is_a_real_date() {
         let (y, m, d) = today();
         assert!(y >= 2026);
         assert!((1..=12).contains(&m));
         assert!((1..=31).contains(&d));
+        let (_, (h, mi, s)) = now();
+        assert!(h < 24 && mi < 60 && s < 60);
     }
 
     #[test]
