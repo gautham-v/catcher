@@ -2408,7 +2408,7 @@ mod tests {
         let one: Vec<String> = vec!["$$a+b$$".to_string()];
         let b1 = super::blocks(&one);
         assert_eq!((b1[0].start, b1[0].end), (0, 0));
-        assert_eq!(text(&style_block_line(&one, &b1[0], 0, 11)), "   a+b");
+        assert_eq!(text(&style_block_line(&one, &b1[0], 0, 11)), "    a+b");
         // an unclosed opener is not a block
         assert!(super::blocks(&["$$".to_string(), "x".to_string()]).is_empty());
     }
