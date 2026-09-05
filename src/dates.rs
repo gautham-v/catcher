@@ -40,6 +40,63 @@ pub fn shift(y: i32, m: u32, d: u32, n: i64) -> (i32, u32, u32) {
     civil_from_days(days_from_civil(y, m, d) + n)
 }
 
+/// A `YYYY-MM-DD` and nothing else, or `None`. Strict on purpose: a value
+/// that is a date and a bit more is prose, and the hint that follows a date
+/// would be a lie under it.
+pub fn parse_iso(text: &str) -> Option<(i32, u32, u32)> {
+    let t = text.trim();
+    let b = t.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let y: i32 = t[..4].parse().ok()?;
+    let m: u32 = t[5..7].parse().ok()?;
+    let d: u32 = t[8..].parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // round-tripping catches the 31st of a month that has no 31st
+    (civil_from_days(days_from_civil(y, m, d)) == (y, m, d)).then_some((y, m, d))
+}
+
+/// Days from `from` to `to`, negative when `to` is the earlier date.
+pub fn days_between(from: (i32, u32, u32), to: (i32, u32, u32)) -> i64 {
+    days_from_civil(to.0, to.1, to.2) - days_from_civil(from.0, from.1, from.2)
+}
+
+/// A date said the way a person would beside `today`: `today`, `tomorrow`,
+/// `in 5 weeks`, `3 days ago`. Coarser the further away it is, since nobody
+/// counts a date next year in days.
+pub fn relative(date: (i32, u32, u32), today: (i32, u32, u32)) -> String {
+    let days = days_between(today, date);
+    match days {
+        0 => return "today".to_string(),
+        1 => return "tomorrow".to_string(),
+        -1 => return "yesterday".to_string(),
+        _ => {}
+    }
+    let n = days.unsigned_abs();
+    let span = match n {
+        0..=13 => format!("{n} day{}", plural(n)),
+        14..=59 => format!("{} week{}", n / 7, plural(n / 7)),
+        60..=729 => format!("{} month{}", n / 30, plural(n / 30)),
+        _ => format!("{} year{}", n / 365, plural(n / 365)),
+    };
+    if days > 0 {
+        format!("in {span}")
+    } else {
+        format!("{span} ago")
+    }
+}
+
+fn plural(n: u64) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
 const MONTHS: [&str; 12] = [
     "January",
     "February",
@@ -219,5 +276,24 @@ mod tests {
         assert!(y >= 2026);
         assert!((1..=12).contains(&m));
         assert!((1..=31).contains(&d));
+    }
+
+    #[test]
+    fn an_iso_date_is_read_strictly_and_said_relative_to_today() {
+        assert_eq!(parse_iso("2026-09-05"), Some((2026, 9, 5)));
+        assert_eq!(parse_iso(" 2026-09-05 "), Some((2026, 9, 5)));
+        assert_eq!(parse_iso("2026-09-05T10:00"), None);
+        assert_eq!(parse_iso("2026-13-01"), None);
+        assert_eq!(parse_iso("2026-02-30"), None);
+        assert_eq!(parse_iso("launch"), None);
+        let today = (2026, 9, 5);
+        assert_eq!(relative((2026, 9, 5), today), "today");
+        assert_eq!(relative((2026, 9, 6), today), "tomorrow");
+        assert_eq!(relative((2026, 9, 4), today), "yesterday");
+        assert_eq!(relative((2026, 9, 2), today), "3 days ago");
+        assert_eq!(relative((2026, 10, 10), today), "in 5 weeks");
+        assert_eq!(relative((2026, 12, 20), today), "in 3 months");
+        assert_eq!(relative((2023, 1, 1), today), "3 years ago");
+        assert_eq!(days_between(today, (2026, 9, 1)), -4);
     }
 }

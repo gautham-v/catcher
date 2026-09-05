@@ -82,6 +82,8 @@ pub fn target_entry(path: &Path, title: &str, roots: &[PathBuf]) -> Entry {
         // nothing in this module shows a folder; the footer names notes
         folder: String::new(),
         modified: SystemTime::UNIX_EPOCH,
+        // its aliases too, so a `[[launch]]` elsewhere counts as a link here
+        aliases: index::head_at(path).1,
         path: path.to_path_buf(),
     }
 }
@@ -263,9 +265,9 @@ pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Menti
             // nothing to say about it and nothing to fix
             fs::read_to_string(&path).ok()
         };
-        let title = match &body {
-            Some(b) => notes::title_of(b),
-            None => index::title_at(&path),
+        let (title, aliases) = match &body {
+            Some(b) => (notes::title_of(b), crate::md::front_matter_aliases(b)),
+            None => index::head_at(&path),
         };
         entries.push(Entry {
             path: path.clone(),
@@ -277,6 +279,7 @@ pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Menti
                 .into_owned(),
             folder: String::new(),
             modified,
+            aliases,
         });
         let Some(body) = body else {
             return;
