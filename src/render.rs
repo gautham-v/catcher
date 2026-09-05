@@ -121,7 +121,11 @@ impl Rendered {
 
 /// Options: GitHub-flavoured enough for notes.
 fn options() -> Options {
-    Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES
+    Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_TABLES
+        | Options::ENABLE_MATH
+        | Options::ENABLE_FOOTNOTES
 }
 
 /// Unbounded-width render, for tests that don't care about the page width.
@@ -448,6 +452,8 @@ struct Ren {
     /// Source line for the line currently being built.
     src_line: Option<usize>,
     pending_checkbox: Option<usize>,
+    /// A footnote's superscript label, waiting for its first paragraph.
+    footnote: Option<String>,
     done_item: bool,
     image_alt: Option<(String, String)>,
     /// Byte offset the renderer has already drawn past. pulldown-cmark has
@@ -491,6 +497,7 @@ impl Ren {
             first_line,
             src_line: None,
             pending_checkbox: None,
+            footnote: None,
             done_item: false,
             image_alt: None,
             wiki_until: 0,
@@ -690,7 +697,7 @@ impl Ren {
         let w = self.box_width();
         self.box_w = w;
         let mut cells = str_cells("╭─ ", theme::state());
-        if let Some(g) = callout_glyph(kind) {
+        if let Some(g) = crate::md::callout_glyph(kind) {
             cells.extend(str_cells(&format!("{g} "), theme::state()));
         }
         cells.extend(str_cells(kind, theme::state()));
@@ -992,6 +999,10 @@ impl Ren {
                     self.blank();
                     self.src_line = Some(src_line);
                 }
+                // the first paragraph of a footnote carries its number
+                if let Some(mark) = self.footnote.take() {
+                    self.push(&format!("{mark} "), theme::state(), None);
+                }
             }
             Event::End(TagEnd::Paragraph) => self.flush(),
             Event::Start(Tag::BlockQuote(_)) => {
@@ -1182,6 +1193,35 @@ impl Ren {
                     .take_while(|c| *c == '`')
                     .count();
                 self.push_at(&code.into_string(), style, link, Some(range.start + ticks));
+            }
+            Event::InlineMath(text) => {
+                let style = self.style().patch(theme::math());
+                let link = self.link;
+                self.push_at(&text, style, link, Some(range.start + 1));
+            }
+            Event::DisplayMath(text) => {
+                // a displayed formula sits on rows of its own, centred
+                self.blank();
+                self.src_line = Some(src_line);
+                let width = self.rule_width();
+                for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                    let w = crate::md::str_width(line);
+                    self.push(&" ".repeat(width.saturating_sub(w) / 2), theme::PLAIN, None);
+                    self.push(line, theme::math(), None);
+                    self.flush();
+                }
+            }
+            Event::FootnoteReference(label) => {
+                self.push(&crate::md::superscript(&label), theme::state(), None);
+            }
+            Event::Start(Tag::FootnoteDefinition(label)) => {
+                self.blank();
+                self.src_line = Some(src_line);
+                self.footnote = Some(crate::md::superscript(&label));
+            }
+            Event::End(TagEnd::FootnoteDefinition) => {
+                self.footnote = None;
+                self.flush();
             }
             Event::Text(text) => {
                 if let Some((alt, _)) = self.image_alt.as_mut() {
@@ -1516,21 +1556,6 @@ fn callout_at(src: &str, start: usize) -> Option<(String, String, usize)> {
     let after = inner[close + 1..].trim_start_matches(['-', '+']);
     let title = after.trim().to_string();
     Some((kind.to_lowercase(), title, start + line_end))
-}
-
-/// The glyph a callout type is drawn with in its title row.
-fn callout_glyph(kind: &str) -> Option<char> {
-    match kind {
-        "summary" | "abstract" | "tldr" => Some('≡'),
-        "note" | "info" => Some('i'),
-        "tip" | "hint" => Some('✓'),
-        "warning" | "caution" => Some('!'),
-        "danger" | "error" | "bug" => Some('✗'),
-        "question" | "help" => Some('?'),
-        "example" => Some('▸'),
-        "quote" => Some('❝'),
-        _ => None,
-    }
 }
 
 /// pulldown's alignment in the shared vocabulary.
@@ -2004,6 +2029,16 @@ mod tests {
             .unwrap();
         let word = body.cells.iter().find(|c| c.ch == 'o').unwrap();
         assert_eq!(word.style, Style::default());
+    }
+
+    #[test]
+    fn footnotes_and_maths_render_on_the_page() {
+        let r = render_wide("Tea[^1] and $x$.\n\n$$\nE = mc^2\n$$\n\n[^1]: Tickles\n", 20);
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(rows.iter().any(|t| t == "Tea¹ and x."), "{rows:?}");
+        assert!(rows.iter().any(|t| t.trim() == "E = mc^2" && t.starts_with("     ")), "{rows:?}");
+        assert!(rows.iter().any(|t| t == "¹ Tickles"), "{rows:?}");
+        assert!(rows.iter().all(|t| !t.contains("[^1]") && !t.contains("$$")), "{rows:?}");
     }
 
     #[test]

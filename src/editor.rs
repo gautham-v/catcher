@@ -769,6 +769,13 @@ impl Editor {
 fn list_continuation(line: &str) -> Option<(String, bool)> {
     let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
     let (indent, rest) = line.split_at(indent_len);
+    // a quote (or callout) line carries its `> ` on, and an empty one ends it
+    if let Some(body) = rest.strip_prefix("> ").or_else(|| rest.strip_prefix('>')) {
+        if let Some(inner) = list_continuation(body) {
+            return Some((format!("{indent}> {}", inner.0), inner.1));
+        }
+        return Some((format!("{indent}> "), body.trim().is_empty()));
+    }
     let (marker, body) = if let Some(rest) = rest
         .strip_prefix("- ")
         .or_else(|| rest.strip_prefix("* "))
@@ -836,6 +843,9 @@ mod tests {
             ("3. a", "3. a\n4. "),
             ("9) a", "9) a\n10) "),
             ("- [x] a", "- [x] a\n- [ ] "),
+            ("> quote", "> quote\n> "),
+            ("> [!note] Title", "> [!note] Title\n> "),
+            ("> - item", "> - item\n> - "),
             ("plain", "plain\n"),
             ("-a", "-a\n"),
         ];

@@ -170,6 +170,9 @@ pub enum Command {
     InsertTable,
     Table(crate::table::Op),
     TableSource,
+    InsertCallout,
+    InsertMath,
+    InsertFootnote,
 }
 
 /// The palette's row and column commands, in the order they are listed.
@@ -192,7 +195,7 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 26] = [
+const COMMANDS: [Command; 29] = [
     Command::NewNote,
     Command::DailyNote,
     Command::QuickOpen,
@@ -219,6 +222,9 @@ const COMMANDS: [Command; 26] = [
     Command::SplitDown,
     Command::NewTab,
     Command::InsertTable,
+    Command::InsertCallout,
+    Command::InsertMath,
+    Command::InsertFootnote,
 ];
 
 impl Command {
@@ -229,6 +235,9 @@ impl Command {
             // palette-only: a move is rare enough that it earns no key
             Command::MoveFile
             | Command::InsertTable
+            | Command::InsertCallout
+            | Command::InsertMath
+            | Command::InsertFootnote
             | Command::Table(_)
             | Command::TableSource => return None,
             Command::NewNote => Action::NewNote,
@@ -286,6 +295,9 @@ impl Command {
             Command::SplitDown => ("Open in split down", "this note again, below this one"),
             Command::NewTab => ("Open in new tab", "this note again, in a terminal tab"),
             Command::InsertTable => ("Table: Insert table", "a 2×2 grid at the cursor"),
+            Command::InsertCallout => ("Insert callout", "> [!note] with a title and a body"),
+            Command::InsertMath => ("Insert math block", "$$ … $$ on lines of their own"),
+            Command::InsertFootnote => ("Insert footnote", "[^n] here, its text at the end of the note"),
             Command::TableSource => ("Table: Edit source", "the pipes, until the cursor leaves"),
             Command::Table(op) => {
                 use crate::table::Op;
@@ -2493,6 +2505,13 @@ impl App {
             // palette-only: the one command without a key
             Item::Command(Command::MoveFile) => self.open_move(),
             Item::Command(Command::InsertTable) => self.insert_table(),
+            Item::Command(Command::InsertCallout) => {
+                self.insert_block(vec!["> [!note] ".to_string(), "> ".to_string()], 0, 10);
+            }
+            Item::Command(Command::InsertMath) => {
+                self.insert_block(vec!["$$".to_string(), String::new(), "$$".to_string()], 1, 0);
+            }
+            Item::Command(Command::InsertFootnote) => self.insert_footnote(),
             Item::Command(Command::Table(op)) => self.table_op(op),
             Item::Command(Command::TableSource) => self.toggle_table_source(),
             // the rest are plain actions: one path, whether by key or palette;
@@ -3061,12 +3080,22 @@ impl App {
 
     /// A 2×2 table at the cursor, on a paragraph of its own.
     fn insert_table(&mut self) {
+        let with = crate::table::Table::blank(1, 2).emit();
+        let col = crate::table::cell_span(&with[0], 0)
+            .map(|(_, e)| e)
+            .unwrap_or(2);
+        self.insert_block(with, 0, col);
+    }
+
+    /// Put `with` at the cursor as a paragraph of its own: an empty line
+    /// takes it, a line with text gets it after, and a blank line is added
+    /// beneath when the next line has text. The cursor lands on line
+    /// `line` of the block at column `col`.
+    fn insert_block(&mut self, mut with: Vec<String>, line: usize, col: usize) {
         self.enter_edit_view();
         let (row, _) = self.editor.cursor;
         let lines = self.editor.lines();
         let here_blank = lines[row].trim().is_empty();
-        let mut with = crate::table::Table::blank(1, 2).emit();
-        // an empty line takes the table; a line with text gets it after
         let at = if here_blank { row } else { row + 1 };
         if !here_blank {
             with.insert(0, String::new());
@@ -3075,17 +3104,49 @@ impl App {
         if !below_blank {
             with.push(String::new());
         }
-        let first = at + usize::from(!here_blank);
-        let col = crate::table::cell_span(&with[usize::from(!here_blank)], 0)
-            .map(|(_, e)| e)
-            .unwrap_or(2);
+        let first = at + usize::from(!here_blank) + line;
         if here_blank {
-            // the blank line becomes the table's first row
             self.editor.replace_lines(row, row, with, (first, col));
         } else {
             self.editor.insert_lines(at, with, (first, col));
         }
         self.sync_editor_to_note();
+    }
+
+    /// `[^n]` at the cursor, `n` one past the highest numbered footnote in
+    /// the note, and its definition at the end of the note with the cursor
+    /// on it, ready for the text.
+    fn insert_footnote(&mut self) {
+        self.enter_edit_view();
+        let n = self
+            .editor
+            .lines()
+            .iter()
+            .filter_map(|l| {
+                let rest = l.trim_start().strip_prefix("[^")?;
+                let close = rest.find("]:")?;
+                rest[..close].parse::<u64>().ok()
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
+        self.editor.insert_str(&format!("[^{n}]"));
+        let end = self.editor.lines().len();
+        let mut with = vec![format!("[^{n}]: ")];
+        // a blank line before it unless the note already ends with one
+        if self
+            .editor
+            .lines()
+            .last()
+            .is_some_and(|l| !l.trim().is_empty())
+        {
+            with.insert(0, String::new());
+        }
+        let last = end + with.len() - 1;
+        let col = with.last().map(|l| l.chars().count()).unwrap_or(0);
+        self.editor.insert_lines(end, with, (last, col));
+        self.sync_editor_to_note();
+        self.flash(format!("footnote {n} — type its text"));
     }
 
     /// Esc in a grid: show this table's pipes until the cursor leaves it, and
@@ -4602,7 +4663,14 @@ mod tests {
         for c in super::COMMANDS {
             assert_eq!(
                 c.action().is_none(),
-                matches!(c, super::Command::MoveFile | super::Command::InsertTable),
+                matches!(
+                    c,
+                    super::Command::MoveFile
+                        | super::Command::InsertTable
+                        | super::Command::InsertCallout
+                        | super::Command::InsertMath
+                        | super::Command::InsertFootnote
+                ),
                 "{}",
                 c.label().0
             );

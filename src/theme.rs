@@ -280,6 +280,10 @@ pub fn inline_code() -> Style {
 pub fn code() -> Style {
     Style::new().fg(palette().code_fg).bg(palette().code_bg)
 }
+/// Maths, inline or displayed: italic, as a typeset formula would be.
+pub fn math() -> Style {
+    Style::new().add_modifier(Modifier::ITALIC)
+}
 pub fn link() -> Style {
     Style::new()
         .fg(palette().link)

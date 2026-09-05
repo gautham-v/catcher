@@ -529,6 +529,58 @@ pub fn style_line(src: &str) -> RLine {
         i += 1;
     }
 
+    // a callout's title line: `[!type] Title` becomes the glyph, the type
+    // and the title, all in the accent
+    if base == theme::quote() && i > 0 {
+        if let Some((kind, after, title)) = callout_title(&chars, i) {
+            let style = theme::state().add_modifier(Modifier::BOLD);
+            let mut head = String::new();
+            if let Some(g) = callout_glyph(&kind) {
+                head.push(g);
+                head.push(' ');
+            }
+            head.push_str(&kind);
+            b.sub(&head, style, i);
+            for k in i + 1..after {
+                b.sub("", style, k);
+            }
+            if title < chars.len() {
+                b.sub(" · ", style, after);
+            }
+            for k in after..title {
+                b.sub("", style, k);
+            }
+            inline(&mut b, title, style);
+            return RLine {
+                cells: b.cells,
+                src_len,
+            };
+        }
+    }
+
+    // a footnote's definition: `[^1]: text` becomes `¹ text`
+    if chars.get(i) == Some(&'[') && chars.get(i + 1) == Some(&'^') {
+        if let Some(close) = find(&chars, i + 2, ']') {
+            if chars.get(close + 1) == Some(&':') {
+                let label: String = chars[i + 2..close].iter().collect();
+                b.sub(&superscript(&label), theme::state(), i);
+                for k in i + 1..=close + 1 {
+                    b.sub("", theme::state(), k);
+                }
+                let mut t = close + 2;
+                if chars.get(t) == Some(&' ') {
+                    b.sub(" ", theme::PLAIN, t);
+                    t += 1;
+                }
+                inline(&mut b, t, base);
+                return RLine {
+                    cells: b.cells,
+                    src_len,
+                };
+            }
+        }
+    }
+
     // heading: hide the "### " marker, style the rest
     if i < chars.len() && chars[i] == '#' {
         let mut h = i;
@@ -664,6 +716,39 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
                 w.end,
                 style,
             ));
+        }
+    }
+
+    // [^1] — a footnote reference, as a superscript
+    if c == '[' && b.src.get(i + 1) == Some(&'^') {
+        if let Some(close) = find(b.src, i + 2, ']') {
+            let label: String = b.src[i + 2..close].iter().collect();
+            if !label.is_empty() && !label.contains(' ') {
+                b.sub(&superscript(&label), theme::state(), i);
+                for k in i + 1..=close {
+                    b.sub("", theme::state(), k);
+                }
+                return Some(close + 1);
+            }
+        }
+    }
+
+    // $x$ or $$x$$ — maths, in italics with the dollars hidden
+    if c == '$' {
+        let n = if b.src.get(i + 1) == Some(&'$') { 2 } else { 1 };
+        let start = i + n;
+        if b.src.get(start).is_some_and(|ch| !ch.is_whitespace()) {
+            let mut k = start;
+            while k < b.src.len() {
+                if b.src[k] == '$' && (n == 1 || b.src.get(k + 1) == Some(&'$')) {
+                    if k > start && !b.src[k - 1].is_whitespace() {
+                        let style = base.patch(theme::math());
+                        return Some(delimited(b, i, start, k, k + n, style));
+                    }
+                    break;
+                }
+                k += 1;
+            }
         }
     }
 
@@ -1313,6 +1398,8 @@ pub enum BlockKind {
     Table,
     /// A line holding nothing but `![alt](url)`.
     Image,
+    /// A `$$` … `$$` maths block, fences included — or `$$x$$` on one line.
+    Math,
     /// The leading `---` … `---` block, fences included. A block rather than a
     /// run of lines so the whole thing reveals together the way a fence does,
     /// and so nothing inside it is ever read as markdown.
@@ -1339,6 +1426,70 @@ impl Block {
 pub(crate) fn is_fence(line: &str) -> bool {
     let t = line.trim_start();
     t.starts_with("```") || t.starts_with("~~~")
+}
+
+/// The last line of the maths block opening on line `i`, if one does: a
+/// line starting with `$$`, closed by the first line ending with `$$` —
+/// which may be the same line (`$$x$$`). An unclosed opener is not a block.
+fn math_block_end(lines: &[String], i: usize) -> Option<usize> {
+    let t = lines[i].trim();
+    if !t.starts_with("$$") {
+        return None;
+    }
+    if t.len() > 4 && t.ends_with("$$") {
+        return Some(i);
+    }
+    (i + 1..lines.len()).find(|j| lines[*j].trim().ends_with("$$"))
+}
+
+/// A footnote label as a superscript: digits in superscript, anything else
+/// as `^name`.
+pub fn superscript(label: &str) -> String {
+    const DIGITS: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+    if !label.is_empty() && label.chars().all(|c| c.is_ascii_digit()) {
+        label
+            .chars()
+            .map(|c| DIGITS[c.to_digit(10).unwrap_or(0) as usize])
+            .collect()
+    } else {
+        format!("^{label}")
+    }
+}
+
+/// The glyph a callout type is drawn with in its title row.
+pub fn callout_glyph(kind: &str) -> Option<char> {
+    match kind {
+        "summary" | "abstract" | "tldr" => Some('≡'),
+        "note" | "info" | "todo" => Some('i'),
+        "tip" | "hint" | "success" | "check" | "done" => Some('✓'),
+        "warning" | "caution" | "attention" => Some('!'),
+        "danger" | "error" | "bug" | "failure" | "fail" | "missing" => Some('✗'),
+        "question" | "help" | "faq" => Some('?'),
+        "example" => Some('▸'),
+        "quote" | "cite" => Some('❝'),
+        _ => None,
+    }
+}
+
+/// `[!type] Title` at the start of `rest` (a quote line's body, bars
+/// stripped): the type, the title, and the char index the title starts at.
+fn callout_title(chars: &[char], i: usize) -> Option<(String, usize, usize)> {
+    if chars.get(i) != Some(&'[') || chars.get(i + 1) != Some(&'!') {
+        return None;
+    }
+    let close = (i + 2..chars.len()).find(|k| chars[*k] == ']')?;
+    let kind: String = chars[i + 2..close].iter().collect();
+    if kind.is_empty() || kind.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let mut t = close + 1;
+    if matches!(chars.get(t), Some('-') | Some('+')) {
+        t += 1;
+    }
+    while chars.get(t).is_some_and(|c| c.is_whitespace()) {
+        t += 1;
+    }
+    Some((kind.to_lowercase(), close + 1, t))
 }
 
 /// A fence line's info string: whatever follows its run of backticks or
@@ -1475,6 +1626,15 @@ pub fn blocks_from(lines: &[String], from: usize) -> Vec<Block> {
             i = j;
             continue;
         }
+        if let Some(end) = math_block_end(lines, i) {
+            out.push(Block {
+                kind: BlockKind::Math,
+                start: i,
+                end,
+            });
+            i = end + 1;
+            continue;
+        }
         if is_rule(&lines[i]) {
             out.push(Block {
                 kind: BlockKind::Rule,
@@ -1509,6 +1669,7 @@ pub fn style_block_line(lines: &[String], block: &Block, row: usize, width: usiz
         BlockKind::Rule => rule_line(src, width),
         BlockKind::Image => image_fallback_line(src),
         BlockKind::FrontMatter => front_matter_line(src),
+        BlockKind::Math => math_line(src, row == block.start, row == block.end, width),
         BlockKind::Table => table_line(&lines[block.start..=block.end], row - block.start, width),
     }
 }
@@ -1666,6 +1827,46 @@ fn rule_line(src: &str, width: usize) -> RLine {
             src: i.min(len),
         })
         .collect();
+    done(cells, src)
+}
+
+/// A line of a maths block with the cursor elsewhere: the `$$` fences are
+/// dropped and what is left is set in the middle of the page, in italics,
+/// the way a displayed formula is. A cap line with nothing else on it
+/// becomes a blank row, so the block takes the rows the file gives it.
+fn math_line(src: &str, first: bool, last: bool, width: usize) -> RLine {
+    let chars: Vec<char> = src.chars().collect();
+    let mut a = 0;
+    let mut b = chars.len();
+    while a < b && chars[a].is_whitespace() {
+        a += 1;
+    }
+    while b > a && chars[b - 1].is_whitespace() {
+        b -= 1;
+    }
+    if first && chars[a..b].starts_with(&['$', '$']) {
+        a += 2;
+    }
+    if last && chars[a..b].ends_with(&['$', '$']) {
+        b -= 2;
+    }
+    while a < b && chars[a].is_whitespace() {
+        a += 1;
+    }
+    while b > a && chars[b - 1].is_whitespace() {
+        b -= 1;
+    }
+    let mut cells: Vec<Cell> = Vec::new();
+    if a < b {
+        let w: usize = chars[a..b].iter().map(|c| char_width(*c)).sum();
+        let pad = if width == usize::MAX { 0 } else { width.saturating_sub(w) / 2 };
+        cells.extend(at(&" ".repeat(pad), theme::PLAIN, a));
+        cells.extend(chars[a..b].iter().enumerate().map(|(k, ch)| Cell {
+            ch: *ch,
+            style: theme::math(),
+            src: a + k,
+        }));
+    }
     done(cells, src)
 }
 
@@ -2179,6 +2380,37 @@ mod tests {
         let tinted: Vec<bool> = l.cells.iter().map(|c| c.style.bg == Some(ratatui::style::Color::Red)).collect();
         // "a │ " untinted, then "b │ c" tinted, separator included
         assert_eq!(tinted, vec![false, false, false, false, true, true, true, true, true]);
+    }
+
+    #[test]
+    fn callouts_footnotes_and_maths_are_styled_in_the_editor() {
+        let text = |l: &RLine| l.cells.iter().map(|c| c.ch).collect::<String>();
+        // a callout's title line: glyph, type, title
+        assert_eq!(text(&style_line("> [!todo] Warning!")), "▌ i todo · Warning!");
+        assert_eq!(text(&style_line("> [!danger]- ")), "▌ ✗ danger");
+        assert_eq!(text(&style_line("> [!custom] T")), "▌ custom · T");
+        // a plain quote is untouched
+        assert_eq!(text(&style_line("> [x] not a callout")), "▌ [x] not a callout");
+        // footnotes: the reference and the definition
+        assert_eq!(text(&style_line("word[^1] more")), "word¹ more");
+        assert_eq!(text(&style_line("[^12]: Tickles")), "¹² Tickles");
+        assert_eq!(text(&style_line("[^note]: x")), "^note x");
+        // inline maths loses its dollars
+        assert_eq!(text(&style_line("so $x^2$ and $$y$$.")), "so x^2 and y.");
+        assert_eq!(text(&style_line("$5 and $6")), "$5 and $6");
+        // a maths block: caps blank, body centred in italics
+        let lines: Vec<String> = "$$\nE = mc^2\n$$".lines().map(String::from).collect();
+        let blocks = blocks(&lines);
+        assert_eq!(blocks[0].kind, BlockKind::Math);
+        assert_eq!((blocks[0].start, blocks[0].end), (0, 2));
+        assert_eq!(text(&style_block_line(&lines, &blocks[0], 0, 20)), "");
+        assert_eq!(text(&style_block_line(&lines, &blocks[0], 1, 20)), "      E = mc^2");
+        let one: Vec<String> = vec!["$$a+b$$".to_string()];
+        let b1 = super::blocks(&one);
+        assert_eq!((b1[0].start, b1[0].end), (0, 0));
+        assert_eq!(text(&style_block_line(&one, &b1[0], 0, 11)), "   a+b");
+        // an unclosed opener is not a block
+        assert!(super::blocks(&["$$".to_string(), "x".to_string()]).is_empty());
     }
 
     #[test]

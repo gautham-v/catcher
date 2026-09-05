@@ -282,13 +282,17 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                     extra(app, line, None);
                 }
                 if app.hovered_table_end(&blocks, *row) {
-                    let grid = segs
-                        .first()
-                        .map(|s| s.cells.iter().map(|c| c.ch).collect::<String>())
-                        .map(|t| crate::md::str_width(&t))
-                        .unwrap_or(1);
+                    // centred under the columns, gutter and all
+                    let block = *crate::md::block_at(&blocks, *row).expect("a table row");
+                    let raw = Some(app.editor.cursor.0)
+                        .filter(|c| block.contains(*c))
+                        .map(|c| c - block.start);
+                    let inner = width.saturating_sub(crate::app::TABLE_GUTTER);
+                    let spans = crate::md::table_column_spans(app.editor.lines(), &block, inner, raw);
+                    let cols_w = spans.last().map(|(at, w)| at + w).unwrap_or(1);
+                    let grid = crate::app::TABLE_GUTTER + cols_w;
                     let line = Line::from(vec![
-                        Span::raw(" ".repeat(grid / 2)),
+                        Span::raw(" ".repeat(crate::app::TABLE_GUTTER + cols_w / 2)),
                         Span::styled("+", theme::state()),
                     ]);
                     extra(
@@ -322,6 +326,24 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// The source row drawn nearest the vertical middle of a table, counting
+/// the rules drawn under its rows.
+fn table_middle_row(app: &App, blocks: &[crate::md::Block], block: &crate::md::Block) -> usize {
+    let heights: Vec<usize> = (block.start..=block.end)
+        .map(|r| 1 + usize::from(app.table_rule_under(blocks, r)))
+        .collect();
+    let total: usize = heights.iter().sum();
+    let mid = total / 2;
+    let mut at = 0;
+    for (i, h) in heights.iter().enumerate() {
+        if mid < at + h {
+            return block.start + i;
+        }
+        at += h;
+    }
+    block.end
+}
+
 /// The add-column `+` beside the middle row of a table whose right edge the
 /// pointer is at, remembered for the click that follows. (The add-row `+`
 /// is drawn on the row under the table.)
@@ -339,8 +361,8 @@ fn table_handle(
     if block.kind != crate::md::BlockKind::Table || !app.hovered_table_right(blocks, row) {
         return;
     }
-    // one handle, on the table's middle row
-    if row != block.start + (block.end - block.start) / 2 {
+    // one handle, on the row at the middle of the drawn table, rules counted
+    if row != table_middle_row(app, blocks, block) {
         return;
     }
     let used = line.width();
