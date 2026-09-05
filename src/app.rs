@@ -307,7 +307,7 @@ impl Command {
             Command::InsertMath => ("Insert math block", "$$ … $$ on lines of their own"),
             Command::InsertFootnote => ("Insert footnote", "[^n] here, its text at the end of the note"),
             Command::Outline => ("Outline", "every heading in this note; ⏎ goes there, ⌥⏎ folds"),
-            Command::ToggleProperties => ("Hide / show properties", "the front matter: box or line on the page, dim or hidden in the editor"),
+            Command::ToggleProperties => ("Toggle properties (hide / show)", "the front matter: box, line or hidden on the page; dim or hidden in the editor"),
             Command::TableSource => ("Table: Edit source", "the pipes, until the cursor leaves"),
             Command::Table(op) => {
                 use crate::table::Op;
@@ -478,9 +478,6 @@ pub struct App {
     pub active: usize,
     pub editor: Editor,
     pub view: View,
-    /// *Toggle properties* on a `properties: hide` setting: the box is shown
-    /// for the rest of the session, the setting untouched.
-    pub properties_peek: bool,
     pub overlay: Overlay,
     pub query: String,
     pub selected: usize,
@@ -815,7 +812,6 @@ impl App {
             active,
             editor: Editor::default(),
             view: View::Edit,
-            properties_peek: false,
             overlay: Overlay::None,
             query: String::new(),
             selected: 0,
@@ -1437,37 +1433,25 @@ impl App {
         }
     }
 
-    /// How the reading view draws this note's front matter right now: the
-    /// setting, except that *Toggle properties* on a `hide` setting shows the
-    /// box for the rest of the session without rewriting the setting.
+    /// How the reading view draws this note's front matter: the setting.
     pub fn properties_mode(&self) -> crate::config::Properties {
-        use crate::config::Properties;
-        match self.config.properties {
-            Properties::Hide if self.properties_peek => Properties::Box,
-            mode => mode,
-        }
+        self.config.properties
     }
 
-    /// *Toggle properties*, a click on the box's edge or on the line standing
-    /// in for it. On the page: box ⇄ line, written to the settings so every
-    /// note follows; from `hide`, a session-only peek at the box. In the
-    /// editor the same command flips `front_matter` between dim and hide.
-    fn toggle_properties(&mut self) {
+    /// *Toggle properties* on the page cycles box → line → hide → box; a
+    /// click on the box's edge folds it to the line and a click on the line
+    /// opens the box (`click` — a click never hides the lot, since there
+    /// would be nothing left to click). Written to the settings so every note
+    /// follows. In the editor the command flips `front_matter` dim ⇄ hide.
+    fn toggle_properties(&mut self, click: bool) {
         use crate::config::{FrontMatter, Properties};
         let (key, value) = match self.view {
             View::Preview => {
                 let next = match self.config.properties {
                     Properties::Box => Properties::Line,
-                    Properties::Line => Properties::Box,
-                    Properties::Hide => {
-                        self.properties_peek = !self.properties_peek;
-                        self.flash(if self.properties_peek {
-                            "properties: shown for now (setting stays hide)".to_string()
-                        } else {
-                            "properties: hide".to_string()
-                        });
-                        return;
-                    }
+                    Properties::Line if click => Properties::Box,
+                    Properties::Line => Properties::Hide,
+                    Properties::Hide => Properties::Box,
                 };
                 self.config.properties = next;
                 ("properties", next.name())
@@ -3495,7 +3479,7 @@ impl App {
             }
             Action::ToggleProperties => {
                 self.overlay = Overlay::None;
-                self.toggle_properties();
+                self.toggle_properties(false);
             }
             Action::NewNote => {
                 self.overlay = Overlay::None;
@@ -3998,7 +3982,7 @@ impl App {
             let url = url.clone();
             // the properties box's own edge, and the line it folds to
             if url == crate::render::PROPERTIES_HREF {
-                self.toggle_properties();
+                self.toggle_properties(true);
                 return;
             }
             self.follow(md::LinkTarget::parse(&url));
@@ -5536,7 +5520,10 @@ mod tests {
     fn toggle_properties_is_a_palette_command_with_a_rebindable_key() {
         assert!(COMMANDS.contains(&Command::ToggleProperties));
         assert_eq!(Command::ToggleProperties.action(), Some(Action::ToggleProperties));
-        assert_eq!(Command::ToggleProperties.label().0, "Hide / show properties");
+        assert_eq!(Command::ToggleProperties.label().0, "Toggle properties (hide / show)");
+        for q in ["toggle", "hide", "show", "prop"] {
+            assert!(crate::search::fuzzy(q, Command::ToggleProperties.label().0).is_some(), "{q}");
+        }
         let map = crate::keys::Keymap::default();
         assert_eq!(map.label(Action::ToggleProperties), "");
         assert!(map

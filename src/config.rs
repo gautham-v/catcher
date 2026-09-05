@@ -63,10 +63,10 @@ pub enum FrontMatter {
 }
 
 /// What the reading view does with a note's front matter: the box of
-/// properties, a single line standing in for it, or nothing. A click on the
-/// box or the *Toggle properties* command flips between the first two and
-/// writes the choice here, so every note follows; `hide` is only ever set by
-/// hand, and the command then shows the box for the session without touching it.
+/// properties, a single line standing in for it, or nothing. The *Toggle
+/// properties* command cycles through all three and a click on the box or
+/// the line flips between the first two; either writes the choice here, so
+/// every note follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Properties {
     #[default]
@@ -651,7 +651,7 @@ impl Config {
         d.row(
             "properties",
             self.properties.name(),
-            "front matter as a box · one line · hide",
+            "box · line · hide — Toggle properties cycles them",
         );
         d.row("wikilinks", yn(self.wikilinks), "[[links]] open notes");
         d.row(
