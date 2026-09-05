@@ -555,6 +555,12 @@ pub struct App {
     /// Every body the contents tab searches, one per `open_index` entry, read
     /// once when the tab is entered so a keystroke never touches the disk.
     contents_bodies: Vec<Option<crate::contents::Body>>,
+    /// The read of those bodies in flight: entering the tab hands the disk
+    /// work to a thread, and `poll_contents_scan` takes the answer.
+    contents_rx: Option<std::sync::mpsc::Receiver<Vec<Option<crate::contents::Body>>>>,
+    /// The last query's rows, so a redraw with the query unchanged scans
+    /// nothing. Cleared whenever the bodies change under it.
+    contents_cache: std::cell::RefCell<Option<(String, Vec<crate::contents::Row>)>>,
     /// Every folder the move picker offers, walked once when it opens rather
     /// than on every frame it is on screen.
     move_targets: Vec<(PathBuf, usize)>,
@@ -859,6 +865,8 @@ impl App {
             tag_filter: None,
             tree_open: BTreeSet::new(),
             contents_bodies: Vec::new(),
+            contents_rx: None,
+            contents_cache: std::cell::RefCell::new(None),
             move_targets: Vec::new(),
             preview_goto: None,
             overlay_rect: Rect::default(),
@@ -1349,6 +1357,7 @@ impl App {
         changed |= self.follow_system_theme();
         changed |= self.poll_index_scan();
         changed |= self.poll_tag_scan();
+        changed |= self.poll_contents_scan();
         changed |= self.maybe_peek();
         // a filename that followed its title on save; the title is the
         // terminal's, not the frame's
@@ -1631,6 +1640,36 @@ impl App {
     /// Whether the tag list on screen is still being gathered.
     pub fn tag_scanning(&self) -> bool {
         self.tag_rx.is_some()
+    }
+
+    /// Whether the contents tab is still reading its bodies.
+    pub fn contents_indexing(&self) -> bool {
+        self.contents_rx.is_some()
+    }
+
+    /// Take a body read started by [`App::enter_contents`] if it has finished.
+    fn poll_contents_scan(&mut self) -> bool {
+        let Some(rx) = self.contents_rx.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(bodies) => {
+                self.contents_rx = None;
+                self.set_contents_bodies(bodies);
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.contents_rx = None;
+                true
+            }
+        }
+    }
+
+    /// Adopt a fresh set of bodies; rows cached for the old set are stale.
+    fn set_contents_bodies(&mut self, bodies: Vec<Option<crate::contents::Body>>) {
+        self.contents_bodies = bodies;
+        self.contents_cache.borrow_mut().take();
     }
 
     /// Take a tag scan started by [`App::open_tag`] if it has finished.
@@ -2408,44 +2447,68 @@ impl App {
     }
 
     /// Entering the contents tab reads every body the index reaches, once.
-    /// A vault of a few thousand notes is a moment's work, and after it each
-    /// keystroke is string search over memory.
+    /// A vault of a few thousand notes is a moment's work, done on a thread
+    /// so the tab is on screen at once; after it lands each keystroke is
+    /// string search over memory.
     fn enter_contents(&mut self) {
         self.tab = QuickTab::Contents;
         self.selected = 0;
         // a note this session holds is searched as it stands in memory: the
         // file may be an autosave behind, and a hit's line number has to be
-        // right for the buffer it opens into
-        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        let open: Vec<(PathBuf, &str)> = self
+        // right for the buffer it opens into. Index paths are already
+        // canonical, so only the open notes are canonicalized, once each.
+        let open: std::collections::HashMap<PathBuf, &str> = self
             .notes
             .iter()
-            .map(|n| (canon(&n.path), n.content.as_str()))
-            .collect();
-        self.contents_bodies = self
-            .open_index
-            .iter()
-            .map(|e| {
-                let here = canon(&e.path);
-                match open.iter().find(|(p, _)| *p == here) {
-                    Some((_, body)) => Some(crate::contents::body(body)),
-                    None => crate::contents::body_of(&e.path)
-                        .as_deref()
-                        .map(crate::contents::body),
-                }
+            .map(|n| {
+                let p = std::fs::canonicalize(&n.path).unwrap_or_else(|_| n.path.clone());
+                (p, n.content.as_str())
             })
             .collect();
+        let work: Vec<Result<crate::contents::Body, PathBuf>> = self
+            .open_index
+            .iter()
+            .map(|e| match open.get(&e.path) {
+                Some(body) => Ok(crate::contents::body(body)),
+                None => Err(e.path.clone()),
+            })
+            .collect();
+        self.set_contents_bodies(Vec::new());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let bodies = work
+                .into_iter()
+                .map(|w| match w {
+                    Ok(body) => Some(body),
+                    Err(path) => crate::contents::body_of(&path)
+                        .as_deref()
+                        .map(crate::contents::body),
+                })
+                .collect();
+            let _ = tx.send(bodies);
+        });
+        // an older read still in flight loses its receiver here, and its
+        // answer goes nowhere
+        self.contents_rx = Some(rx);
     }
 
     /// The contents rows for the current query: a header per note, its
     /// matching lines under it, and a count of what the cap left out.
+    /// Cached by query, so a redraw that changed nothing scans nothing.
     pub fn contents_rows(&self) -> Vec<crate::contents::Row> {
+        if let Some((q, rows)) = self.contents_cache.borrow().as_ref() {
+            if *q == self.query {
+                return rows.clone();
+            }
+        }
         let (hits, more) = crate::contents::search(
             &self.contents_bodies,
             &self.query,
             crate::contents::MAX_HITS,
         );
-        crate::contents::rows(&hits, more)
+        let rows = crate::contents::rows(&hits, more);
+        *self.contents_cache.borrow_mut() = Some((self.query.clone(), rows.clone()));
+        rows
     }
 
     /// Open the note `entry` names with line `line` in view: under the cursor

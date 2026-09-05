@@ -1158,6 +1158,8 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let prompt = if app.query.is_empty() {
         let hint = if browse {
             "browse folders — tab for contents"
+        } else if contents && app.contents_indexing() {
+            "indexing note contents…"
         } else if contents {
             "type to search note contents"
         } else if quick && app.tag_scanning() {
