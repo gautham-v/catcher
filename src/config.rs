@@ -707,7 +707,7 @@ fn setting_keys(text: &str) -> std::collections::BTreeSet<String> {
 }
 
 /// The one-line hint beside each colour, in the order the file lists them.
-const COLOUR_HINTS: [(&str, &str); 12] = [
+const COLOUR_HINTS: [(&str, &str); 13] = [
     ("accent", "h1, ticked boxes, the status bar"),
     ("bright", "h3, and the step that leads"),
     ("grey", "structure that recedes"),
@@ -719,6 +719,7 @@ const COLOUR_HINTS: [(&str, &str); 12] = [
     ("code_fg", "and the code on it"),
     ("border", "panel borders"),
     ("danger", "the delete prompt, and a broken [[link]]"),
+    ("success", "tip and success callouts"),
     ("ground", "under a highlight"),
 ];
 

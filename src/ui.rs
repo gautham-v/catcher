@@ -237,7 +237,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                 // the rows a table row carries under it: its rule, and at
                 // the bottom edge the add-row handle
                 let mut used = segs.len();
-                let mut extra = |app: &mut App, line: Line<'static>, handle| {
+                let mut extra = |app: &mut App, line: Line<'static>, handle: Option<(u16, u16, crate::app::TableHandle)>| {
                     if used >= *h as usize {
                         return;
                     }
@@ -247,9 +247,9 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                         line: *row,
                         seg: used,
                     });
-                    if let Some((w, handle)) = handle {
+                    if let Some((x, w, handle)) = handle {
                         app.table_handles
-                            .push((Rect::new(area.x, yy, w, 1), handle));
+                            .push((Rect::new(area.x + x, yy, w, 1), handle));
                     }
                     lines.push(line);
                     used += 1;
@@ -279,7 +279,19 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                     }
                     let mut line = rule.to_line(None);
                     line.spans.insert(0, Span::raw(" ".repeat(crate::app::TABLE_GUTTER)));
-                    extra(app, line, None);
+                    // the add-column handle, when the table's middle is this rule
+                    let mut handle = None;
+                    if app.hovered_table_right(&blocks, *row)
+                        && table_middle(app, &blocks, &block) == (*row, true)
+                    {
+                        let used_w = line.width();
+                        if used_w + 3 <= width {
+                            line.spans.push(Span::raw("  "));
+                            line.spans.push(Span::styled("+", theme::state()));
+                            handle = Some((used_w as u16, 3, crate::app::TableHandle::AddColumn));
+                        }
+                    }
+                    extra(app, line, handle);
                 }
                 if app.hovered_table_end(&blocks, *row) {
                     // centred under the columns, gutter and all
@@ -298,7 +310,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                     extra(
                         app,
                         line,
-                        Some((grid.max(1) as u16, crate::app::TableHandle::AddRow)),
+                        Some((0, grid.max(1) as u16, crate::app::TableHandle::AddRow)),
                     );
                 }
             }
@@ -326,9 +338,10 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// The source row drawn nearest the vertical middle of a table, counting
-/// the rules drawn under its rows.
-fn table_middle_row(app: &App, blocks: &[crate::md::Block], block: &crate::md::Block) -> usize {
+/// The display row at the vertical middle of a drawn table: the source row
+/// it belongs to, and whether it is the rule under that row rather than the
+/// row itself.
+fn table_middle(app: &App, blocks: &[crate::md::Block], block: &crate::md::Block) -> (usize, bool) {
     let heights: Vec<usize> = (block.start..=block.end)
         .map(|r| 1 + usize::from(app.table_rule_under(blocks, r)))
         .collect();
@@ -337,11 +350,11 @@ fn table_middle_row(app: &App, blocks: &[crate::md::Block], block: &crate::md::B
     let mut at = 0;
     for (i, h) in heights.iter().enumerate() {
         if mid < at + h {
-            return block.start + i;
+            return (block.start + i, mid > at);
         }
         at += h;
     }
-    block.end
+    (block.end, false)
 }
 
 /// The add-column `+` beside the middle row of a table whose right edge the
@@ -361,8 +374,9 @@ fn table_handle(
     if block.kind != crate::md::BlockKind::Table || !app.hovered_table_right(blocks, row) {
         return;
     }
-    // one handle, on the row at the middle of the drawn table, rules counted
-    if row != table_middle_row(app, blocks, block) {
+    // one handle, on the row at the middle of the drawn table, rules
+    // counted — and when the middle is a rule, the rule carries it
+    if table_middle(app, blocks, block) != (row, false) {
         return;
     }
     let used = line.width();

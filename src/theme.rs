@@ -58,6 +58,8 @@ pub struct Palette {
     /// the two things the eye must not slide past. Recolour it and both
     /// move together.
     pub danger: Color,
+    /// Good news: a tip or success callout.
+    pub success: Color,
     /// The ground a highlight or an inverted heading sits its text on.
     pub ground: Color,
 }
@@ -65,9 +67,9 @@ pub struct Palette {
 /// The colour field names the settings file accepts, in the order the
 /// settings document lists them. The single source of truth: a name that
 /// isn't here can't be set and isn't documented.
-pub const COLOR_KEYS: [&str; 12] = [
+pub const COLOR_KEYS: [&str; 13] = [
     "accent", "bright", "grey", "heading", "dim", "link", "code", "code_bg", "code_fg", "border",
-    "danger", "ground",
+    "danger", "success", "ground",
 ];
 
 impl Palette {
@@ -86,6 +88,7 @@ impl Palette {
             "code_fg" => self.code_fg = color,
             "border" => self.border = color,
             "danger" => self.danger = color,
+            "success" => self.success = color,
             "ground" => self.ground = color,
             _ => return false,
         }
@@ -105,6 +108,7 @@ impl Palette {
             "code_fg" => self.code_fg,
             "border" => self.border,
             "danger" => self.danger,
+            "success" => self.success,
             "ground" => self.ground,
             _ => return None,
         })
@@ -123,6 +127,7 @@ pub const DARK: Palette = Palette {
     code_fg: Color::Rgb(0xe1, 0xe1, 0xe1),
     border: Color::Rgb(0x32, 0x32, 0x37),
     danger: Color::Rgb(0xf7, 0x76, 0x8e),
+    success: Color::Rgb(0x7f, 0xc8, 0x8f),
     ground: Color::Rgb(0x14, 0x14, 0x14),
 };
 
@@ -138,6 +143,7 @@ pub const LIGHT: Palette = Palette {
     code_fg: Color::Rgb(0x26, 0x26, 0x26),
     border: Color::Rgb(0xc8, 0xc8, 0xcd),
     danger: Color::Rgb(0xcd, 0x30, 0x48),
+    success: Color::Rgb(0x2e, 0x7d, 0x4f),
     ground: Color::Rgb(0xee, 0xee, 0xee),
 };
 
@@ -280,6 +286,22 @@ pub fn inline_code() -> Style {
 pub fn code() -> Style {
     Style::new().fg(palette().code_fg).bg(palette().code_bg)
 }
+/// The colour a callout of `kind` is drawn in, following Obsidian's
+/// families: notes blue, tips green, warnings orange, dangers red.
+pub fn callout(kind: &str) -> Style {
+    let p = palette();
+    let color = match kind {
+        "tip" | "hint" | "important" | "success" | "check" | "done" => p.success,
+        "warning" | "caution" | "attention" | "question" | "help" | "faq" => p.accent,
+        "danger" | "error" | "bug" | "failure" | "fail" | "missing" => p.danger,
+        "example" => p.code,
+        "quote" | "cite" => p.grey,
+        "summary" | "abstract" | "tldr" => p.link,
+        _ => p.heading,
+    };
+    Style::new().fg(color)
+}
+
 /// Maths, inline or displayed: italic, as a typeset formula would be.
 pub fn math() -> Style {
     Style::new().add_modifier(Modifier::ITALIC)

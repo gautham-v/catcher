@@ -533,7 +533,7 @@ pub fn style_line(src: &str) -> RLine {
     // and the title, all in the accent
     if base == theme::quote() && i > 0 {
         if let Some((kind, after, title)) = callout_title(&chars, i) {
-            let style = theme::state().add_modifier(Modifier::BOLD);
+            let style = theme::callout(&kind).add_modifier(Modifier::BOLD);
             let mut head = String::new();
             if let Some(g) = callout_glyph(&kind) {
                 head.push(g);

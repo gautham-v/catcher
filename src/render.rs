@@ -422,6 +422,8 @@ struct Ren {
     /// Columns the open box spans, fixed when it opened: the page width is
     /// narrowed while a table is laid out, and the box must not follow it.
     box_w: usize,
+    /// The colour of the open callout box, by its kind.
+    box_style: Style,
     /// A quote has just opened and nothing has been drawn inside it yet, so a
     /// block asking for a blank line above itself does not get a rail-only row.
     quote_fresh: bool,
@@ -483,6 +485,7 @@ impl Ren {
             rails: 0,
             boxed: false,
             box_w: 0,
+            box_style: Style::new(),
             quote_fresh: false,
             quote_blank: false,
             hang: 0,
@@ -649,7 +652,7 @@ impl Ren {
         if !line.wide && (self.rails > 0 || self.boxed) {
             let mut cells = Vec::new();
             if self.boxed {
-                cells.extend(str_cells("│ ", theme::state()));
+                cells.extend(str_cells("│ ", self.box_style));
             }
             for _ in 0..self.rails {
                 cells.extend(str_cells(
@@ -661,7 +664,7 @@ impl Ren {
             if self.boxed {
                 let pad = self.box_w.saturating_sub(cells_width(&cells) + 2);
                 cells.extend(str_cells(&" ".repeat(pad), theme::PLAIN));
-                cells.extend(str_cells(" │", theme::state()));
+                cells.extend(str_cells(" │", self.box_style));
             }
             line.cells = cells;
         }
@@ -696,29 +699,28 @@ impl Ren {
     fn open_box(&mut self, kind: &str, title: &str) {
         let w = self.box_width();
         self.box_w = w;
-        let mut cells = str_cells("╭─ ", theme::state());
+        let style = theme::callout(kind);
+        self.box_style = style;
+        let mut cells = str_cells("╭─ ", style);
         if let Some(g) = crate::md::callout_glyph(kind) {
-            cells.extend(str_cells(&format!("{g} "), theme::state()));
+            cells.extend(str_cells(&format!("{g} "), style));
         }
-        cells.extend(str_cells(kind, theme::state()));
+        cells.extend(str_cells(kind, style));
         if !title.is_empty() {
-            cells.extend(str_cells(" · ", theme::state()));
-            cells.extend(str_cells(
-                title,
-                theme::state().add_modifier(Modifier::BOLD),
-            ));
+            cells.extend(str_cells(" · ", style));
+            cells.extend(str_cells(title, style.add_modifier(Modifier::BOLD)));
         }
         cells.push(PCell {
             ch: ' ',
-            style: theme::state(),
+            style,
             link: None,
             src: None,
         });
         let cells = truncate_cells(&cells, w.saturating_sub(1));
         let mut row = cells;
         let dashes = w.saturating_sub(cells_width(&row) + 1);
-        row.extend(str_cells(&"─".repeat(dashes), theme::state()));
-        row.extend(str_cells("╮", theme::state()));
+        row.extend(str_cells(&"─".repeat(dashes), style));
+        row.extend(str_cells("╮", style));
         self.out.lines.push(PLine {
             cells: row,
             checkbox: None,
@@ -733,7 +735,7 @@ impl Ren {
         let w = self.box_w;
         let row = format!("╰{}╯", "─".repeat(w.saturating_sub(2)));
         self.out.lines.push(PLine {
-            cells: str_cells(&row, theme::state()),
+            cells: str_cells(&row, self.box_style),
             checkbox: None,
             image: None,
             src_line: self.src_line,
