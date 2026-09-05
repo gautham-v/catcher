@@ -265,6 +265,9 @@ pub struct Config {
     /// costs a pass over every note body, so it is a setting and not simply
     /// how the app behaves.
     pub linked_mentions: bool,
+    /// Whether typing `[[` or `#` pops up notes, headings and tags to pick
+    /// from.
+    pub autocomplete: bool,
     /// Whether quick-open walks subfolders or offers only the current folder.
     pub quick_open_recursive: bool,
     /// Whether ^O opens on the folder tree rather than the ranked list. Which
@@ -315,6 +318,7 @@ impl Default for Config {
             wikilinks: true,
             tags: true,
             linked_mentions: true,
+            autocomplete: true,
             quick_open_recursive: true,
             quick_open_browse: false,
             quick_open_dirs: Vec::new(),
@@ -556,6 +560,7 @@ impl Config {
         c.keys = Keymap::from_settings(|key| value(text, key));
         c.preview_click = word(text, "preview_click").unwrap_or(c.preview_click);
         c.linked_mentions = flag(text, "linked_mentions", c.linked_mentions);
+        c.autocomplete = flag(text, "autocomplete", c.autocomplete);
         c.front_matter = word(text, "front_matter").unwrap_or(c.front_matter);
         c.properties = word(text, "properties").unwrap_or(c.properties);
         c
@@ -723,6 +728,11 @@ impl Config {
             "linked_mentions",
             yn(self.linked_mentions),
             "notes that link here, at the foot",
+        );
+        d.row(
+            "autocomplete",
+            yn(self.autocomplete),
+            "suggest notes after [[ and tags after #",
         );
         d.row(
             "quick_open",
@@ -1143,6 +1153,17 @@ mod tests {
             ..Default::default()
         };
         assert!(!Config::from_str(&c.to_document()).linked_mentions);
+    }
+
+    #[test]
+    fn autocomplete_is_on_by_default_and_can_be_turned_off() {
+        assert!(Config::default().autocomplete);
+        assert!(!Config::from_str("- autocomplete: off\n").autocomplete);
+        let c = Config {
+            autocomplete: false,
+            ..Default::default()
+        };
+        assert!(!Config::from_str(&c.to_document()).autocomplete);
     }
 
     #[test]

@@ -82,6 +82,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if app.overlay == Overlay::None {
         draw_peek(f, app);
+        if app.view == View::Edit {
+            draw_complete(f, app);
+        }
     }
 
     match app.overlay {
@@ -368,9 +371,64 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
             let x = area.x + cdisp as u16;
             if x < area.x + area.width {
                 f.set_cursor_position((x, band.y));
+                app.complete_anchor = Some((x, band.y));
             }
         }
     }
+}
+
+/// The completion popup: the rows the typed `[[` or `#` could be, hung
+/// under the cursor's line — or over it, near the bottom — with the row
+/// the arrows are on highlighted.
+fn draw_complete(f: &mut Frame, app: &mut App) {
+    let Some(c) = app.complete.as_ref() else {
+        return;
+    };
+    let Some((ax, ay)) = app.complete_anchor else {
+        return;
+    };
+    let screen = f.area();
+    let inner_w = c
+        .items
+        .iter()
+        .map(|i| i.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(12, 48)
+        .min(screen.width.saturating_sub(2) as usize);
+    let width = inner_w as u16 + 2;
+    let height = (c.items.len().min(crate::complete::MAX_ROWS) as u16 + 2).min(screen.height);
+    let y = if ay + 1 + height <= screen.height {
+        ay + 1
+    } else {
+        ay.saturating_sub(height)
+    };
+    // the popup starts where the query does, so the rows line up with it
+    let start = c.token.start.min(app.editor.cursor.1);
+    let x = ax
+        .saturating_sub((app.editor.cursor.1 - start) as u16)
+        .min(screen.width.saturating_sub(width));
+    let rect = Rect::new(x, y, width, height);
+    let lines: Vec<Line> = c
+        .items
+        .iter()
+        .enumerate()
+        .take(crate::complete::MAX_ROWS)
+        .map(|(i, item)| {
+            let text = format!("{:<inner_w$}", truncate(&item.label, inner_w));
+            if i == c.selected {
+                Line::from(Span::styled(
+                    text,
+                    theme::row().add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(Span::raw(text))
+            }
+        })
+        .collect();
+    let block = panel(app).title_bottom(Line::from(Span::styled(" ⏎ insert · esc ", dim())));
+    let inner = open_panel(f, rect, block);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// The display row at the vertical middle of a drawn table: the source row

@@ -1624,7 +1624,7 @@ pub fn tag_boundary(prev: Option<char>) -> bool {
     }
 }
 
-fn is_tag_char(c: char) -> bool {
+pub fn is_tag_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '-' | '_' | '/')
 }
 

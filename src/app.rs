@@ -145,6 +145,15 @@ pub enum Overlay {
     Help,
 }
 
+/// The completion popup: the token it answers, its rows and the one the
+/// arrows are on.
+#[derive(Clone, Debug)]
+pub struct Completion {
+    pub token: crate::complete::Token,
+    pub items: Vec<crate::complete::Candidate>,
+    pub selected: usize,
+}
+
 #[derive(Clone, PartialEq)]
 pub enum Command {
     /// A palette row for something a key can also do: one path, either way.
@@ -587,6 +596,16 @@ pub struct App {
     /// once when the link under the pointer changed and not touched again
     /// for every pointer twitch after.
     pub peek: Option<Peek>,
+    /// The completion popup, while one is up.
+    pub complete: Option<Completion>,
+    /// The screen cell of the editor's cursor as last drawn: where the
+    /// completion popup hangs from.
+    pub complete_anchor: Option<(u16, u16)>,
+    /// The token esc put away, so it stays away until the cursor leaves it.
+    complete_dismissed: Option<(usize, usize)>,
+    /// Every tag in the vault, read once per index and dropped when the
+    /// index is rebuilt.
+    tag_cache: Option<Vec<String>>,
     /// Which headings are folded, per note, for as long as the app runs.
     folds: crate::fold::Folds,
     /// The open note's lines as they stand on screen, rebuilt whenever the
@@ -840,6 +859,10 @@ impl App {
             disk_checked: Instant::now(),
             last_edit: Instant::now(),
             editor_area: Rect::default(),
+            complete: None,
+            complete_anchor: None,
+            complete_dismissed: None,
+            tag_cache: None,
             edit_rows: Vec::new(),
             palette_rows: Vec::new(),
             preview_links: Vec::new(),
@@ -1590,6 +1613,7 @@ impl App {
     /// notes are files, and anything could have written one since.
     fn refresh_index(&mut self) {
         self.open_index = index::scan(&self.index_roots(), &self.recents);
+        self.tag_cache = None;
         self.start_file_index_scan();
         // a walk started earlier answers with an older vault than the one just
         // read, so whatever it says is no longer wanted
@@ -1703,6 +1727,7 @@ impl App {
                 .collect();
         }
         self.open_index = entries;
+        self.tag_cache = None;
         self.refresh_links();
         if self.overlay == Overlay::QuickOpen && self.tab == QuickTab::Tags {
             self.count_tags();
@@ -3435,6 +3460,9 @@ impl App {
         }
         self.peek = None;
         self.hover = None;
+        if self.complete_key(key) {
+            return;
+        }
         let cmd = key.modifiers.contains(KeyModifiers::SUPER);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -3559,6 +3587,133 @@ impl App {
         }
         self.settle_table_cursor(before);
         self.leave_folds(before.0);
+        self.refresh_complete();
+    }
+
+    /// A key while the completion popup is up: the arrows move on it, ⏎ and
+    /// ⇥ take the row, esc puts it away. Anything else falls through to the
+    /// editor, which re-filters after. `true` when the key was taken.
+    fn complete_key(&mut self, key: KeyEvent) -> bool {
+        let Some(c) = self.complete.as_mut() else {
+            return false;
+        };
+        if self.overlay != Overlay::None || self.view != View::Edit {
+            self.complete = None;
+            return false;
+        }
+        match key.code {
+            KeyCode::Up => c.selected = c.selected.saturating_sub(1),
+            KeyCode::Down => c.selected = (c.selected + 1).min(c.items.len().saturating_sub(1)),
+            KeyCode::Enter | KeyCode::Tab => self.accept_complete(),
+            KeyCode::Esc => {
+                self.complete_dismissed = Some((self.editor.cursor.0, c.token.start));
+                self.complete = None;
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Put the selected row's text into the line in place of the query.
+    fn accept_complete(&mut self) {
+        let Some(c) = self.complete.take() else {
+            return;
+        };
+        let Some(item) = c.items.get(c.selected) else {
+            return;
+        };
+        let (row, col) = self.editor.cursor;
+        let line = self.editor.lines()[row].clone();
+        let (text, cursor) = crate::complete::accept(&line, col, &c.token, &item.insert);
+        self.editor.set_line(row, text);
+        self.editor.set_cursor((row, cursor));
+        self.sync_editor_to_note();
+    }
+
+    /// Work out what the popup should offer for the cursor as it now
+    /// stands: nothing when the cursor is not in a token, in code or in the
+    /// front matter, or when esc put this very token away.
+    fn refresh_complete(&mut self) {
+        let (row, col) = self.editor.cursor;
+        let token = if self.config.autocomplete && self.editor.anchor.is_none() {
+            self.editor
+                .lines()
+                .get(row)
+                .and_then(|l| crate::complete::token_at(l, col))
+        } else {
+            None
+        };
+        let Some(token) = token else {
+            self.complete = None;
+            self.complete_dismissed = None;
+            return;
+        };
+        if self.complete_dismissed == Some((row, token.start)) {
+            self.complete = None;
+            return;
+        }
+        self.complete_dismissed = None;
+        let blocks = self.blocks();
+        if let Some(b) = md::block_at(&blocks, row) {
+            if matches!(
+                b.kind,
+                md::BlockKind::Fence
+                    | md::BlockKind::Mermaid
+                    | md::BlockKind::Math
+                    | md::BlockKind::FrontMatter
+                    | md::BlockKind::Comment
+                    | md::BlockKind::IndentedCode
+            ) {
+                self.complete = None;
+                return;
+            }
+        }
+        let wikilinks = self.config.wikilinks;
+        let items = match &token.kind {
+            crate::complete::Kind::Link if wikilinks => {
+                crate::complete::link_candidates(&token.query, &self.open_index)
+            }
+            crate::complete::Kind::Anchor { note } if wikilinks => {
+                let lines: Vec<String> = if note.is_empty() {
+                    self.editor.lines().to_vec()
+                } else {
+                    index::resolve(&self.open_index, note)
+                        .and_then(|e| std::fs::read_to_string(&e.path).ok())
+                        .map(|c| c.lines().map(String::from).collect())
+                        .unwrap_or_default()
+                };
+                crate::complete::anchor_candidates(&token.query, &lines)
+            }
+            crate::complete::Kind::Tag if self.config.tags => {
+                let tags = self.tag_cache.get_or_insert_with(|| {
+                    index::tag_counts(&self.open_index)
+                        .into_iter()
+                        .map(|(t, _)| t)
+                        .collect()
+                });
+                crate::complete::tag_candidates(&token.query, tags)
+            }
+            _ => Vec::new(),
+        };
+        if items.is_empty() {
+            self.complete = None;
+            return;
+        }
+        // the same token, re-filtered: keep the row if it is still there
+        let selected = self
+            .complete
+            .as_ref()
+            .filter(|c| c.token.kind == token.kind && c.token.start == token.start)
+            .and_then(|c| {
+                let was = &c.items.get(c.selected)?.insert;
+                items.iter().position(|i| &i.insert == was)
+            })
+            .unwrap_or(0);
+        self.complete = Some(Completion {
+            token,
+            items,
+            selected,
+        });
     }
 
     /// The table block the cursor is in while it is drawn as a grid, with the
@@ -4953,6 +5108,9 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
+        if !matches!(ev.kind, MouseEventKind::Moved) {
+            self.complete = None;
+        }
         // over a zoomed picture the wheel steps between pictures and a click
         // closes it; the pointer moving is nothing
         if self.zoom.is_some() {
