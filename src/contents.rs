@@ -15,26 +15,182 @@ pub const MAX_HITS: usize = 200;
 /// A file bigger than this is not a note, whatever its extension says.
 const MAX_BODY_BYTES: u64 = 256 * 1024;
 
-/// The words of a query, lowered once so every line is not lowering them
-/// again. Empty for a blank query, which matches nothing: every line of
-/// every note is not an answer to anything.
+/// One piece of a query, after `parse`.
+#[derive(Clone, Debug)]
+enum Term {
+    /// A bare word, or a `"quoted phrase"`: somewhere on the line, any case.
+    Text(String),
+    /// `/regex/`: matched against the lowered line, so literals go lowercase.
+    Regex(regex::Regex),
+    /// `path:x`: the note's path (relative to its root) contains `x`.
+    Path(String),
+    /// `file:x`: the note's filename contains `x`.
+    File(String),
+    /// `tag:x`: the note carries `x`, or a tag nested under it.
+    Tag(String),
+}
+
+/// A parsed query: what `search` walks the bodies with. Empty for a blank
+/// query, which matches nothing: every line of every note is not an answer
+/// to anything.
+#[derive(Clone, Debug, Default)]
+pub struct Query {
+    /// Each term beside whether it is negated (`-word`: must not be there).
+    terms: Vec<(Term, bool)>,
+}
+
+impl Query {
+    fn is_empty(&self) -> bool {
+        self.terms.is_empty()
+    }
+
+    /// Does the note itself pass the `path:`, `file:` and `tag:` terms?
+    fn note_ok(&self, body: &Body) -> bool {
+        self.terms.iter().all(|(t, neg)| {
+            let hit = match t {
+                Term::Path(p) => body.rel.contains(p.as_str()),
+                Term::File(f) => body.name.contains(f.as_str()),
+                Term::Tag(want) => body.tags.iter().any(|t| crate::index::tag_under(t, want)),
+                _ => return true,
+            };
+            hit != *neg
+        })
+    }
+
+    /// Where on a lowered line the line terms hit: the char offset of the
+    /// earliest, or `None`. Every positive term has to be somewhere on the
+    /// line, in any order — `milk buy` finds "buy milk" — and no negated one
+    /// may be. A query of note terms alone hits every line, at 0.
+    fn hit(&self, lower: &str) -> Option<usize> {
+        let mut first = usize::MAX;
+        for (t, neg) in &self.terms {
+            let at = match t {
+                Term::Text(w) => lower.find(w.as_str()),
+                Term::Regex(re) => re.find(lower).map(|m| m.start()),
+                _ => continue,
+            };
+            match (at, neg) {
+                (Some(_), true) | (None, false) => return None,
+                (Some(at), false) => first = first.min(lower[..at].chars().count()),
+                (None, true) => {}
+            }
+        }
+        Some(if first == usize::MAX { 0 } else { first })
+    }
+}
+
+/// `query` read into its terms. Whitespace separates them, except inside
+/// `"quotes"`, `/slashes/` and `line:( )`; a leading `-` negates the term.
+/// A `/regex/` that does not compile is searched for as text instead.
+pub fn parse(query: &str) -> Query {
+    let mut terms = Vec::new();
+    for raw in tokens(query) {
+        let (neg, raw) = match raw.strip_prefix('-') {
+            Some(rest) if !rest.is_empty() => (true, rest),
+            _ => (false, raw.as_str()),
+        };
+        let lower = raw.to_lowercase();
+        let term = if let Some(p) = lower.strip_prefix("path:") {
+            Term::Path(p.to_string())
+        } else if let Some(f) = lower.strip_prefix("file:") {
+            Term::File(f.to_string())
+        } else if let Some(t) = lower.strip_prefix("tag:") {
+            Term::Tag(crate::md::tag_key(t))
+        } else if let Some(inner) = lower.strip_prefix("line:") {
+            let inner = inner
+                .strip_prefix('(')
+                .and_then(|i| i.strip_suffix(')'))
+                .unwrap_or(inner);
+            for w in inner.split_whitespace() {
+                terms.push((Term::Text(w.to_string()), neg));
+            }
+            continue;
+        } else if let Some(re) = strip_around(&lower, '/', '/') {
+            match regex::Regex::new(re) {
+                Ok(re) => Term::Regex(re),
+                Err(_) => Term::Text(re.to_string()),
+            }
+        } else {
+            Term::Text(strip_around(&lower, '"', '"').unwrap_or(&lower).to_string())
+        };
+        let blank = matches!(&term, Term::Text(t) | Term::Path(t) | Term::File(t) | Term::Tag(t) if t.is_empty());
+        if !blank {
+            terms.push((term, neg));
+        }
+    }
+    Query { terms }
+}
+
+/// `s` without its `open` and `close`, when it is wrapped in both and long
+/// enough for them to be two characters.
+fn strip_around(s: &str, open: char, close: char) -> Option<&str> {
+    if s.chars().count() < 2 {
+        return None;
+    }
+    s.strip_prefix(open)?.strip_suffix(close)
+}
+
+/// The tokens of `query`: whitespace-separated, but a `"..."`, `/.../` or
+/// `(...)` group keeps its spaces. Quotes stay on so `parse` can tell a
+/// phrase from a word, and an unclosed group runs to the end.
+fn tokens(query: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut close: Option<char> = None;
+    for c in query.chars() {
+        match close {
+            Some(cl) => {
+                cur.push(c);
+                if c == cl {
+                    close = None;
+                }
+            }
+            None if c.is_whitespace() => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            None => {
+                let opener = match c {
+                    '"' => Some('"'),
+                    '(' => Some(')'),
+                    // a slash starts a regex only at the start of a token or
+                    // after a prefix, so `a/b` stays one word
+                    '/' if cur.is_empty() || cur.ends_with(':') || cur == "-" => Some('/'),
+                    _ => None,
+                };
+                cur.push(c);
+                close = opener;
+            }
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// The text terms of a query, lowered: what the snippet lights up. Negated
+/// terms, regexes and note filters are not on a line to mark.
 pub fn words(query: &str) -> Vec<String> {
-    query.split_whitespace().map(|w| w.to_lowercase()).collect()
+    parse(query)
+        .terms
+        .into_iter()
+        .filter_map(|(t, neg)| match t {
+            Term::Text(w) if !neg => Some(w),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Where in `line` a `words` query hits: the char offset of the earliest
 /// word, or `None`. Every word has to be somewhere on the line, in any
-/// order — `milk buy` finds "buy milk" — and case never matters.
+/// order, and case never matters.
 pub fn find(words: &[String], line: &str) -> Option<usize> {
-    find_lowered(words, &line.to_lowercase())
-}
-
-/// `find` over a line already lowered, so a body searched on every
-/// keystroke is lowered once when it is read rather than once per query.
-fn find_lowered(words: &[String], lower: &str) -> Option<usize> {
     if words.is_empty() {
         return None;
     }
+    let lower = line.to_lowercase();
     let mut first = usize::MAX;
     for w in words {
         let at = lower.find(w.as_str())?;
@@ -43,15 +199,39 @@ fn find_lowered(words: &[String], lower: &str) -> Option<usize> {
     Some(first)
 }
 
-/// A note's lines as read, each beside its lowered form: what `search`
-/// walks, built once per visit to the tab by `body`.
-pub type Body = Vec<(String, String)>;
+/// A note as `search` walks it: its lines as read, each beside its lowered
+/// form, and what the note filters ask about — built once per visit to the
+/// tab by `body`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Body {
+    pub lines: Vec<(String, String)>,
+    /// The note's tags in [`crate::md::tag_key`] form.
+    pub tags: Vec<String>,
+    /// Path relative to its root, lowered, for `path:`.
+    pub rel: String,
+    /// The filename without `.md`, lowered, for `file:`.
+    pub name: String,
+}
+
+impl Body {
+    /// The same body, filed at `rel` as `name`.
+    pub fn at(mut self, rel: &str, name: &str) -> Body {
+        self.rel = rel.to_lowercase();
+        self.name = name.to_lowercase();
+        self
+    }
+}
 
 /// `text` split into lines and lowered once, ready for `search`.
 pub fn body(text: &str) -> Body {
-    text.lines()
-        .map(|l| (l.to_string(), l.to_lowercase()))
-        .collect()
+    Body {
+        lines: text
+            .lines()
+            .map(|l| (l.to_string(), l.to_lowercase()))
+            .collect(),
+        tags: crate::index::tags_of(text),
+        ..Body::default()
+    }
 }
 
 /// The body to search, or nothing for a file that is too big or not text.
@@ -76,16 +256,19 @@ pub struct Hit {
 /// be read), in index order, cut at `cap`. The second number is how many
 /// more there were — what "…and N more" says.
 pub fn search(bodies: &[Option<Body>], query: &str, cap: usize) -> (Vec<Hit>, usize) {
-    let words = words(query);
+    let query = parse(query);
     let mut hits = Vec::new();
     let mut over = 0;
-    if words.is_empty() {
+    if query.is_empty() {
         return (hits, over);
     }
     for (entry, body) in bodies.iter().enumerate() {
         let Some(body) = body else { continue };
-        for (line, (text, lower)) in body.iter().enumerate() {
-            if find_lowered(&words, lower).is_none() {
+        if !query.note_ok(body) {
+            continue;
+        }
+        for (line, (text, lower)) in body.lines.iter().enumerate() {
+            if query.hit(lower).is_none() {
                 continue;
             }
             if hits.len() >= cap {
@@ -198,6 +381,65 @@ mod tests {
         // the offset is the earliest word, in chars not bytes
         assert_eq!(find(&words("milk"), "ééé milk"), Some(4));
         assert_eq!(find(&words("   "), "anything"), None);
+    }
+
+    fn lines(bodies: &[Option<Body>], q: &str) -> Vec<(usize, usize)> {
+        search(bodies, q, 100)
+            .0
+            .iter()
+            .map(|h| (h.entry, h.line))
+            .collect()
+    }
+
+    #[test]
+    fn a_quoted_phrase_is_matched_whole_and_a_minus_word_must_be_absent() {
+        let b = vec![Some(body("buy milk\nmilk to buy\nbuy bread\n"))];
+        assert_eq!(lines(&b, "\"buy milk\""), vec![(0, 0)]);
+        assert_eq!(lines(&b, "\"BUY Milk\""), vec![(0, 0)]);
+        assert_eq!(lines(&b, "buy -milk"), vec![(0, 2)]);
+        assert_eq!(lines(&b, "-milk"), vec![(0, 2)]);
+        assert_eq!(lines(&b, "-\"to buy\" milk"), vec![(0, 0)]);
+        // a lone dash is a word, not a negation of nothing
+        assert!(lines(&b, "-").is_empty());
+        assert!(lines(&b, "\"\"").is_empty());
+    }
+
+    #[test]
+    fn path_file_and_tag_terms_filter_the_note_not_the_line() {
+        let b = vec![
+            Some(body("plan\n").at("Work/Projects/Plan.md", "Plan")),
+            Some(body("---\ntags: [work/ops]\n---\nplan\n").at("ops/notes.md", "notes")),
+            Some(body("plan #workshop\n").at("misc.md", "misc")),
+        ];
+        assert_eq!(lines(&b, "path:projects plan"), vec![(0, 0)]);
+        assert_eq!(lines(&b, "file:NOTES plan"), vec![(1, 3)]);
+        assert_eq!(lines(&b, "tag:work plan"), vec![(1, 3)]);
+        assert_eq!(lines(&b, "tag:#work/ops plan"), vec![(1, 3)]);
+        assert_eq!(lines(&b, "tag:workshop plan"), vec![(2, 0)]);
+        assert_eq!(lines(&b, "-tag:work plan"), vec![(0, 0), (2, 0)]);
+        // a note filter alone lists every line of the notes it keeps
+        assert_eq!(lines(&b, "path:misc"), vec![(2, 0)]);
+        assert!(lines(&b, "tag:").is_empty());
+    }
+
+    #[test]
+    fn line_groups_and_regexes_match_within_one_line() {
+        let b = vec![Some(body("buy milk\nmilk 12 to buy\nbuy bread\n"))];
+        assert_eq!(lines(&b, "line:(milk buy)"), vec![(0, 0), (0, 1)]);
+        assert_eq!(lines(&b, "line:bread"), vec![(0, 2)]);
+        assert_eq!(lines(&b, "/\\d+/"), vec![(0, 1)]);
+        assert_eq!(lines(&b, "/^buy\\s+(milk|bread)$/"), vec![(0, 0), (0, 2)]);
+        assert_eq!(lines(&b, "-/\\d/ buy"), vec![(0, 0), (0, 2)]);
+        // a regex that does not compile is looked for as text
+        assert!(lines(&b, "/(/").is_empty());
+        // a slash inside a word is just a slash
+        assert!(lines(&b, "a/b").is_empty());
+        assert_eq!(
+            tokens("a \"b c\" line:(d e) /f g/ -h"),
+            vec!["a", "\"b c\"", "line:(d e)", "/f g/", "-h"]
+        );
+        // what lights up: the words and phrases, not the filters
+        assert_eq!(words("path:x -no \"a b\" c"), vec!["a b", "c"]);
     }
 
     #[test]

@@ -214,11 +214,26 @@ impl RLine {
     /// Merge adjacent cells of equal style into ratatui spans.
     /// `selection` is a source-column range rendered reversed.
     pub fn to_line(&self, selection: Option<(usize, usize)>) -> Line<'static> {
+        self.to_line_marked(selection, &[])
+    }
+
+    /// `to_line`, with the source-column ranges in `marks` lit the way a
+    /// search hit is: what the find overlay shows on the page.
+    pub fn to_line_marked(
+        &self,
+        selection: Option<(usize, usize)>,
+        marks: &[(usize, usize)],
+    ) -> Line<'static> {
         let mut spans: Vec<Span<'static>> = Vec::new();
         let mut text = String::new();
         let mut current: Option<Style> = None;
         for cell in &self.cells {
             let mut style = cell.style;
+            if marks.iter().any(|&(a, b)| cell.src >= a && cell.src < b) {
+                style = style
+                    .patch(crate::theme::state())
+                    .add_modifier(Modifier::UNDERLINED);
+            }
             if let Some((a, b)) = selection {
                 if cell.src >= a && cell.src < b {
                     style = style.add_modifier(Modifier::REVERSED);
@@ -315,13 +330,18 @@ impl Seg {
         self.indent + x
     }
 
-    /// This row as a ratatui line, hanging indent and all.
-    pub fn to_line(&self, selection: Option<(usize, usize)>) -> Line<'static> {
+    /// This row as a ratatui line, hanging indent and all: [`RLine::to_line`]
+    /// with `marks` (source-column ranges) lit as search hits.
+    pub fn to_line_marked(
+        &self,
+        selection: Option<(usize, usize)>,
+        marks: &[(usize, usize)],
+    ) -> Line<'static> {
         let inner = RLine {
             cells: self.cells.clone(),
             src_len: self.end_src,
         }
-        .to_line(selection);
+        .to_line_marked(selection, marks);
         if self.indent == 0 {
             return inner;
         }

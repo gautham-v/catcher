@@ -90,6 +90,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         Overlay::ConfirmDelete => draw_confirm(f, app),
         Overlay::RenameFile => draw_rename(f, app),
+        Overlay::Find => draw_find(f, app),
         Overlay::Help => draw_help(f, app),
         Overlay::None => {}
     }
@@ -184,6 +185,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
             None => {
                 let segs = app.wrapped(*row, &blocks, width);
                 let selection = app.editor.selection_on(*row);
+                let marks = app.find_marks_on(*row);
                 let label = app.fold_label(*row);
                 // the column grips above a table the pointer is at the top
                 // of: one row before the table's own, a grip over each column
@@ -239,7 +241,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                             crate::app::TableHandle::SelectRow(*row),
                         ));
                     }
-                    let mut line = seg.to_line(selection);
+                    let mut line = seg.to_line_marked(selection, &marks);
                     if i == 0 {
                         if let Some(label) = &label {
                             fold_note(&mut line, label, width);
@@ -1839,6 +1841,56 @@ fn draw_rename(f: &mut Frame, app: &mut App) {
     f.set_cursor_position((
         inner.x + 14 + crate::md::str_width(&app.rename_input) as u16,
         inner.y,
+    ));
+}
+
+/// The find prompt: a find field and a replace field, tab between them, with
+/// where the current match stands among the rest.
+fn draw_find(f: &mut Frame, app: &mut App) {
+    let rect = overlay_rect(f, 5);
+    let inner = open_panel(f, rect, panel(app));
+    let count = app.find_count();
+    let standing = match (count, app.find_at) {
+        (0, _) if app.find_input.is_empty() => String::new(),
+        (0, _) => "no matches".to_string(),
+        (n, Some(i)) => format!("{}/{n}", i + 1),
+        (n, None) => format!("{n} matches"),
+    };
+    let field = |on: bool| {
+        if on {
+            Style::new().add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        }
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(" find     ", theme::state()),
+            Span::styled(app.find_input.as_str(), field(!app.find_replacing)),
+            Span::styled(format!("  {standing}"), dim()),
+        ]),
+        Line::from(vec![
+            Span::styled(" replace  ", theme::state()),
+            Span::styled(app.replace_input.as_str(), field(app.find_replacing)),
+        ]),
+        Line::from(Span::styled(
+            if app.find_replacing {
+                " enter replaces this match, ⌥enter (or ^enter) replaces all, tab goes back to find."
+            } else {
+                " enter steps forward, ⇧enter back, tab goes to replace, esc closes."
+            },
+            dim(),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+    let (text, row) = if app.find_replacing {
+        (&app.replace_input, 1)
+    } else {
+        (&app.find_input, 0)
+    };
+    f.set_cursor_position((
+        inner.x + 10 + crate::md::str_width(text) as u16,
+        inner.y + row,
     ));
 }
 

@@ -7,6 +7,7 @@ mod contents;
 mod daily;
 mod dates;
 mod editor;
+mod find;
 mod fold;
 mod history;
 mod images;

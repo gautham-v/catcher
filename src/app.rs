@@ -136,6 +136,8 @@ pub enum Overlay {
     QuickOpen,
     ConfirmDelete,
     RenameFile,
+    /// Find and replace within the open note.
+    Find,
     /// Move the open note to another folder under the session root.
     MoveFile,
     /// Every heading of the open note: ⏎ goes there, ⌥⏎ folds it.
@@ -176,7 +178,7 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 33] = [
+const COMMANDS: [Command; 34] = [
     Command::Act(Action::NewNote),
     Command::Act(Action::DailyNote),
     Command::Act(Action::QuickOpen),
@@ -188,6 +190,7 @@ const COMMANDS: [Command; 33] = [
     Command::Act(Action::DeleteNote),
     Command::Act(Action::RenameFile),
     Command::MoveFile,
+    Command::Act(Action::Find),
     Command::Act(Action::TogglePreview),
     Command::Act(Action::Help),
     Command::Act(Action::Settings),
@@ -232,6 +235,7 @@ impl Command {
                 Action::SearchAll => ("Search in all files", "type to search note contents"),
                 Action::DeleteNote => ("Delete note", "delete the file on disk"),
                 Action::RenameFile => ("Rename file", "change the name on disk"),
+                Action::Find => ("Find in note", "step through matches in this note, or replace them"),
                 Action::TogglePreview => ("Reading view", "the page, rendered"),
                 Action::Help => ("Help", "every key, on one card"),
                 Action::Settings => ("Settings", "edit them here, as a note"),
@@ -564,6 +568,14 @@ pub struct App {
     preview_dragging: bool,
     /// Buffer for the inline rename prompt.
     pub rename_input: String,
+    /// The find prompt's two fields, and which of them the typing goes to.
+    pub find_input: String,
+    pub replace_input: String,
+    pub find_replacing: bool,
+    /// Every match of `find_input` in the open note, kept while the prompt
+    /// is up, and which of them is the current one.
+    find_matches: Vec<crate::find::Match>,
+    pub find_at: Option<usize>,
     /// Where you have been, for ^B and ^F.
     pub history: crate::history::History,
     /// What has been typed into the shortcuts card, which filters its rows.
@@ -795,6 +807,11 @@ impl App {
 
         let mut app = App {
             rename_input: String::new(),
+            find_input: String::new(),
+            replace_input: String::new(),
+            find_replacing: false,
+            find_matches: Vec::new(),
+            find_at: None,
             help_query: String::new(),
             images: Images::new(Lookup::new(
                 config.attachments_dir.clone(),
@@ -2641,12 +2658,16 @@ impl App {
                 (p, n.content.as_str())
             })
             .collect();
-        let work: Vec<Result<crate::contents::Body, PathBuf>> = self
+        // each body beside the path and name the `path:` and `file:` terms ask
+        let work: Vec<(Result<crate::contents::Body, PathBuf>, String, String)> = self
             .open_index
             .iter()
-            .map(|e| match open.get(&e.path) {
-                Some(body) => Ok(crate::contents::body(body)),
-                None => Err(e.path.clone()),
+            .map(|e| {
+                let body = match open.get(&e.path) {
+                    Some(body) => Ok(crate::contents::body(body)),
+                    None => Err(e.path.clone()),
+                };
+                (body, e.rel.clone(), e.name())
             })
             .collect();
         self.set_contents_bodies(Vec::new());
@@ -2654,11 +2675,14 @@ impl App {
         std::thread::spawn(move || {
             let bodies = work
                 .into_iter()
-                .map(|w| match w {
-                    Ok(body) => Some(body),
-                    Err(path) => crate::contents::body_of(&path)
-                        .as_deref()
-                        .map(crate::contents::body),
+                .map(|(w, rel, name)| {
+                    let body = match w {
+                        Ok(body) => Some(body),
+                        Err(path) => crate::contents::body_of(&path)
+                            .as_deref()
+                            .map(crate::contents::body),
+                    };
+                    body.map(|b| b.at(&rel, &name))
                 })
                 .collect();
             let _ = tx.send(bodies);
@@ -3171,6 +3195,136 @@ impl App {
         }
     }
 
+    /// Open the find prompt over the editor. The selection, if there is one,
+    /// is the first thing looked for.
+    fn open_find(&mut self) {
+        self.enter_edit_view();
+        if let Some(sel) = self.editor.selected_text() {
+            if !sel.contains('\n') && !sel.is_empty() {
+                self.find_input = sel;
+            }
+        }
+        self.find_replacing = false;
+        self.overlay = Overlay::Find;
+        self.refind(true);
+    }
+
+    /// The matches of `find_input`, recomputed; the current one is the first
+    /// at or after the cursor when `from_cursor`, else the one nearest the
+    /// old index. The current match is selected, which lights it and brings
+    /// it onto the page.
+    fn refind(&mut self, from_cursor: bool) {
+        self.find_matches = crate::find::matches(self.editor.lines(), &self.find_input);
+        let at = if from_cursor || self.find_at.is_none() {
+            let (row, col) = self.editor.anchor.unwrap_or(self.editor.cursor);
+            crate::find::next_from(&self.find_matches, (row, col))
+        } else {
+            self.find_at
+                .map(|i| i.min(self.find_matches.len().saturating_sub(1)))
+                .filter(|_| !self.find_matches.is_empty())
+        };
+        self.find_at = at;
+        self.select_find_match();
+    }
+
+    fn select_find_match(&mut self) {
+        let Some(&(row, s, e)) = self.find_at.and_then(|i| self.find_matches.get(i)) else {
+            self.editor.clear_selection();
+            return;
+        };
+        self.editor.set_cursor((row, s));
+        self.editor.move_cursor((row, e), true);
+    }
+
+    /// Step to the next match, or the previous one, wrapping.
+    fn find_step(&mut self, back: bool) {
+        let n = self.find_matches.len();
+        if n == 0 {
+            return;
+        }
+        let i = self.find_at.unwrap_or(0);
+        self.find_at = Some(if back { (i + n - 1) % n } else { (i + 1) % n });
+        self.select_find_match();
+    }
+
+    /// The char ranges of `row` the find prompt lights up.
+    pub fn find_marks_on(&self, row: usize) -> Vec<(usize, usize)> {
+        if self.overlay != Overlay::Find {
+            return Vec::new();
+        }
+        self.find_matches
+            .iter()
+            .filter(|&&(r, _, _)| r == row)
+            .map(|&(_, s, e)| (s, e))
+            .collect()
+    }
+
+    pub fn find_count(&self) -> usize {
+        self.find_matches.len()
+    }
+
+    /// Swap the current match for the replace field, then move to the next.
+    fn replace_current(&mut self) {
+        let Some(&(row, s, e)) = self.find_at.and_then(|i| self.find_matches.get(i)) else {
+            self.flash("nothing to replace".to_string());
+            return;
+        };
+        let line = crate::find::replace_span(&self.editor.lines()[row], s, e, &self.replace_input);
+        let end = s + self.replace_input.chars().count();
+        self.editor.replace_lines(row, row, vec![line], (row, end));
+        self.sync_editor_to_note();
+        self.refind(true);
+    }
+
+    /// Swap every match at once, as one undo step.
+    fn replace_every(&mut self) {
+        let (lines, n) =
+            crate::find::replace_all(self.editor.lines(), &self.find_input, &self.replace_input);
+        if n == 0 {
+            self.flash("nothing to replace".to_string());
+            return;
+        }
+        let last = lines.len().saturating_sub(1);
+        let cursor = self.editor.cursor;
+        self.editor.replace_lines(0, last, lines, cursor);
+        self.sync_editor_to_note();
+        self.refind(true);
+        self.flash(format!("replaced {n}"));
+    }
+
+    fn close_find(&mut self) {
+        self.overlay = Overlay::None;
+        self.find_matches.clear();
+        self.find_at = None;
+        // leave the cursor on the match, not a selection of it
+        let at = self.editor.cursor;
+        self.editor.clear_selection();
+        self.editor.set_cursor(at);
+    }
+
+    fn on_find_key(&mut self, key: KeyEvent) {
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let all = key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER);
+        match key.code {
+            KeyCode::Esc => self.close_find(),
+            KeyCode::Tab | KeyCode::BackTab => self.find_replacing = !self.find_replacing,
+            KeyCode::Enter if self.find_replacing && all => self.replace_every(),
+            KeyCode::Enter if self.find_replacing => self.replace_current(),
+            KeyCode::Enter => self.find_step(shift),
+            KeyCode::Up => self.find_step(true),
+            KeyCode::Down => self.find_step(false),
+            _ => {
+                if self.find_replacing {
+                    edit_line(&mut self.replace_input, &key);
+                } else if edit_line(&mut self.find_input, &key) {
+                    self.refind(false);
+                }
+            }
+        }
+    }
+
     fn open_rename(&mut self) {
         self.save_now();
         self.rename_input = self
@@ -3351,6 +3505,7 @@ impl App {
                     }
                 }
             }
+            Overlay::Find => self.on_find_key(key),
             Overlay::None => match self.view {
                 View::Preview => self.on_preview_key(key),
                 View::Edit => self.on_edit_key(key),
@@ -3963,6 +4118,7 @@ impl App {
                 self.overlay = Overlay::ConfirmDelete;
             }
             Action::RenameFile => self.open_rename(),
+            Action::Find => self.open_find(),
             Action::FollowLink => self.follow_link_at_cursor(),
             Action::NavBack => self.nav_history(true),
             Action::NavForward => self.nav_history(false),
@@ -5424,6 +5580,7 @@ mod tests {
                 "Delete note",
                 "Rename file",
                 "Move to folder",
+                "Find in note",
                 "Reading view",
                 "Help",
                 "Settings",
