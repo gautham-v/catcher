@@ -49,6 +49,7 @@ pub enum Action {
     UnfoldSection,
     FoldAll,
     UnfoldAll,
+    Outline,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -252,6 +253,13 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_unfold_all",
         None,
         "open every fold in the note",
+    ),
+    // unbound like the editing commands: the palette reaches it
+    (
+        Action::Outline,
+        "key_outline",
+        None,
+        "outline — jump to a heading in this note, or fold it",
     ),
 ];
 

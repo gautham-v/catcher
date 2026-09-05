@@ -17,6 +17,7 @@ mod md;
 mod mentions;
 mod mermaid;
 mod notes;
+mod outline;
 mod render;
 mod search;
 mod table;
