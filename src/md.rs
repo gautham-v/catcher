@@ -9,7 +9,8 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::theme;
 
 /// How many terminal columns a character occupies. Zero-width characters are
@@ -23,9 +24,48 @@ fn first_char(s: &str) -> char {
     s.chars().next().unwrap_or(' ')
 }
 
+/// Whether `g` is a grapheme cluster the editor treats as one unit: a ZWJ
+/// sequence (a family emoji) or a regional-indicator pair (a flag). Other
+/// clusters, combining marks included, stay one column per char so the
+/// cursor can sit on each.
+pub fn is_joined_cluster(g: &str) -> bool {
+    if g.contains('\u{200D}') {
+        return true;
+    }
+    let mut it = g.chars();
+    matches!((it.next(), it.next(), it.next()), (Some(a), Some(b), None) if is_ri(a) && is_ri(b))
+}
+
+fn is_ri(c: char) -> bool {
+    ('\u{1F1E6}'..='\u{1F1FF}').contains(&c)
+}
+
+/// The joined cluster (see `is_joined_cluster`) containing the char at
+/// `col`, as a `(start, end)` char range, or `None` when that char stands
+/// alone.
+pub fn joined_cluster_at(s: &str, col: usize) -> Option<(usize, usize)> {
+    let mut start = 0;
+    for g in s.graphemes(true) {
+        let n = g.chars().count();
+        if col < start + n {
+            return (n > 1 && is_joined_cluster(g)).then_some((start, start + n));
+        }
+        start += n;
+    }
+    None
+}
+
 /// Display width of a string, in terminal columns.
 pub fn str_width(s: &str) -> usize {
-    s.chars().map(char_width).sum()
+    s.graphemes(true)
+        .map(|g| {
+            if is_joined_cluster(g) {
+                g.width().max(1)
+            } else {
+                g.chars().map(char_width).sum()
+            }
+        })
+        .sum()
 }
 
 /// How many leading items, each `widths` columns wide, fit in `width` with a
@@ -4098,6 +4138,17 @@ fn table_row(l: &TableLayout, rows: &[String], row: usize, raw: bool) -> RLine {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn str_width_counts_joined_clusters_once() {
+        assert_eq!(super::str_width("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"), 2);
+        assert_eq!(super::str_width("\u{1F1FA}\u{1F1F8}"), 2);
+        assert_eq!(super::str_width("a\u{1F1FA}\u{1F1F8}b"), 4);
+        // Combining marks keep their own column.
+        assert_eq!(super::str_width("e\u{301}"), 2);
+        assert_eq!(super::joined_cluster_at("a\u{1F1FA}\u{1F1F8}b", 2), Some((1, 3)));
+        assert_eq!(super::joined_cluster_at("a\u{1F1FA}\u{1F1F8}b", 3), None);
+    }
+
     #[test]
     fn heading_text_strips_hashes_block_id_and_closing_hashes() {
         assert_eq!(super::heading_text("## Setup ^abc ##"), Some("Setup"));

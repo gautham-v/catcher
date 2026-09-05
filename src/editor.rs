@@ -467,6 +467,19 @@ impl Editor {
         self.last_kind = None;
     }
 
+    /// Char range of the cluster the char at `col` belongs to, when that
+    /// cluster is a ZWJ sequence or a flag; `col..col + 1` otherwise.
+    fn cluster_at(&self, row: usize, col: usize) -> (usize, usize) {
+        crate::md::joined_cluster_at(&self.lines[row], col).unwrap_or((col, col + 1))
+    }
+
+    /// Remove chars `from..to` of `row`.
+    fn remove_range(&mut self, row: usize, from: usize, to: usize) {
+        let a = self.byte_index((row, from));
+        let b = self.byte_index((row, to));
+        self.lines[row].replace_range(a..b, "");
+    }
+
     pub fn backspace(&mut self) {
         self.record(EditKind::Delete);
         if self.remove_selection() {
@@ -474,9 +487,9 @@ impl Editor {
         }
         let (row, col) = self.cursor;
         if col > 0 {
-            let at = self.byte_index((row, col - 1));
-            self.lines[row].remove(at);
-            self.cursor.1 = col - 1;
+            let (from, to) = self.cluster_at(row, col - 1);
+            self.remove_range(row, from, to);
+            self.cursor.1 = from;
         } else if row > 0 {
             let line = self.lines.remove(row);
             let prev = self.line_len(row - 1);
@@ -492,8 +505,8 @@ impl Editor {
         }
         let (row, col) = self.cursor;
         if col < self.line_len(row) {
-            let at = self.byte_index((row, col));
-            self.lines[row].remove(at);
+            let (from, to) = self.cluster_at(row, col);
+            self.remove_range(row, from, to);
         } else if row + 1 < self.lines.len() {
             let next = self.lines.remove(row + 1);
             self.lines[row].push_str(&next);
@@ -503,7 +516,7 @@ impl Editor {
     fn left(&self) -> Pos {
         let (row, col) = self.cursor;
         if col > 0 {
-            (row, col - 1)
+            (row, self.cluster_at(row, col - 1).0)
         } else if row > 0 {
             (row - 1, self.line_len(row - 1))
         } else {
@@ -514,7 +527,7 @@ impl Editor {
     fn right(&self) -> Pos {
         let (row, col) = self.cursor;
         if col < self.line_len(row) {
-            (row, col + 1)
+            (row, self.cluster_at(row, col).1)
         } else if row + 1 < self.lines.len() {
             (row + 1, 0)
         } else {
@@ -819,6 +832,32 @@ mod tests {
 
     fn ed() -> Editor {
         Editor::new("one\ntwo\nthree")
+    }
+
+    #[test]
+    fn joined_clusters_move_and_delete_as_one() {
+        for cluster in ["\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "\u{1F1FA}\u{1F1F8}"] {
+            let text = format!("a{cluster}b");
+            let mut e = Editor::new(&text);
+            e.set_cursor((0, 1));
+            e.move_cursor(e.right(), false);
+            assert_eq!(e.cursor.1, 1 + cluster.chars().count());
+            e.move_cursor(e.left(), false);
+            assert_eq!(e.cursor, (0, 1));
+            e.move_cursor(e.right(), false);
+            e.backspace();
+            assert_eq!(e.text(), "ab");
+            assert_eq!(e.cursor, (0, 1));
+            let mut e = Editor::new(&text);
+            e.set_cursor((0, 1));
+            e.delete_forward();
+            assert_eq!(e.text(), "ab");
+        }
+        // Combining marks are still one column per char.
+        let mut e = Editor::new("e\u{301}");
+        e.set_cursor((0, 2));
+        e.backspace();
+        assert_eq!(e.text(), "e");
     }
 
     #[test]

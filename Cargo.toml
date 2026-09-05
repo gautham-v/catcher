@@ -18,6 +18,7 @@ ratatui-image = { version = "9", default-features = false, features = ["crosster
 arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 unicode-width = "=0.2.0"
+unicode-segmentation = "1"
 
 [profile.release]
 lto = true
