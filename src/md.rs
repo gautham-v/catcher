@@ -432,6 +432,12 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// The inline pass over `text` with `base` as its style: cells whose
+/// source columns are relative to `text`.
+fn styled_inline(text: &str, base: Style) -> Vec<Cell> {
+    styled_cell(text, base)
+}
+
 /// Only the inline pass — emphasis, code, links — over a run of markdown that
 /// is already known to be prose rather than a fence, a rule or a table row.
 /// The linked-mentions footer styles its excerpts with this, so `**bold**`
@@ -1400,6 +1406,9 @@ pub enum BlockKind {
     Image,
     /// A `$$` … `$$` maths block, fences included — or `$$x$$` on one line.
     Math,
+    /// A blockquote opening with `> [!type]`: drawn as a card, the way the
+    /// reading view draws it, with the title line as the card's top edge.
+    Callout,
     /// The leading `---` … `---` block, fences included. A block rather than a
     /// run of lines so the whole thing reveals together the way a fence does,
     /// and so nothing inside it is ever read as markdown.
@@ -1440,6 +1449,147 @@ fn math_block_end(lines: &[String], i: usize) -> Option<usize> {
         return Some(i);
     }
     (i + 1..lines.len()).find(|j| lines[*j].trim().ends_with("$$"))
+}
+
+/// Does `line` open a callout: `> [!type]`, with any indent?
+fn is_callout_start(line: &str) -> bool {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+        i += 1;
+    }
+    if chars.get(i) != Some(&'>') {
+        return false;
+    }
+    i += 1;
+    while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+        i += 1;
+    }
+    callout_title(&chars, i).is_some()
+}
+
+/// Where a callout line's own text starts: past the indent, the `>` and
+/// one space after it.
+fn quote_body_start(chars: &[char]) -> usize {
+    let mut i = 0;
+    while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+        i += 1;
+    }
+    if chars.get(i) == Some(&'>') {
+        i += 1;
+        if chars.get(i) == Some(&' ') {
+            i += 1;
+        }
+    }
+    i
+}
+
+/// One line of a callout card, as wide as `width`. The title line is the
+/// card's top edge — glyph, type and title in the callout's colour — and
+/// every other line sits between two rails. On the cursor's line
+/// (`raw`) the text is shown as typed, title syntax included, so it can be
+/// edited; the card stays.
+pub fn callout_line(lines: &[String], block: &Block, row: usize, width: usize, raw: bool) -> RLine {
+    let src = lines.get(row).map(String::as_str).unwrap_or("");
+    let chars: Vec<char> = src.chars().collect();
+    let src_len = chars.len();
+    let body = quote_body_start(&chars);
+    let kind = {
+        let first: Vec<char> = lines[block.start].chars().collect();
+        callout_title(&first, quote_body_start(&first))
+            .map(|(k, _, _)| k)
+            .unwrap_or_default()
+    };
+    let style = theme::callout(&kind);
+    let w = if width == usize::MAX { 60 } else { width.max(8) };
+    let mut cells: Vec<Cell> = Vec::new();
+    // the prefix stands for the card's edge
+    let edge = |text: &str, cells: &mut Vec<Cell>, src: usize| {
+        cells.extend(text.chars().map(|ch| Cell { ch, style, src }));
+    };
+    if row == block.start {
+        edge("╭─ ", &mut cells, 0);
+        if raw {
+            for (k, ch) in chars.iter().enumerate().skip(body) {
+                cells.push(Cell {
+                    ch: *ch,
+                    style: theme::PLAIN,
+                    src: k,
+                });
+            }
+            cells.push(Cell {
+                ch: ' ',
+                style,
+                src: src_len,
+            });
+        } else if let Some((kind, after, title)) = callout_title(&chars, body) {
+            let bold = style.add_modifier(Modifier::BOLD);
+            let mut head = String::new();
+            if let Some(g) = callout_glyph(&kind) {
+                head.push(g);
+                head.push(' ');
+            }
+            head.push_str(&kind);
+            edge(&head, &mut cells, body);
+            if title < src_len {
+                edge(" · ", &mut cells, after);
+                let t: String = chars[title..].iter().collect();
+                cells.extend(styled_inline(&t, bold).into_iter().map(|c| Cell {
+                    src: title + c.src,
+                    ..c
+                }));
+            }
+            cells.push(Cell {
+                ch: ' ',
+                style,
+                src: src_len,
+            });
+        }
+        let used = cells_width(&cells);
+        let dashes = w.saturating_sub(used + 1);
+        edge(&"─".repeat(dashes), &mut cells, src_len);
+        edge("╮", &mut cells, src_len);
+        return done(cells, src);
+    }
+    edge("│ ", &mut cells, 0);
+    let text: String = chars[body..].iter().collect();
+    let inner = if raw {
+        RLine::raw(&text).cells
+    } else {
+        style_line(&text).cells
+    };
+    cells.extend(inner.into_iter().map(|c| Cell {
+        src: body + c.src,
+        ..c
+    }));
+    let used = cells_width(&cells);
+    if used + 2 <= w {
+        cells.extend(at(&" ".repeat(w - used - 2), theme::PLAIN, src_len));
+        edge(" │", &mut cells, src_len);
+    }
+    done(cells, src)
+}
+
+/// The bottom edge of a callout card `width` wide.
+pub fn callout_close(kind: &str, width: usize) -> RLine {
+    let w = if width == usize::MAX { 60 } else { width.max(8) };
+    let cells = format!("╰{}╯", "─".repeat(w - 2))
+        .chars()
+        .map(|ch| Cell {
+            ch,
+            style: theme::callout(kind),
+            src: 0,
+        })
+        .collect();
+    RLine { cells, src_len: 0 }
+}
+
+/// The callout kind a block opens with (`note` for anything else).
+pub fn callout_kind(lines: &[String], block: &Block) -> String {
+    let first: Vec<char> = lines[block.start].chars().collect();
+    callout_title(&first, quote_body_start(&first))
+        .map(|(k, _, _)| k)
+        .unwrap_or_else(|| "note".to_string())
 }
 
 /// A footnote label as a superscript: digits in superscript, anything else
@@ -1626,6 +1776,19 @@ pub fn blocks_from(lines: &[String], from: usize) -> Vec<Block> {
             i = j;
             continue;
         }
+        if is_callout_start(&lines[i]) {
+            let mut j = i + 1;
+            while j < lines.len() && lines[j].trim_start().starts_with('>') {
+                j += 1;
+            }
+            out.push(Block {
+                kind: BlockKind::Callout,
+                start: i,
+                end: j - 1,
+            });
+            i = j;
+            continue;
+        }
         if let Some(end) = math_block_end(lines, i) {
             out.push(Block {
                 kind: BlockKind::Math,
@@ -1670,6 +1833,7 @@ pub fn style_block_line(lines: &[String], block: &Block, row: usize, width: usiz
         BlockKind::Image => image_fallback_line(src),
         BlockKind::FrontMatter => front_matter_line(src),
         BlockKind::Math => math_line(src, row == block.start, row == block.end, width),
+        BlockKind::Callout => callout_line(lines, block, row, width, false),
         BlockKind::Table => table_line(&lines[block.start..=block.end], row - block.start, width),
     }
 }
@@ -2411,6 +2575,24 @@ mod tests {
         assert_eq!(text(&style_block_line(&one, &b1[0], 0, 11)), "    a+b");
         // an unclosed opener is not a block
         assert!(super::blocks(&["$$".to_string(), "x".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn a_callout_is_a_card_in_the_editor_too() {
+        let text = |l: &RLine| l.cells.iter().map(|c| c.ch).collect::<String>();
+        let lines: Vec<String> = "> [!tip] Go\n> body **b**\nafter".lines().map(String::from).collect();
+        let bs = blocks(&lines);
+        assert_eq!(bs[0].kind, BlockKind::Callout);
+        assert_eq!((bs[0].start, bs[0].end), (0, 1));
+        assert_eq!(text(&callout_line(&lines, &bs[0], 0, 20, false)), "╭─ ✓ tip · Go ─────╮");
+        assert_eq!(text(&callout_line(&lines, &bs[0], 1, 20, false)), "│ body b           │");
+        // the cursor's line shows the syntax, inside the card
+        assert_eq!(text(&callout_line(&lines, &bs[0], 0, 20, true)), "╭─ [!tip] Go ──────╮");
+        assert_eq!(text(&callout_line(&lines, &bs[0], 1, 20, true)), "│ body **b**       │");
+        assert_eq!(text(&callout_close("tip", 20)), "╰──────────────────╯");
+        // a click on the rail lands at the line's start, on the text after `> `
+        let l = callout_line(&lines, &bs[0], 1, 20, false);
+        assert_eq!(l.one_row().display_to_source(2), 2);
     }
 
     #[test]

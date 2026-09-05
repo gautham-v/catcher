@@ -2822,6 +2822,12 @@ impl App {
             })
     }
 
+    /// Is `row` the last line of a callout, so the card's bottom edge is
+    /// drawn under it?
+    pub fn callout_closes(&self, blocks: &[md::Block], row: usize) -> bool {
+        md::block_at(blocks, row).is_some_and(|b| b.kind == md::BlockKind::Callout && b.end == row)
+    }
+
     /// Does a rule sit under `row` in the editor: a table row with another
     /// row of the same table beneath it, the separator aside (it is drawn as
     /// the rule under the head already).
@@ -4413,6 +4419,11 @@ fn view_line(
     if let Some(block) = md::block_at(blocks, row) {
         // a table stays a grid with the cursor in it — the cursor moves cell
         // to cell — unless its source was asked for
+        // a callout keeps its card with the cursor in it; the cursor's own
+        // line shows its text as typed
+        if block.kind == md::BlockKind::Callout {
+            return md::callout_line(lines, block, row, width, row == cursor_row);
+        }
         if block.kind == md::BlockKind::Table && table_source != Some(block.start) {
             let inner = width.saturating_sub(TABLE_GUTTER);
             let mut line = if block.contains(cursor_row) {

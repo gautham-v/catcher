@@ -254,6 +254,12 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                     lines.push(line);
                     used += 1;
                 };
+                if app.callout_closes(&blocks, *row) {
+                    let block = *crate::md::block_at(&blocks, *row).expect("a callout row");
+                    let kind = crate::md::callout_kind(app.editor.lines(), &block);
+                    let line = crate::md::callout_close(&kind, width).to_line(None);
+                    extra(app, line, None);
+                }
                 if app.table_rule_under(&blocks, *row) {
                     let block = *crate::md::block_at(&blocks, *row).expect("a table row");
                     let inner = width.saturating_sub(crate::app::TABLE_GUTTER);
@@ -436,7 +442,8 @@ fn row_height(
     // whose bottom edge the pointer is at carries the add-row handle
     let extra = usize::from(app.table_rule_under(blocks, row))
         + usize::from(app.hovered_table_end(blocks, row))
-        + usize::from(app.hovered_table_top(blocks, row));
+        + usize::from(app.hovered_table_top(blocks, row))
+        + usize::from(app.callout_closes(blocks, row));
     ((rows.max(1) + extra) as u16, None)
 }
 
