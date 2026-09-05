@@ -76,7 +76,7 @@ pub enum Cli {
     Error(String),
 }
 
-/// Parse argv (without argv[0]). `probe` answers what a bare string is on disk,
+/// Parse argv (without argv\[0\]). `probe` answers what a bare string is on disk,
 /// which is what separates `catcher notes` the directory from `catcher notes`
 /// the note title — injected so the dispatch is testable without a filesystem.
 pub fn parse(args: &[String], probe: impl Fn(&str) -> PathKind) -> Cli {

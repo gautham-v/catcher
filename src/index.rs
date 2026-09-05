@@ -442,7 +442,7 @@ fn push_tags(out: &mut Vec<String>, text: &str) {
 }
 
 /// The tags of the note on disk at `path`. The whole file, unlike
-/// [`title_at`]: a tag can sit on the last line.
+/// `title_at`: a tag can sit on the last line.
 pub fn tags_at(path: &Path) -> Vec<String> {
     fs::read_to_string(path)
         .map(|c| tags_of(&c))
@@ -463,7 +463,7 @@ pub fn with_tag(entries: &[Entry], tag: &str) -> Vec<usize> {
         .collect()
 }
 
-/// Whether `tag` is `want` itself or nested under it, both in [`tag_key`]
+/// Whether `tag` is `want` itself or nested under it, both in `tag_key`
 /// form: `work/projects` is under `work`, `workshop` is not.
 pub fn tag_under(tag: &str, want: &str) -> bool {
     tag == want

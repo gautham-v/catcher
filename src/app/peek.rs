@@ -142,7 +142,7 @@ impl App {
         true
     }
 
-    /// ⌥P: peek at the [[wikilink]] under the editor cursor, which is the
+    /// ⌥P: peek at the \[\[wikilink\]\] under the editor cursor, which is the
     /// only cursor the app has — the reading view is pointer-driven.
     pub(super) fn peek_at_cursor(&mut self) {
         let pos = self.editor.cursor;

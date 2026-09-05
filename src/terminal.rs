@@ -65,7 +65,7 @@ pub fn backend() -> Option<&'static str> {
 }
 
 /// Ask the terminal this process runs in to open a new surface at `place`
-/// running `argv` (argv[0] is the program, absolute path). The new surface
+/// running `argv` (argv\[0\] is the program, absolute path). The new surface
 /// takes focus. Err carries a one-line message for the status bar.
 pub fn open_beside(place: Place, argv: &[String]) -> Result<(), String> {
     let Some(backend) = detect(|k| std::env::var(k).ok()) else {
