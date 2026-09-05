@@ -258,6 +258,47 @@ pub fn retarget(old: &Path, new: &Path, roots: &[PathBuf]) -> Report {
     report
 }
 
+/// The line a link's fragment lands on: for `^id`, the line that carries
+/// ` ^id` at its end; for anything else, the first heading whose text (the
+/// `#`s and any block id dropped, trimmed) is the fragment, case-insensitively.
+/// Fenced code is stepped over — a `# comment` in a shell snippet is not a
+/// heading. `None` when the note has no such place.
+pub fn find_anchor(lines: &[String], fragment: &str) -> Option<usize> {
+    let fragment = fragment.trim();
+    if let Some(id) = fragment.strip_prefix('^') {
+        return lines.iter().position(|l| {
+            crate::md::block_id_at(l).is_some_and(|(_, got)| got.eq_ignore_ascii_case(id))
+        });
+    }
+    let want = fragment.to_lowercase();
+    let mut fenced = false;
+    lines.iter().position(|line| {
+        if crate::md::is_fence(line) {
+            fenced = !fenced;
+            return false;
+        }
+        !fenced && heading_text(line).is_some_and(|t| t.to_lowercase() == want)
+    })
+}
+
+/// The words of an ATX heading line, or `None` for any other line.
+fn heading_text(line: &str) -> Option<&str> {
+    let t = line.trim_start();
+    let hashes = t.chars().take_while(|&c| c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = t[hashes..].strip_prefix(' ')?;
+    let rest = match crate::md::block_id_at(rest) {
+        Some((col, _)) => {
+            let byte = rest.char_indices().nth(col).map_or(rest.len(), |(b, _)| b);
+            &rest[..byte]
+        }
+        None => rest,
+    };
+    Some(rest.trim())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +477,37 @@ mod tests {
         assert_eq!(read(&other), "[[shopping-2]]\n");
         assert_eq!(r.links, 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn lines(src: &str) -> Vec<String> {
+        src.lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn a_heading_fragment_finds_the_first_heading_with_those_words() {
+        let note = lines("# Spec\n\ntext\n\n## Method ^m1\n\n### method\n\n# Results");
+        assert_eq!(find_anchor(&note, "Method"), Some(4));
+        // case is not part of a heading's name, and neither is its block id
+        assert_eq!(find_anchor(&note, "method"), Some(4));
+        assert_eq!(find_anchor(&note, "RESULTS"), Some(8));
+        assert_eq!(find_anchor(&note, " Spec "), Some(0));
+        assert_eq!(find_anchor(&note, "Missing"), None);
+        // a line that merely begins with the words is not the heading
+        assert_eq!(find_anchor(&lines("Method\n# Methods"), "Method"), None);
+    }
+
+    #[test]
+    fn a_heading_in_fenced_code_is_not_a_heading() {
+        let note = lines("```sh\n# Install\n```\n\n# Install");
+        assert_eq!(find_anchor(&note, "Install"), Some(4));
+    }
+
+    #[test]
+    fn a_caret_fragment_finds_the_line_carrying_that_block_id() {
+        let note = lines("# Spec\n\nfirst ^abc\n\nsecond ^abc-2\n\n^solo");
+        assert_eq!(find_anchor(&note, "^abc"), Some(2));
+        assert_eq!(find_anchor(&note, "^ABC-2"), Some(4));
+        assert_eq!(find_anchor(&note, "^solo"), Some(6));
+        assert_eq!(find_anchor(&note, "^abc-"), None);
     }
 }

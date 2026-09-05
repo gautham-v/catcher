@@ -623,26 +623,48 @@ impl Peek {
         if self.rows_width == width {
             return;
         }
+        let first = self.rows_width == 0;
         let rendered = crate::render::render_page_at(&self.body, 0, width, tables);
         // wrapped at draw width the way the reading view is, so a paragraph
         // that overruns the popup folds instead of falling off its right edge;
         // a wide row (a table too broad to fold) stays one row, as it does there
-        self.rows = rendered
-            .lines
-            .iter()
-            .flat_map(|l| {
-                if l.wide {
-                    vec![crate::render::to_line(&l.cells)]
-                } else {
+        let mut goto = None;
+        let anchor_line = self.anchor_line();
+        self.rows.clear();
+        for l in &rendered.lines {
+            // the first row of the heading the link named
+            if goto.is_none() && anchor_line.is_some_and(|a| l.src_line.is_some_and(|s| s >= a)) {
+                goto = Some(self.rows.len());
+            }
+            if l.wide {
+                self.rows.push(crate::render::to_line(&l.cells));
+            } else {
+                self.rows.extend(
                     crate::render::wrap_pline(l, width)
                         .iter()
-                        .map(|cells| crate::render::to_line(cells))
-                        .collect()
-                }
-            })
-            .collect();
+                        .map(|cells| crate::render::to_line(cells)),
+                );
+            }
+        }
         self.rows_width = width;
+        // a `[[note#Heading]]` opens on that heading, once; a width change
+        // later on keeps whatever the reader has scrolled to
+        if let (true, Some(row)) = (first, goto) {
+            self.scroll = row;
+        }
         self.clamp();
+    }
+
+    /// The body line the peeked link's `#fragment` names, if it named one
+    /// and the note has it.
+    fn anchor_line(&self) -> Option<usize> {
+        let target = match md::LinkTarget::parse(&self.target) {
+            md::LinkTarget::Wiki(t) => t,
+            _ => return None,
+        };
+        let fragment = md::split_fragment(&target).1?;
+        let lines: Vec<String> = self.body.lines().map(str::to_string).collect();
+        crate::links::find_anchor(&lines, fragment)
     }
 
     /// The furthest `scroll` may go: the last row lands on the last line.
@@ -1886,9 +1908,13 @@ impl App {
     fn load_peek(&self, url: &str, anchor: Rect) -> Option<Peek> {
         let path = match md::LinkTarget::parse(url) {
             md::LinkTarget::Note(p) => PathBuf::from(p),
+            // `[[#Heading]]` peeks at the note on screen, at that heading
+            md::LinkTarget::Wiki(t) if md::split_fragment(&t).0.is_empty() => {
+                self.active_note().path.clone()
+            }
             md::LinkTarget::Wiki(t) => match index::resolve(&self.open_index, &t) {
                 Some(e) => e.path.clone(),
-                None => match best_title_match(&self.notes, &t) {
+                None => match best_title_match(&self.notes, md::split_fragment(&t).0) {
                     Some(i) => self.notes[i].path.clone(),
                     None => return Some(self.missing_peek(url, &t, anchor)),
                 },
@@ -1982,8 +2008,16 @@ impl App {
     }
 
     fn follow_wikilink(&mut self, target: &str) {
+        let (name, fragment) = md::split_fragment(target);
+        // `[[#Heading]]`: a place in the note already on screen
+        if name.is_empty() {
+            if let Some(f) = fragment {
+                self.goto_fragment(f);
+            }
+            return;
+        }
         if let Some(path) = index::resolve(&self.open_index, target).map(|e| e.path.clone()) {
-            self.open_path(&path);
+            self.open_path_at(&path, fragment);
             return;
         }
         // a note written since the last walk is the ordinary miss, and one
@@ -1991,7 +2025,7 @@ impl App {
         // broken when it is not
         self.refresh_index();
         if let Some(path) = index::resolve(&self.open_index, target).map(|e| e.path.clone()) {
-            self.open_path(&path);
+            self.open_path_at(&path, fragment);
             return;
         }
         // still nothing: the link is a note that has not been written yet,
@@ -1999,12 +2033,49 @@ impl App {
         self.create_from_link(target);
     }
 
+    /// Open `path` and, when the link named a place in it, go there.
+    fn open_path_at(&mut self, path: &Path, fragment: Option<&str>) {
+        self.open_path(path);
+        let Some(fragment) = fragment else {
+            return;
+        };
+        // an open that failed flashed and left the old note up, and a heading
+        // of another note must not be looked for in this one
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        if canon(&self.active_note().path) != canon(path) {
+            return;
+        }
+        self.goto_fragment(fragment);
+    }
+
+    /// Land on the heading or block a link's `#fragment` names, in the note
+    /// on screen: the cursor goes to its line and the reading view scrolls it
+    /// to the top, the way a contents-tab hit does.
+    fn goto_fragment(&mut self, fragment: &str) {
+        match crate::links::find_anchor(self.editor.lines(), fragment) {
+            Some(line) => {
+                self.editor.set_cursor((line, 0));
+                self.reveal_cursor();
+                self.preview_goto = Some(line);
+            }
+            None => {
+                let what = if fragment.starts_with('^') {
+                    "block"
+                } else {
+                    "heading"
+                };
+                self.flash(format!("no {what} \u{201c}{fragment}\u{201d} here"));
+            }
+        }
+    }
+
     /// The folder and filename a link target names, relative to the note the
     /// link was written in. `None` for a target that would write outside the
     /// vault: a link target is note text, and note text must never be able to
     /// name `/etc/passwd` or climb out with `..`.
     fn link_note_path(target: &str) -> Option<(PathBuf, String)> {
-        let t = target.trim().trim_end_matches(".md");
+        // the `#heading` is a place inside the note, not part of its name
+        let t = md::split_fragment(target).0.trim_end_matches(".md");
         if t.is_empty() || t.starts_with('/') || t.starts_with('~') {
             return None;
         }
