@@ -137,6 +137,8 @@ pub enum Overlay {
     RenameFile,
     /// Move the open note to another folder under the session root.
     MoveFile,
+    /// Every heading of the open note: ⏎ goes there, ⌥⏎ folds it.
+    Outline,
     Help,
 }
 
@@ -173,6 +175,7 @@ pub enum Command {
     InsertCallout,
     InsertMath,
     InsertFootnote,
+    Outline,
 }
 
 /// The palette's row and column commands, in the order they are listed.
@@ -195,11 +198,12 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 29] = [
+const COMMANDS: [Command; 30] = [
     Command::NewNote,
     Command::DailyNote,
     Command::QuickOpen,
     Command::SearchAll,
+    Command::Outline,
     Command::DeleteNote,
     Command::RenameFile,
     Command::MoveFile,
@@ -264,6 +268,7 @@ impl Command {
             Command::SplitRight => Action::OpenSplitRight,
             Command::SplitDown => Action::OpenSplitDown,
             Command::NewTab => Action::OpenTab,
+            Command::Outline => Action::Outline,
         })
     }
 
@@ -298,6 +303,7 @@ impl Command {
             Command::InsertCallout => ("Insert callout", "> [!note] with a title and a body"),
             Command::InsertMath => ("Insert math block", "$$ … $$ on lines of their own"),
             Command::InsertFootnote => ("Insert footnote", "[^n] here, its text at the end of the note"),
+            Command::Outline => ("Outline", "every heading in this note; ⏎ goes there, ⌥⏎ folds"),
             Command::TableSource => ("Table: Edit source", "the pipes, until the cursor leaves"),
             Command::Table(op) => {
                 use crate::table::Op;
@@ -403,6 +409,9 @@ pub enum Item {
     /// A row that is only there to be read — "…and N more". Choosing it
     /// does nothing and the overlay stays.
     Notice,
+    /// A heading of the open note, by its line, from the outline picker.
+    /// Choosing it puts the cursor there; with ⌥ it folds the section.
+    Heading(usize),
     Command(Command),
 }
 
@@ -2328,7 +2337,68 @@ impl App {
                 .collect(),
             Overlay::QuickOpen => self.open_items(),
             Overlay::MoveFile => self.move_items(),
+            Overlay::Outline => self.outline_items(),
             _ => Vec::new(),
+        }
+    }
+
+    /// The open note's headings, as the outline picker lists them.
+    pub fn outline_headings(&self) -> Vec<crate::outline::Heading> {
+        crate::outline::headings(self.editor.lines(), &self.blocks())
+    }
+
+    /// Outline rows for the current query: the headings that match, in the
+    /// order they stand in the note.
+    pub fn outline_items(&self) -> Vec<Item> {
+        crate::outline::filter(&self.outline_headings(), &self.query)
+            .into_iter()
+            .map(|h| Item::Heading(h.line))
+            .collect()
+    }
+
+    /// The palette's Outline: every heading of this note, the one the cursor
+    /// is under already selected. In the reading view, where there is no
+    /// cursor to speak of, the first line on screen stands in for it.
+    fn open_outline(&mut self) {
+        let headings = self.outline_headings();
+        if headings.is_empty() {
+            self.flash("no headings in this note".to_string());
+            return;
+        }
+        self.query.clear();
+        let here = match self.view {
+            View::Edit => self.editor.cursor.0,
+            View::Preview => self
+                .preview_rows
+                .iter()
+                .find_map(|r| r.src_line)
+                .unwrap_or(self.editor.cursor.0),
+        };
+        self.selected = crate::outline::containing(&headings, here).unwrap_or(0);
+        self.overlay = Overlay::Outline;
+    }
+
+    /// Put the cursor on heading `line` with the heading near the top of the
+    /// page: a couple of rows down, so the section reads with its title in
+    /// place rather than flush against the edge. The reading view scrolls
+    /// there the same way.
+    fn goto_heading(&mut self, line: usize) {
+        let line = line.min(self.editor.lines().len().saturating_sub(1));
+        self.editor.set_cursor((line, 0));
+        // a heading under a folded parent is one you asked to see
+        self.reveal_cursor();
+        let row = self.visible.line_to_row(line).saturating_sub(2);
+        self.editor.scroll = self.visible.row_to_line(row);
+        self.preview_goto = Some(line);
+    }
+
+    /// ⌥⏎ on an outline row: close the section under that heading, or open
+    /// it again. The picker stays, so a note can be shaped in one visit.
+    fn toggle_outline_fold(&mut self, line: usize) {
+        if self.folded_here(line) {
+            self.unfold_line(line);
+        } else {
+            self.fold_line(line);
         }
     }
 
@@ -2500,6 +2570,7 @@ impl App {
             }
             Item::Path(path) => self.open_path(&path),
             Item::Line(entry, line) => self.open_at_line(entry, line),
+            Item::Heading(line) => self.goto_heading(line),
             // handled above, before the overlay was closed
             Item::Folder(_) | Item::Notice => {}
             // palette-only: the one command without a key
@@ -2684,6 +2755,11 @@ impl App {
             self.on_palette_key(key);
             return;
         }
+        // and ⌥⏎ on an outline row folds it, for the same reason
+        if self.overlay == Overlay::Outline && key.code == KeyCode::Enter {
+            self.on_palette_key(key);
+            return;
+        }
         // whatever the settings say this key does, if anything. The fold keys
         // are the word-motion arrows, and only a heading line takes them:
         // anywhere else the editor gets the key and moves by word, as before
@@ -2712,7 +2788,9 @@ impl App {
                     }
                 }
             }
-            Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile => self.on_palette_key(key),
+            Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile | Overlay::Outline => {
+                self.on_palette_key(key)
+            }
             Overlay::ConfirmDelete => match key.code {
                 KeyCode::Enter => {
                     self.overlay = Overlay::None;
@@ -3238,6 +3316,13 @@ impl App {
                     self.open_quick_open();
                 }
             }
+            Action::Outline => {
+                if self.overlay == Overlay::Outline {
+                    self.overlay = Overlay::None;
+                } else {
+                    self.open_outline();
+                }
+            }
             Action::NewNote => {
                 self.overlay = Overlay::None;
                 self.new_note();
@@ -3440,6 +3525,12 @@ impl App {
                     match beside_place(key.modifiers) {
                         Some(place) if self.overlay == Overlay::QuickOpen => {
                             self.run_item_beside(item, place)
+                        }
+                        // ⌥⏎ on a heading folds it and leaves the picker up
+                        Some(_) if self.overlay == Overlay::Outline => {
+                            if let Item::Heading(line) = item {
+                                self.toggle_outline_fold(line);
+                            }
                         }
                         _ => self.run_item(item),
                     }
@@ -4139,7 +4230,7 @@ impl App {
     /// otherwise the reading view or the editor.
     fn on_wheel(&mut self, delta: isize) {
         match (self.overlay, self.view) {
-            (Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile, _) => {
+            (Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile | Overlay::Outline, _) => {
                 if delta < 0 {
                     self.selected = self.selected.saturating_sub(1);
                 } else {
@@ -4173,7 +4264,7 @@ impl App {
         self.hover = None;
         if matches!(
             self.overlay,
-            Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile
+            Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile | Overlay::Outline
         ) {
             if let Some((_, item)) = self
                 .palette_rows
@@ -4184,6 +4275,12 @@ impl App {
                 match beside_place(modifiers) {
                     Some(place) if self.overlay == Overlay::QuickOpen => {
                         self.run_item_beside(item, place)
+                    }
+                    // ⌥click on a heading folds it, as ⌥⏎ does
+                    Some(_) if self.overlay == Overlay::Outline => {
+                        if let Item::Heading(line) = item {
+                            self.toggle_outline_fold(line);
+                        }
                     }
                     _ => self.run_item(item),
                 }
@@ -5209,6 +5306,20 @@ mod tests {
             assert!(c.action().is_some());
             assert!(!c.label().0.is_empty());
         }
+    }
+
+    #[test]
+    fn the_outline_is_a_palette_command_with_a_rebindable_key() {
+        assert!(COMMANDS.contains(&Command::Outline));
+        assert_eq!(Command::Outline.action(), Some(Action::Outline));
+        assert_eq!(Command::Outline.label().0, "Outline");
+        // unbound out of the box, and settable as key_outline
+        let map = crate::keys::Keymap::default();
+        assert_eq!(map.label(Action::Outline), "");
+        assert!(map
+            .settings_rows()
+            .iter()
+            .any(|(k, v, _)| *k == "key_outline" && v == "none"));
     }
 
     #[test]

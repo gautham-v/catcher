@@ -76,7 +76,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     match app.overlay {
-        Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile => draw_palette(f, app),
+        Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile | Overlay::Outline => {
+            draw_palette(f, app)
+        }
         Overlay::ConfirmDelete => draw_confirm(f, app),
         Overlay::RenameFile => draw_rename(f, app),
         Overlay::Help => draw_help(f, app),
@@ -1106,6 +1108,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let quick = app.overlay == Overlay::QuickOpen;
     let browse = quick && app.tab == QuickTab::Tree;
     let contents = quick && app.tab == QuickTab::Contents;
+    let outline = app.overlay == Overlay::Outline;
     // the box is at most 100 wide and inset 2 from each side of the frame,
     // less the border: what a snippet has to fit in, known before the box is
     let width = overlay_rect_wide(f, 1, 100).width.saturating_sub(2) as usize;
@@ -1113,7 +1116,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     // two border rows, the prompt, the rule under it, and the footer hint ^O
     // carries. Derived from the box's own budget rather than guessed at, so
     // the tree scrolls inside the rows it actually has on an 80x24 terminal.
-    let chrome = if quick { 5 } else { 4 };
+    let chrome = if quick || outline { 5 } else { 4 };
     // more rows on a taller window, since there is nothing else to use the
     // space for while the palette is open
     let room = overlay_budget(f).saturating_sub(chrome).clamp(1, 16) as usize;
@@ -1131,7 +1134,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let rows = vec![Constraint::Length(1); shown as usize + 2 + usize::from(quick)];
+    let rows = vec![Constraint::Length(1); shown as usize + 2 + usize::from(quick || outline)];
     let chunks = Layout::vertical(rows).split(inner);
 
     // ❯ marks where you type, so the prompt reads as an input and not as the
@@ -1150,6 +1153,8 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             "open a note — any folder, most recent first"
         } else if app.overlay == Overlay::MoveFile {
             "move this note to a folder"
+        } else if outline {
+            "jump to a heading in this note"
         } else {
             "run a command"
         };
@@ -1302,6 +1307,12 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             Paragraph::new(Span::styled(format!("  {hint}"), dim())),
             chunks[chunks.len() - 1],
         );
+    } else if outline {
+        let hint = "↵ go to heading  ⌥↵ fold or unfold  esc close";
+        f.render_widget(
+            Paragraph::new(Span::styled(format!("  {hint}"), dim())),
+            chunks[chunks.len() - 1],
+        );
     }
 }
 
@@ -1374,6 +1385,56 @@ fn contents_rows(app: &App, width: usize) -> Vec<PRow> {
         .collect()
 }
 
+/// The outline's rows: each heading indented by its depth in the heading's
+/// own style, with its line number at the right edge in the marker colour.
+/// Drawn as given, like a contents row, because the indent and the number
+/// belong to the text and not to a name-and-description pair.
+fn outline_rows(app: &App, width: usize) -> Vec<PRow> {
+    let headings = app.outline_headings();
+    let folded = app.folded_lines();
+    crate::outline::filter(&headings, &app.query)
+        .into_iter()
+        .map(|h| {
+            let (spans, _) = outline_row(&h, folded.contains(&h.line), width);
+            PRow {
+                item: Item::Heading(h.line),
+                name: String::new(),
+                detail: String::new(),
+                tag: "",
+                line: Some(Line::from(spans)),
+            }
+        })
+        .collect()
+}
+
+/// One outline row as spans, and the text it shows: two leading columns, the
+/// heading indented two per level, a fold marker on a folded one, then the
+/// 1-based line number right-aligned to `width` with a column of air after.
+fn outline_row(
+    h: &crate::outline::Heading,
+    folded: bool,
+    width: usize,
+) -> (Vec<Span<'static>>, String) {
+    let number = format!("{}", h.line + 1);
+    let indent = "  ".repeat(h.level.saturating_sub(1));
+    let marker = if folded { theme::FOLDED } else { "" };
+    // the number and a space after it, and the two columns before the text
+    let markerw = crate::md::str_width(marker);
+    let room = width.saturating_sub(2 + indent.len() + markerw + number.len() + 2);
+    let text = truncate(&h.text, room.max(1));
+    let used = 2 + indent.len() + markerw + crate::md::str_width(&text);
+    let gap = width.saturating_sub(used + number.len() + 1).max(1);
+    let shown = format!("  {indent}{marker}{text}{}{number} ", " ".repeat(gap));
+    let spans = vec![
+        Span::raw(format!("  {indent}")),
+        Span::styled(marker.to_string(), theme::marker()),
+        Span::styled(text, theme::heading(h.level)),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(format!("{number} "), theme::marker()),
+    ];
+    (spans, shown)
+}
+
 /// The rows to draw, from whichever list the overlay is showing. Browse mode
 /// builds its text here rather than in `row_text` because a tree row is not
 /// one item looked up in isolation: its indent, its fold marker and its note
@@ -1382,6 +1443,9 @@ fn contents_rows(app: &App, width: usize) -> Vec<PRow> {
 fn palette_rows(app: &App, width: usize) -> Vec<PRow> {
     if app.overlay == Overlay::QuickOpen && app.tab == QuickTab::Contents {
         return contents_rows(app, width);
+    }
+    if app.overlay == Overlay::Outline {
+        return outline_rows(app, width);
     }
     if app.overlay == Overlay::QuickOpen && app.tab == QuickTab::Tree {
         let now = SystemTime::now();
@@ -1467,7 +1531,9 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
         },
         // a folder row writes its own text in `palette_rows`, where the tree
         // around it is still in hand; it never reaches here
-        Item::Folder(_) | Item::Line(..) | Item::Notice => (String::new(), String::new(), ""),
+        Item::Folder(_) | Item::Line(..) | Item::Notice | Item::Heading(_) => {
+            (String::new(), String::new(), "")
+        }
         Item::MoveTo(dir) => {
             let notes = std::fs::read_dir(dir)
                 .map(|rd| {
@@ -1757,6 +1823,33 @@ mod tests {
                 src: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn an_outline_row_indents_by_level_and_right_aligns_the_line_number() {
+        let h = crate::outline::Heading {
+            line: 41,
+            level: 3,
+            text: "Deep".to_string(),
+        };
+        let (spans, shown) = outline_row(&h, false, 30);
+        assert_eq!(shown, "      Deep                 42 ");
+        assert_eq!(crate::md::str_width(&shown), 30);
+        assert_eq!(spans[2].style, theme::heading(3));
+        assert_eq!(spans[4].style, theme::marker());
+        // a folded heading carries the fold glyph, still flush at the right
+        let (_, shown) = outline_row(&h, true, 30);
+        assert!(shown.starts_with("      ▸ Deep"));
+        assert_eq!(crate::md::str_width(&shown), 30);
+        // a long heading is cut so the number keeps its column
+        let long = crate::outline::Heading {
+            line: 0,
+            level: 1,
+            text: "a heading far longer than the box is wide".to_string(),
+        };
+        let (_, shown) = outline_row(&long, false, 24);
+        assert_eq!(crate::md::str_width(&shown), 24);
+        assert!(shown.ends_with(" 1 "));
     }
 
     #[test]
