@@ -464,6 +464,11 @@ struct Ren {
     /// is recognised and drawn from the source, and the rest have to be
     /// swallowed rather than drawn a second time.
     wiki_until: usize,
+    /// The inline HTML tags open at this point, innermost last. Each pushed
+    /// one style onto `styles`, popped again when its `</tag>` arrives.
+    html: Vec<String>,
+    /// Inside a `<!-- comment` that a later HTML block line has yet to close.
+    in_comment: bool,
 }
 
 impl Ren {
@@ -504,6 +509,8 @@ impl Ren {
             done_item: false,
             image_alt: None,
             wiki_until: 0,
+            html: Vec::new(),
+            in_comment: false,
         }
     }
 
@@ -895,6 +902,123 @@ impl Ren {
         self.push_at(&run, base, link, at(run_start));
     }
 
+    /// Raw HTML from the document — one inline tag, or one line of an HTML
+    /// block. Comments vanish; `<br>` breaks the line; a tag the page knows
+    /// (`kbd`, `sub`, `sup`, `u`, `mark`) styles the text up to its close;
+    /// any other tag is stripped and what it wrapped is kept. `off` is the
+    /// source byte offset of `html`.
+    fn emit_html(&mut self, html: &str, off: usize) {
+        let chars: Vec<char> = html.chars().collect();
+        let byte_at = byte_offsets(&chars, off);
+        let mut i = 0;
+        while i < chars.len() {
+            if self.in_comment {
+                match (i..chars.len()).find(|&k| crate::md::html_comment_close_at(&chars, k)) {
+                    Some(k) => {
+                        self.in_comment = false;
+                        i = k + 3;
+                    }
+                    None => return,
+                }
+                continue;
+            }
+            if chars[i] == '<' {
+                if let Some(end) = crate::md::html_comment_end(&chars, i) {
+                    i = end;
+                    continue;
+                }
+                if chars[i + 1..].starts_with(&['!', '-', '-']) {
+                    // a comment this line does not close: dropped to `-->`
+                    self.in_comment = true;
+                    return;
+                }
+                if let Some(tag) = crate::md::html_tag_at(&chars, i) {
+                    self.html_tag(&tag);
+                    i = tag.end;
+                    continue;
+                }
+            }
+            if chars[i] == '\n' {
+                self.flush();
+                i += 1;
+                continue;
+            }
+            let end = (i..chars.len())
+                .find(|&k| chars[k] == '<' || chars[k] == '\n')
+                .unwrap_or(chars.len());
+            let run: String = chars[i..end].iter().collect();
+            let run = run.trim_end_matches('\r');
+            match self.script() {
+                Some(sup) => self.push_script(run, sup, byte_at[i]),
+                None => self.emit_text(run, Some(byte_at[i])),
+            }
+            i = end;
+        }
+    }
+
+    /// One tag of inline HTML: open, close or `<br>`.
+    fn html_tag(&mut self, tag: &crate::md::HtmlTag) {
+        if tag.name == "br" {
+            if matches!(self.sink, Sink::Table) {
+                self.push(" ", self.style(), self.link);
+            } else {
+                self.flush();
+            }
+            return;
+        }
+        if tag.closing {
+            if let Some(at) = self.html.iter().rposition(|n| *n == tag.name) {
+                while self.html.len() > at {
+                    self.html.pop();
+                    self.styles.pop();
+                }
+            }
+            return;
+        }
+        if tag.opens() {
+            if let Some(style) = crate::md::html_style(&tag.name, self.style()) {
+                self.styles.push(style);
+                self.html.push(tag.name.clone());
+            }
+        }
+    }
+
+    /// Drop every inline HTML tag still open: a `<u>` nobody closed must not
+    /// underline the rest of the page.
+    fn close_html(&mut self) {
+        while self.html.pop().is_some() {
+            self.styles.pop();
+        }
+    }
+
+    /// Inside a `<sup>` (`Some(true)`) or a `<sub>` (`Some(false)`)?
+    fn script(&self) -> Option<bool> {
+        self.html.iter().rev().find_map(|n| match n.as_str() {
+            "sup" => Some(true),
+            "sub" => Some(false),
+            _ => None,
+        })
+    }
+
+    /// Text inside a `<sub>` or `<sup>`: each char in its Unicode sub- or
+    /// superscript form where there is one, the rest as written. One push
+    /// per char, because a raised `2` is three bytes to the source's one and
+    /// a single run would put every later cell at the wrong column.
+    fn push_script(&mut self, text: &str, sup: bool, off: usize) {
+        let style = self.style();
+        let link = self.link;
+        let mut at = off;
+        for c in text.chars() {
+            let shown = if sup {
+                crate::md::sup_char(c)
+            } else {
+                crate::md::sub_char(c)
+            };
+            self.push_at(&shown.unwrap_or(c).to_string(), style, link, Some(at));
+            at += c.len_utf8();
+        }
+    }
+
     /// A ```mermaid fence: the picture when catcher can draw one, and the
     /// source under a label saying what it is when it cannot. Both answers
     /// are honest — a diagram kind we have never heard of degrades to exactly
@@ -993,6 +1117,7 @@ impl Ren {
                 self.styles.push(theme::heading(level as usize));
             }
             Event::End(TagEnd::Heading(_)) => {
+                self.close_html();
                 self.styles.pop();
                 self.flush();
             }
@@ -1006,7 +1131,10 @@ impl Ren {
                     self.push(&format!("{mark} "), theme::state(), None);
                 }
             }
-            Event::End(TagEnd::Paragraph) => self.flush(),
+            Event::End(TagEnd::Paragraph) => {
+                self.close_html();
+                self.flush();
+            }
             Event::Start(Tag::BlockQuote(_)) => {
                 self.blank();
                 self.src_line = Some(src_line);
@@ -1068,6 +1196,7 @@ impl Ren {
                 self.push(&text, theme::marker(), None);
             }
             Event::End(TagEnd::Item) => {
+                self.close_html();
                 if self.done_item {
                     self.styles.pop();
                     self.done_item = false;
@@ -1177,6 +1306,7 @@ impl Ren {
                 }
             }
             Event::End(TagEnd::TableCell) => {
+                self.close_html();
                 if self.table.as_ref().is_some_and(|t| t.in_head) {
                     self.styles.pop();
                 }
@@ -1235,6 +1365,9 @@ impl Ren {
                         *off = range.start;
                     }
                     buf.push_str(&text);
+                } else if let Some(sup) = self.script() {
+                    // inside <sub> or <sup>: the glyphs change, not the style
+                    self.push_script(&text, sup, range.start);
                 } else if self.in_code_block {
                     let mut off = range.start;
                     // split_inclusive, not lines(): the line ending has to be
@@ -1280,6 +1413,22 @@ impl Ren {
                 }
             }
             Event::HardBreak => self.flush(),
+            Event::InlineHtml(html) => self.emit_html(&html, range.start),
+            Event::Start(Tag::HtmlBlock) => {
+                self.blank();
+                self.src_line = Some(src_line);
+            }
+            Event::Html(html) => {
+                if self.cells.is_empty() {
+                    self.src_line = Some(src_line);
+                }
+                self.emit_html(&html, range.start);
+            }
+            Event::End(TagEnd::HtmlBlock) => {
+                self.close_html();
+                self.in_comment = false;
+                self.flush();
+            }
             Event::Rule => {
                 self.blank();
                 self.push(&"─".repeat(self.rule_width()), theme::marker(), None);
@@ -2108,6 +2257,96 @@ mod tests {
         assert_eq!(line.text(), "a wow b");
         let cell = line.cells.iter().find(|c| c.ch == 'w').unwrap();
         assert_eq!(cell.style.bg, theme::highlight().bg);
+    }
+
+    #[test]
+    fn kbd_reads_as_inline_code_and_its_tags_vanish() {
+        let r = render("Press <kbd>Ctrl</kbd>+<kbd>C</kbd> to copy.");
+        assert_eq!(r.lines[0].text(), "Press Ctrl+C to copy.");
+        let line = &r.lines[0];
+        let t = line.cells.iter().find(|c| c.ch == 't').unwrap();
+        assert_eq!(t.style.fg, theme::inline_code().fg);
+        // the key cap's cells still know where they came from
+        assert_eq!(t.src, Some((0, 12)));
+        let plus = line.cells.iter().find(|c| c.ch == '+').unwrap();
+        assert_eq!(plus.style.fg, None);
+        // and a key cap in a table cell
+        let r = render("| a | b |\n|---|---|\n| <kbd>x</kbd> | y |\n");
+        let f = flat(&r);
+        assert!(f.contains('x') && !f.contains('<'), "{f:?}");
+    }
+
+    #[test]
+    fn sub_and_sup_take_their_unicode_forms() {
+        let r = render("H<sub>2</sub>O is x<sup>2</sup> or x<sup>(n+1)</sup>");
+        assert_eq!(r.lines[0].text(), "H₂O is x² or x⁽n⁺¹⁾");
+        let two = r.lines[0].cells.iter().find(|c| c.ch == '₂').unwrap();
+        assert_eq!(two.src, Some((0, 6)));
+        // what follows the subscript sits at its true column, not three bytes off
+        let o = r.lines[0].cells.iter().find(|c| c.ch == 'O').unwrap();
+        assert_eq!(o.src, Some((0, 13)));
+    }
+
+    #[test]
+    fn u_underlines_and_mark_highlights_in_the_page() {
+        let r = render("<u>under</u> and <mark>lit</mark> and **<u>both</u>**");
+        assert_eq!(r.lines[0].text(), "under and lit and both");
+        let cells = &r.lines[0].cells;
+        let u = cells.iter().find(|c| c.ch == 'r').unwrap();
+        assert!(u.style.add_modifier.contains(Modifier::UNDERLINED));
+        let m = cells.iter().find(|c| c.ch == 'l').unwrap();
+        assert_eq!(m.style.bg, theme::highlight().bg);
+        let b = cells.iter().find(|c| c.ch == 'h').unwrap();
+        assert!(b.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(b.style.add_modifier.contains(Modifier::BOLD));
+        // the plain prose between them is untouched
+        let a = cells.iter().find(|c| c.ch == 'a').unwrap();
+        assert_eq!(a.style, Style::default());
+    }
+
+    #[test]
+    fn br_breaks_the_line_the_way_a_hard_break_does() {
+        let r = render("one<br>two<br/>three");
+        assert_eq!(texts(&r), vec!["one", "two", "three"]);
+        // in a table cell it is a space, like a soft break
+        let r = render("| a |\n|---|\n| x<br>y |\n");
+        assert!(flat(&r).contains("x y"), "{:?}", flat(&r));
+    }
+
+    #[test]
+    fn comments_are_dropped_inline_and_as_blocks() {
+        let md = "a <!-- hush --> b\n\n<!-- block\nstill hidden -->\n\nafter <!-- multi\nline --> end\n";
+        let r = render(md);
+        let f = flat(&r);
+        assert!(!f.contains("hush") && !f.contains("hidden") && !f.contains("line"), "{f:?}");
+        assert!(f.contains("a  b"), "{f:?}");
+        assert!(f.contains("after  end"), "{f:?}");
+        assert!(!f.contains("<!--") && !f.contains("-->"), "{f:?}");
+    }
+
+    #[test]
+    fn unknown_tags_are_stripped_and_their_text_kept() {
+        let r = render("<div class=\"x\">\nhello <b>there</b>\n</div>\n\n<span>after</span> <i>x</i>\n");
+        let t = texts(&r);
+        assert!(t.iter().any(|l| l == "hello there"), "{t:?}");
+        assert!(t.iter().any(|l| l == "after x"), "{t:?}");
+        assert!(t.iter().all(|l| !l.contains('<')), "{t:?}");
+        // the block's text maps back to its source line
+        let hello = r.lines.iter().find(|l| l.text() == "hello there").unwrap();
+        assert_eq!(hello.src_line, Some(1));
+        assert_eq!(hello.cells[0].src, Some((1, 0)));
+    }
+
+    #[test]
+    fn an_unclosed_tag_does_not_leak_past_its_paragraph() {
+        let r = render("<u>open\n\nnext\n\n- <mark>item\n- other\n");
+        let next = r.lines.iter().find(|l| l.text() == "next").unwrap();
+        assert!(!next.cells[0].style.add_modifier.contains(Modifier::UNDERLINED));
+        let other = r.lines.iter().find(|l| l.text().contains("other")).unwrap();
+        let o = other.cells.iter().find(|c| c.ch == 'h').unwrap();
+        assert_eq!(o.style.bg, None);
+        let r = render("a < b and c > d");
+        assert_eq!(r.lines[0].text(), "a < b and c > d");
     }
 
     #[test]
