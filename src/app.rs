@@ -2446,6 +2446,29 @@ impl App {
         Some((block, table, r, c))
     }
 
+    /// Is `row` the last line of the table the pointer is over?
+    pub fn hovered_table_end(&self, blocks: &[md::Block], row: usize) -> bool {
+        self.view == View::Edit
+            && md::block_at(blocks, row).is_some_and(|b| {
+                b.kind == md::BlockKind::Table && b.end == row && self.table_hover == Some(b.start)
+            })
+    }
+
+    /// A table that ends the note has nothing under it to move to, so the
+    /// step past its last row makes the line. Returns true when it did.
+    fn step_below_table(&mut self) -> bool {
+        let n = self.editor.lines().len();
+        let blocks = self.blocks();
+        let ends_note = md::block_at(&blocks, n - 1)
+            .is_some_and(|b| b.kind == md::BlockKind::Table);
+        if !ends_note {
+            return false;
+        }
+        self.editor.insert_lines(n, vec![String::new()], (n, 0));
+        self.sync_editor_to_note();
+        true
+    }
+
     /// Is the cursor in a table drawn as a grid?
     fn in_table_grid(&self) -> bool {
         let row = self.editor.cursor.0;
@@ -2487,6 +2510,13 @@ impl App {
             KeyCode::Enter if !modified => {
                 self.table_op(crate::table::Op::RowBelow);
                 true
+            }
+            KeyCode::Down
+                if !modified
+                    && !key.modifiers.contains(KeyModifiers::SHIFT)
+                    && row + 1 == self.editor.lines().len() =>
+            {
+                self.step_below_table()
             }
             KeyCode::Backspace | KeyCode::Delete => {
                 let line = &self.editor.lines()[row];
@@ -3636,6 +3666,16 @@ impl App {
             let at = ratatui::layout::Position { x, y };
             if let Some((_, handle)) = self.table_handles.iter().find(|(r, _)| r.contains(at)) {
                 self.table_handle(*handle);
+                return;
+            }
+            // under everything drawn, with a table ending the note: the
+            // click means "below the table", so make that line
+            let below = self
+                .edit_rows
+                .last()
+                .is_some_and(|r| y >= r.rect.y + r.rect.height)
+                && self.edit_rows.iter().any(|r| r.line + 1 == self.editor.lines().len());
+            if below && self.step_below_table() {
                 return;
             }
             let pos = self.pos_at(x, y);

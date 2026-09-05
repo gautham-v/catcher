@@ -189,6 +189,20 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                     }
                     lines.push(line);
                 }
+                // the row under a hovered table: its add-row handle
+                if (*h as usize) > segs.len() && app.hovered_table_end(&blocks, *row) {
+                    let yy = y + segs.len() as u16;
+                    app.edit_rows.push(EditRow {
+                        rect: Rect::new(area.x, yy, area.width, 1),
+                        line: *row,
+                        seg: segs.len(),
+                    });
+                    let label = "+ row";
+                    lines.push(Line::from(Span::styled(label, theme::state())));
+                    let rect = Rect::new(area.x, yy, label.len() as u16, 1);
+                    app.table_handles
+                        .push((rect, crate::app::TableHandle::AddRow));
+                }
             }
         }
         y += h;
@@ -214,8 +228,8 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// The handles beside a hovered table: `+ column` after the header row and
-/// `+ row` after the last row, each remembered for the click that follows.
+/// The `+ column` handle after a hovered table's header row, remembered for
+/// the click that follows. (`+ row` is drawn on the row under the table.)
 fn table_handle(
     app: &mut App,
     blocks: &[crate::md::Block],
@@ -230,13 +244,10 @@ fn table_handle(
     if block.kind != crate::md::BlockKind::Table || app.table_hover != Some(block.start) {
         return;
     }
-    let (label, handle) = if row == block.start {
-        ("+ column", crate::app::TableHandle::AddColumn)
-    } else if row == block.end {
-        ("+ row", crate::app::TableHandle::AddRow)
-    } else {
+    if row != block.start {
         return;
-    };
+    }
+    let (label, handle) = ("+ column", crate::app::TableHandle::AddColumn);
     let used = line.width();
     let need = label.len() + 2;
     if used + need > area.width as usize {
@@ -290,7 +301,9 @@ fn row_height(
         }
     }
     let rows = app.wrapped(row, blocks, width.max(1) as usize).len();
-    (rows.max(1) as u16, None)
+    // a hovered table gets one more row under it, for its add-row handle
+    let extra = usize::from(app.hovered_table_end(blocks, row));
+    ((rows.max(1) + extra) as u16, None)
 }
 
 /// Everything the reading view's layout depends on, folded into one hash: a
