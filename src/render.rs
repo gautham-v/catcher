@@ -805,6 +805,87 @@ impl Ren {
         Some((alt, url, line_end))
     }
 
+    /// An Obsidian note embed, `![[note]]`, whose `!` is at byte offset `off`
+    /// and which has its line to itself, with the byte offset just past the
+    /// end of the line so the rest of what pulldown emits for it is skipped.
+    fn note_embed_here(&self, off: usize) -> Option<(crate::md::NoteEmbed, usize)> {
+        if !crate::md::links::enabled() || !self.src[off..].starts_with("![[") {
+            return None;
+        }
+        let line_start = self.src[..off].rfind('\n').map_or(0, |n| n + 1);
+        let line_end = self.src[off..]
+            .find('\n')
+            .map_or(self.src.len(), |n| off + n);
+        let line = &self.src[line_start..line_end];
+        if line.trim_start().len() != line_end - off {
+            return None; // the embed is not the first thing on its line
+        }
+        let embed = crate::md::note_embed_line(line)?;
+        Some((embed, line_end))
+    }
+
+    /// An embedded note in running text, `![[note]]` with its `!` at byte
+    /// offset `off`: (byte offset just past it, target, label start, label
+    /// end, whether the label was typed after a pipe). A picture is not one —
+    /// `md::wikilink_at` sees the `!` and says so.
+    fn note_link_here(&self, off: usize) -> Option<(usize, String, usize, usize, bool)> {
+        if !crate::md::links::enabled() || !self.src[off..].starts_with("![[") {
+            return None;
+        }
+        let line_end = self.src[off..]
+            .find('\n')
+            .map_or(self.src.len(), |n| off + n);
+        let chars: Vec<char> = self.src[off..line_end].chars().collect();
+        let w = crate::md::wikilink_at(&chars, 1)?;
+        let byte_at = byte_offsets(&chars, off);
+        Some((
+            byte_at[w.end],
+            w.target,
+            byte_at[w.label_start],
+            byte_at[w.label_end],
+            w.label_start != w.start + 2,
+        ))
+    }
+
+    /// A `![[note]]` on a line of its own, as a card: a rail, the note's
+    /// title (a link to it), its first lines, and how much was left out.
+    fn emit_embed_card(&mut self, embed: &crate::md::NoteEmbed) {
+        self.flush();
+        let card = crate::md::embed_card(embed);
+        let style = crate::md::embed_style();
+        let idx = self.out.urls.len();
+        self.out
+            .urls
+            .push(crate::md::LinkTarget::Wiki(embed.target.clone()).href());
+        let rail = format!("{} ", theme::QUOTE_BAR);
+        self.push(&rail, style, None);
+        match card.found {
+            crate::md::embeds::Found::Missing => self.push(
+                &format!("{} (no such note)", card.head()),
+                theme::grey(),
+                Some(idx),
+            ),
+            _ => self.push(&card.head(), style.add_modifier(Modifier::BOLD), Some(idx)),
+        }
+        self.flush();
+        for line in &card.lines {
+            self.push(&rail, style, None);
+            let cells = crate::md::style_inline(line).into_iter().map(|c| PCell {
+                ch: c.ch,
+                style: c.style,
+                link: None,
+                src: None,
+            });
+            self.buf().extend(cells);
+            self.flush();
+        }
+        if card.more > 0 {
+            self.push(&rail, style, None);
+            self.push(&crate::md::more_lines(card.more), theme::marker(), None);
+            self.flush();
+        }
+    }
+
     /// One picture on a line of its own: the `🖼 alt (url)` label that stands
     /// in for it, tagged with the image it stands for.
     fn emit_image(&mut self, alt: String, url: String) {
@@ -1254,6 +1335,33 @@ impl Ren {
                     // `![[picture.png]]` on a line of its own is a picture,
                     // the same as `![](picture.png)`; pulldown sees only text
                     self.emit_image(alt, url);
+                    self.wiki_until = end;
+                } else if let Some((embed, end)) = self.note_embed_here(range.start) {
+                    // `![[note]]` on a line of its own is the note, as a card
+                    self.emit_embed_card(&embed);
+                    self.wiki_until = end;
+                } else if let Some((end, target, ls, le, aliased)) = self.note_link_here(range.start) {
+                    // `![[note]]` in a sentence is the link it also is, the
+                    // `!` swallowed with the brackets; a bare `Note#Heading`
+                    // reads as `Note › Heading`
+                    let idx = self.out.urls.len();
+                    self.out
+                        .urls
+                        .push(crate::md::LinkTarget::Wiki(target.clone()).href());
+                    let style = crate::md::wiki_style(self.style(), &target);
+                    let label = &self.src[ls..le];
+                    match label.find('#').filter(|_| !aliased) {
+                        Some(h) => {
+                            let (note, heading) = (label[..h].to_string(), label[h + 1..].to_string());
+                            self.push_at(&note, style, Some(idx), Some(ls));
+                            self.push(" › ", style, Some(idx));
+                            self.push_at(&heading, style, Some(idx), Some(ls + h + 1));
+                        }
+                        None => {
+                            let label = label.to_string();
+                            self.push_at(&label, style, Some(idx), Some(ls));
+                        }
+                    }
                     self.wiki_until = end;
                 } else if let Some((end, target, ls, le)) = self.wikilink_here(range.start) {
                     // the label keeps its own source bytes, so `push_at` gives
@@ -2337,10 +2445,66 @@ mod tests {
             .join("|");
         assert!(!all.contains("]]") && !all.contains("![["), "{all}");
         assert!(all.contains("after"));
-        // a note embed and a mid-sentence embed stay text
+        // a note embed is not a picture: it is a card (see the embed tests)
         let r = render("![[plan]]\n");
         assert!(r.lines.iter().all(|l| l.image.is_none()));
-        assert!(r.lines.iter().any(|l| l.text().contains("![[plan]]")));
+        assert!(r.lines.iter().any(|l| l.text().to_lowercase().contains("▌ plan")));
+    }
+
+    #[test]
+    fn a_note_embed_is_a_card_in_the_reading_view() {
+        let _turn = crate::md::embeds::turn();
+        let dir = crate::testutil::tmpdir("render", "embed-card");
+        crate::testutil::write(
+            &dir,
+            "plan.md",
+            "# Plan\n\nFirst **line**.\n\n## Goals\n- ship it\n- test it\n- doc it\n- more\n\n## Later\nNothing.\n",
+        );
+        crate::md::embeds::install_dir(&dir);
+
+        let r = render("before\n\n![[plan#Goals]]\n\nafter\n");
+        let texts: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        let at = texts.iter().position(|t| t == "▌ Plan › Goals").expect("a title row");
+        assert_eq!(
+            &texts[at..at + 5],
+            &["▌ Plan › Goals", "▌ - ship it", "▌ - test it", "▌ - doc it", "▌ 1 more line"]
+        );
+        // the title is a link to the note, in the callout colour
+        let title = &r.lines[at];
+        assert_eq!(title.cells[0].style.fg, theme::callout("note").fg);
+        let linked = title.cells.iter().find(|c| c.link.is_some()).unwrap();
+        assert_eq!(r.url(linked.link.unwrap()), Some("wikilink:plan"));
+        assert!(linked.style.add_modifier.contains(Modifier::BOLD));
+        // the body reads in normal text, inline markup drawn
+        let r = render("![[plan]]\n");
+        let texts: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert_eq!(texts[0], "▌ Plan");
+        assert_eq!(texts[1], "▌ First line.");
+        assert!(r.lines[1].cells[8].style.add_modifier.contains(Modifier::BOLD));
+        assert!(texts.iter().all(|t| !t.contains("]]")), "{texts:?}");
+        assert_eq!(texts.last().unwrap(), "▌ 5 more lines");
+
+        // no such note
+        let r = render("![[gone]]\n");
+        assert_eq!(r.lines[0].text(), "▌ gone (no such note)");
+        assert_eq!(r.lines[0].cells[2].style.fg, theme::grey().fg);
+        assert_eq!(r.lines.len(), 1);
+        crate::md::embeds::forget();
+    }
+
+    #[test]
+    fn an_embedded_note_in_a_sentence_is_a_link_in_the_reading_view() {
+        let r = render("see ![[plan#Goals]] and ![[plan|the plan]] now\n");
+        assert_eq!(flat(&r).trim(), "see plan › Goals and the plan now");
+        assert_eq!(r.urls, vec!["wikilink:plan", "wikilink:plan"]);
+        // the label's cells keep their source columns: the "p" of plan
+        let cell = r.lines[0].cells.iter().find(|c| c.link.is_some()).unwrap();
+        assert_eq!(cell.ch, 'p');
+        assert_eq!(cell.src, Some((0, "see ![[".len())));
+        // a picture in a sentence is still text
+        let r = render("see ![[y.png]] now\n");
+        assert!(flat(&r).contains("![[y.png]]"));
+        assert!(r.urls.is_empty());
     }
 
     #[test]
