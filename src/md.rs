@@ -2686,6 +2686,18 @@ pub fn footnote_refs(line: &str) -> Vec<FootnoteRef> {
                 continue;
             }
         }
+        // an escaped `\[^1]` or `\^[note]` is text, not a footnote
+        if c == '\\' {
+            i += 2;
+            continue;
+        }
+        // a `%% comment %%` is not on the page, so nothing in it is numbered
+        if c == '%' && src.get(i + 1) == Some(&'%') {
+            if let Some(end) = find_pair(&src, i + 2, '%') {
+                i = end + 2;
+                continue;
+            }
+        }
         if c == '[' && src.get(i + 1) == Some(&'^') {
             if let Some(close) = find(&src, i + 2, ']') {
                 let label = &src[i + 2..close];
@@ -2726,12 +2738,21 @@ pub fn footnote_refs(line: &str) -> Vec<FootnoteRef> {
 pub fn footnote_ordinal(lines: &[String], row: usize) -> usize {
     let mut n = 1;
     let mut fenced = false;
-    for line in lines.iter().take(row) {
+    let mut commented = false;
+    for (i, line) in lines.iter().enumerate().take(row) {
         if is_fence(line) {
             fenced = !fenced;
             continue;
         }
-        if !fenced {
+        // a `%%` block comment, like the reading view leaves it out —
+        // an unclosed one is text, so only a `%%` with a partner opens one
+        if !fenced && line.trim() == "%%" {
+            if commented || lines[i + 1..].iter().any(|l| l.trim() == "%%") {
+                commented = !commented;
+                continue;
+            }
+        }
+        if !fenced && !commented {
             n += footnote_refs(line).len();
         }
     }
@@ -4451,6 +4472,20 @@ mod tests {
         assert_eq!(text(&style_line_from("^[x]", 12)), "¹²x");
         // not a footnote: nothing inside, or never closed
         assert_eq!(text(&style_line("^[] and ^[open")), "^[] and ^[open");
+    }
+
+    #[test]
+    fn escaped_and_commented_footnotes_do_not_take_a_number() {
+        assert!(footnote_refs("\\^[lit] and \\[^1]").is_empty());
+        assert!(footnote_refs("%% ^[hidden] %% text").is_empty());
+        assert_eq!(footnote_refs("%% ^[a] %% ^[b]").len(), 1);
+        let lines: Vec<String> = ["%%", "^[hidden]", "%%", "A^[one]"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(footnote_ordinal(&lines, 3), 1);
+        let lines: Vec<String> = ["%%", "^[shown]", "A^[two]"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(footnote_ordinal(&lines, 2), 2);
     }
 
     #[test]

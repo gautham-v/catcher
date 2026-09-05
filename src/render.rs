@@ -598,13 +598,21 @@ pub fn apply_folds(
             Some(l) if visible.is_hidden(l) => continue,
             Some(l) if folded.contains(&l) && !line.cells.is_empty() => {
                 // the marker only on the heading's first row: a heading that
-                // wrapped carries its line number on every row it took
+                // wrapped carries its line number on every row it took, and
+                // a folded card's bottom edge carries the title's too
                 let first = out.last().is_none_or(|p| p.src_line != Some(l));
+                let edge = line.cells.iter().any(|c| c.ch == '╰');
                 if first && line.cells.iter().any(|c| c.ch == '╭') {
                     mark_folded_card(&mut line, l, visible.hidden_under(l));
-                } else if first {
+                } else if first && !edge {
                     mark_folded(&mut line, l, visible.hidden_under(l), width);
                 }
+            }
+            // a card's `│   │` spacer row under a folded title went with the body
+            None if !line.cells.is_empty()
+                && out.last().is_some_and(|p| p.src_line.is_some_and(|l| folded.contains(&l))) =>
+            {
+                continue
             }
             // a spacer next to one the section took with it
             None if line.cells.is_empty() && out.last().is_some_and(|p| p.cells.is_empty()) => {
@@ -991,6 +999,29 @@ impl Ren {
         }
     }
 
+    /// A callout title with its footnote references drawn as superscripts:
+    /// the title is copied as text, so a rewritten `[^~1]` would show.
+    fn title_marks(&self, title: &str) -> String {
+        let mut out = String::with_capacity(title.len());
+        let mut rest = title;
+        while let Some(i) = rest.find("[^") {
+            let Some(len) = rest[i + 2..].find(']') else {
+                break;
+            };
+            let label = &rest[i + 2..i + 2 + len];
+            if label.is_empty() || label.contains(' ') {
+                out.push_str(&rest[..i + 2]);
+                rest = &rest[i + 2..];
+                continue;
+            }
+            out.push_str(&rest[..i]);
+            out.push_str(&self.footnote_mark(label));
+            rest = &rest[i + 3 + len..];
+        }
+        out.push_str(rest);
+        out
+    }
+
     /// The superscript a footnote label is drawn as: an inline footnote's
     /// number, any other label as itself.
     fn footnote_mark(&self, label: &str) -> String {
@@ -1223,7 +1254,8 @@ impl Ren {
         cells.extend(str_cells(kind, style));
         if !title.is_empty() {
             cells.extend(str_cells(" · ", style));
-            cells.extend(str_cells(title, style.add_modifier(Modifier::BOLD)));
+            let title = self.title_marks(title);
+            cells.extend(str_cells(&title, style.add_modifier(Modifier::BOLD)));
         }
         cells.push(PCell {
             ch: ' ',
@@ -2955,6 +2987,22 @@ mod tests {
     }
 
     #[test]
+    fn escaped_and_commented_footnotes_are_not_numbered() {
+        let r = render("\\^[lit] B^[two]\n");
+        assert_eq!(r.lines[0].text(), "^[lit] B¹");
+        let r = render("%% ^[hidden] %%\nA^[one]\n");
+        assert_eq!(r.lines[0].text(), "A¹");
+    }
+
+    #[test]
+    fn a_footnote_in_a_callout_title_is_a_superscript() {
+        let r = render_wide("> [!note] T^[c1]\n> body\n", 40);
+        let top = r.lines[0].text();
+        assert!(top.contains("T¹"), "{top:?}");
+        assert!(!top.contains("[^"), "{top:?}");
+    }
+
+    #[test]
     fn inline_footnotes_count_with_word_labels_and_skip_fences() {
         // a word label stays a word; the inline note after it is number two,
         // and a note shorter than its label still renders
@@ -3095,6 +3143,27 @@ mod tests {
         let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
         let top = rows.iter().find(|t| t.starts_with('╭')).unwrap();
         assert_eq!(top, "╭─ ▸ ✓ tip · Go ──── 1 line ─╮");
+    }
+
+    #[test]
+    fn a_folded_callout_with_a_paragraph_break_closes_right_under_its_title() {
+        // the blank `>` line becomes a `│   │` spacer row with no source
+        // line: the fold must take it too, and the bottom edge must not be
+        // marked as a folded heading (`▸ ╰──╯`, two columns too wide)
+        let md = "> [!note]- O\n> a\n>\n> b\n\nafter\n";
+        let r = folded(md, &[0], 40);
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        let top = rows.iter().position(|t| t.starts_with('╭')).expect("top");
+        assert!(rows[top + 1].starts_with('╰'), "{rows:?}");
+        for t in &rows {
+            assert!(crate::md::str_width(t) <= 40, "{t:?}");
+        }
+        // the same for an outer card whose fold takes a nested card with it
+        let md = "> [!note] O\n> a\n>\n> > [!tip] I\n> > b\n>\n> d\n";
+        let r = folded(md, &[0], 40);
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(rows[1].starts_with('╰'), "{rows:?}");
+        assert_eq!(rows.len(), 2, "{rows:?}");
     }
 
     #[test]
