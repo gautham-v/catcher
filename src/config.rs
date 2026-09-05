@@ -238,6 +238,8 @@ pub struct Config {
     pub bold_headings: bool,
     pub status_bar: bool,
     pub key_hints: bool,
+    /// Whether the note decodes out of noise when catcher starts.
+    pub opener: bool,
     /// Whether the terminal window's title follows the open note.
     pub window_title: bool,
     /// What the status bar shows, in the order given.
@@ -308,6 +310,7 @@ impl Default for Config {
             bold_headings: true,
             status_bar: true,
             key_hints: true,
+            opener: true,
             window_title: true,
             status_bar_items: vec![StatusItem::Path, StatusItem::Message, StatusItem::Keys],
             autosave_ms: 500,
@@ -523,6 +526,7 @@ impl Config {
         c.bold_headings = flag(text, "bold_headings", c.bold_headings);
         c.status_bar = flag(text, "status_bar", c.status_bar);
         c.key_hints = flag(text, "key_hints", c.key_hints);
+        c.opener = flag(text, "opener", c.opener);
         c.window_title = flag(text, "window_title", c.window_title);
         let items: Vec<StatusItem> = values(text, "status_bar_items")
             .iter()
@@ -675,6 +679,11 @@ impl Config {
         d.row("bold_headings", yn(self.bold_headings), "yes · no");
         d.row("status_bar", yn(self.status_bar), "the bottom line at all");
         d.row("key_hints", yn(self.key_hints), "the shortcuts in it");
+        d.row(
+            "opener",
+            yn(self.opener),
+            "the note decodes out of noise on start; Toggle opener flips it",
+        );
         d.row(
             "window_title",
             yn(self.window_title),

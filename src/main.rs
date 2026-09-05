@@ -20,6 +20,7 @@ mod md;
 mod mentions;
 mod mermaid;
 mod notes;
+mod opener;
 mod outline;
 mod render;
 mod search;
@@ -309,6 +310,7 @@ fn tui(launch: cli::Launch) -> Result<()> {
     dates::init();
     // a name that matches nothing fails here, before the terminal is touched
     let mut app = app::App::launch(launch)?;
+    app.start_opener();
     push_title();
     let mut terminal = ratatui::init();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
@@ -363,7 +365,10 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Resu
             drawn?;
         }
         let mut handled = false;
-        if event::poll(Duration::from_millis(100))? {
+        // while the opener runs the screen is a film, so frames come every
+        // 16 ms; idle, ten a second is plenty
+        let wait = if app.opener_running() { 16 } else { 100 };
+        if event::poll(Duration::from_millis(wait))? {
             handle(app, event::read()?);
             handled = true;
             // a wheel flick or a window drag arrives as a burst; the whole

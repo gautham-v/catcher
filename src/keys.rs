@@ -52,6 +52,7 @@ pub enum Action {
     Outline,
     ToggleProperties,
     HideProperties,
+    ToggleOpener,
     Tags,
     Find,
 }
@@ -282,6 +283,12 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_hide_properties",
         None,
         "properties — off the page entirely",
+    ),
+    (
+        Action::ToggleOpener,
+        "key_opener",
+        None,
+        "opener — the start-up animation, on or off",
     ),
     (
         Action::Find,

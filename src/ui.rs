@@ -75,6 +75,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         View::Edit => draw_editor(f, app, page),
         View::Preview => draw_preview(f, app, page),
     }
+    if let Some((at, seed)) = app.opener {
+        crate::opener::apply(f.buffer_mut(), page, seed, at.elapsed());
+    }
 
     if app.config.status_bar {
         draw_status(f, app, status);

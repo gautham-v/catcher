@@ -151,7 +151,7 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 38] = [
+const COMMANDS: [Command; 39] = [
     Command::Act(Action::NewNote),
     Command::Act(Action::DailyNote),
     Command::Act(Action::QuickOpen),
@@ -160,6 +160,7 @@ const COMMANDS: [Command; 38] = [
     Command::Act(Action::Tags),
     Command::Act(Action::ToggleProperties),
     Command::Act(Action::HideProperties),
+    Command::Act(Action::ToggleOpener),
     Command::Act(Action::DeleteNote),
     Command::Act(Action::RenameFile),
     Command::MoveFile,
@@ -235,6 +236,7 @@ impl Command {
                 Action::Tags => ("Tags", "every tag in the vault with its note count; ⏎ lists the notes"),
                 Action::ToggleProperties => ("Toggle properties (hide / show)", "the front matter: box, line or hidden on the page; dim or hidden in the editor"),
                 Action::HideProperties => ("Hide properties", "the front matter off the page entirely; Toggle properties brings it back"),
+                Action::ToggleOpener => ("Toggle opener", "the decode animation when catcher starts: on or off"),
                 // the rest have no palette row; COMMANDS never names them
                 _ => ("", ""),
             },
@@ -454,6 +456,9 @@ pub struct App {
     /// [`App::follow_system_theme`].
     theme_rx: Option<std::sync::mpsc::Receiver<Option<crate::theme::Mode>>>,
     pub status: Option<(String, Instant)>,
+    /// The start-up decode animation, while it runs: when it began and the
+    /// seed its scatter is drawn from. See `opener`.
+    pub opener: Option<(Instant, u64)>,
     pub quit: bool,
     dirty: bool,
     last_edit: Instant,
@@ -717,6 +722,7 @@ impl App {
             theme_checked: Instant::now(),
             theme_rx: None,
             status: None,
+            opener: None,
             quit: false,
             last_title: None,
             dirty: false,
@@ -1275,6 +1281,12 @@ impl App {
     /// unsure says yes.
     pub fn tick(&mut self) -> bool {
         let mut changed = self.watch_disk();
+        if let Some((at, _)) = self.opener {
+            if at.elapsed() >= crate::opener::total() {
+                self.opener = None;
+            }
+            changed = true;
+        }
         changed |= self.maybe_autosave();
         changed |= self.follow_system_theme();
         changed |= self.poll_index_scan();
@@ -1439,6 +1451,22 @@ impl App {
             }
         };
         self.save_setting(key, value);
+    }
+
+    /// Begin the start-up animation, if the settings want one. Called once,
+    /// from `main`, on a cold start; opening another note never replays it.
+    pub fn start_opener(&mut self) {
+        if self.config.opener {
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(1);
+            self.opener = Some((Instant::now(), seed));
+        }
+    }
+
+    pub fn opener_running(&self) -> bool {
+        self.opener.is_some()
     }
 
     /// Write one flipped setting to the settings note and say so.
@@ -3137,6 +3165,8 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        // a key cuts the opener short and is then what it always was
+        self.opener = None;
         // a zoomed picture takes every key: the arrows step between the
         // note's pictures, anything else puts it away
         if self.zoom.is_some() {
@@ -3352,9 +3382,10 @@ impl App {
     /// link points at this note, else the file on disk — so the block link
     /// being inserted has something to land on. False when it could not.
     fn stamp_block(&mut self, note: &str, row: usize, insert: &str) -> bool {
-        let here = self.notes.get(self.active).map(|n| {
-            std::fs::canonicalize(&n.path).unwrap_or_else(|_| n.path.clone())
-        });
+        let here = self
+            .notes
+            .get(self.active)
+            .map(|n| std::fs::canonicalize(&n.path).unwrap_or_else(|_| n.path.clone()));
         let target = if note.is_empty() {
             None
         } else {
@@ -3368,7 +3399,8 @@ impl App {
             let Some(line) = self.editor.lines().get(row).cloned() else {
                 return false;
             };
-            self.editor.set_line(row, crate::complete::stamp_line(&line, insert));
+            self.editor
+                .set_line(row, crate::complete::stamp_line(&line, insert));
             return true;
         }
         let Some(path) = target else {
@@ -3625,6 +3657,12 @@ impl App {
             Action::HideProperties => {
                 self.overlay = Overlay::None;
                 self.hide_properties();
+            }
+            Action::ToggleOpener => {
+                self.overlay = Overlay::None;
+                self.config.opener = !self.config.opener;
+                let word = if self.config.opener { "yes" } else { "no" };
+                self.save_setting("opener", word);
             }
             Action::NewNote => {
                 self.overlay = Overlay::None;
@@ -4520,6 +4558,7 @@ impl App {
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         if !matches!(ev.kind, MouseEventKind::Moved) {
             self.complete = None;
+            self.opener = None;
         }
         // over a zoomed picture the wheel steps between pictures and a click
         // closes it; the pointer moving is nothing
@@ -5024,6 +5063,7 @@ mod tests {
                 "Tags",
                 "Toggle properties (hide / show)",
                 "Hide properties",
+                "Toggle opener",
                 "Delete note",
                 "Rename file",
                 "Move to folder",

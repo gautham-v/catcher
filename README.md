@@ -38,6 +38,7 @@ or `cargo install catcher`. Then run `catcher`.
 - Also rendered, both views: `%% comments %%` (dimmed in the editor, gone from the page), inline footnotes `^[text]` numbered with `[^n]` references, and the HTML notes actually use — `<kbd>`, `<sub>`, `<sup>`, `<u>`, `<mark>`, `<br>`, `<!-- comments -->`. The editor shows backslash escapes literally, a dim `↵` for a hard line break, setext headings and indented code.
 - **Outline** in the palette (rebindable as `key_outline`) lists the note's headings: type to filter, **⏎** jumps, **⌥⏎** folds the section.
 - Sections fold. On a heading, **⌥←** folds everything under it down to the next heading of the same or a higher level, **⌥→** opens it again; a folded heading shows `▸` and how many lines it hides. Folds are per note and last for the session, and the reading view keeps them: a click on a heading there folds or unfolds it, and **⌥←** / **⌥→** take the heading the selection is on, or the first one on screen.
+- On start the note decodes out of noise for most of a second; any key cuts it short. **Toggle opener** in the palette turns it off and on (`opener: yes · no`).
 - Notes autosave. Edit a note in another program and catcher takes what is on disk: the buffer reloads, the cursor stays on its line, and **^Z** brings the old buffer back. A file deleted from under it is said so in the status bar and recreated on the next save.
 - Mouse works: click, drag to select and copy, scroll. **^V** pastes a clipboard image as a PNG.
 
@@ -75,11 +76,11 @@ catcher --version        print the version
 | `^,` | Settings |
 | `^Q` | Quit |
 
-Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, `⇧` to extend a selection, `⌘A` select all. Every key is rebindable in the settings; `^K` answers to ctrl or cmd. `⇧^F` needs a terminal that tells shift+ctrl apart (Ghostty, kitty, WezTerm); elsewhere it arrives as `^F` and the palette is the way in. The editing commands ship with no key: `key_checkbox`, `key_line_up`, `key_line_down`, `key_heading`, `key_date`, `key_copy_path`, `key_reveal`, `key_outline`, `key_tags`, `key_find`, `key_properties`, `key_hide_properties` bind them, and `key_split_right`, `key_split_down`, `key_new_tab` the open-beside ones.
+Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, `⇧` to extend a selection, `⌘A` select all. Every key is rebindable in the settings; `^K` answers to ctrl or cmd. `⇧^F` needs a terminal that tells shift+ctrl apart (Ghostty, kitty, WezTerm); elsewhere it arrives as `^F` and the palette is the way in. The editing commands ship with no key: `key_checkbox`, `key_line_up`, `key_line_down`, `key_heading`, `key_date`, `key_copy_path`, `key_reveal`, `key_outline`, `key_tags`, `key_find`, `key_properties`, `key_hide_properties`, `key_opener` bind them, and `key_split_right`, `key_split_down`, `key_new_tab` the open-beside ones.
 
 ## Settings
 
-**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes and attachments folders, the daily note's folder, file name format and template, theme (`auto`, `dark`, `light`) and colours, page width, borders, status bar (`status_words` adds a word and character count), autosave delay, tab width, front matter, table style, wikilinks, whether a rename updates links, linked mentions, autocomplete, how far **^O** looks, and every key binding (`key_fold`, `key_unfold`, and the unbound `key_fold_all` / `key_unfold_all` among them). Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
+**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes and attachments folders, the daily note's folder, file name format and template, theme (`auto`, `dark`, `light`) and colours, page width, borders, status bar (`status_words` adds a word and character count), the start-up animation (`opener`), autosave delay, tab width, front matter, table style, wikilinks, whether a rename updates links, linked mentions, autocomplete, how far **^O** looks, and every key binding (`key_fold`, `key_unfold`, and the unbound `key_fold_all` / `key_unfold_all` among them). Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
 
 ## Development
 
