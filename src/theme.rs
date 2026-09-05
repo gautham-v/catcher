@@ -418,6 +418,8 @@ pub const UNCHECKED: &str = "\u{2610}";
 pub const BULLET: &str = "\u{2022}";
 /// In front of a folded heading.
 pub const FOLDED: &str = "\u{25b8} ";
+/// In front of an open callout that can fold.
+pub const UNFOLDED: &str = "\u{25be} ";
 pub const QUOTE_BAR: &str = "\u{258c}";
 
 #[cfg(test)]

@@ -254,11 +254,8 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                     lines.push(line);
                     used += 1;
                 };
-                if app.callout_closes(&blocks, *row) {
-                    let block = *crate::md::block_at(&blocks, *row).expect("a callout row");
-                    let kind = crate::md::callout_kind(app.editor.lines(), &block);
-                    let line = crate::md::callout_close(&kind, width).to_line(None);
-                    extra(app, line, None);
+                for close in app.callout_close_rows(&blocks, *row, width) {
+                    extra(app, close.to_line(None), None);
                 }
                 if app.table_rule_under(&blocks, *row) {
                     let block = *crate::md::block_at(&blocks, *row).expect("a table row");
@@ -443,7 +440,7 @@ fn row_height(
     let extra = usize::from(app.table_rule_under(blocks, row))
         + usize::from(app.hovered_table_end(blocks, row))
         + usize::from(app.hovered_table_top(blocks, row))
-        + usize::from(app.callout_closes(blocks, row));
+        + app.callout_close_rows(blocks, row, width.max(1) as usize).len();
     ((rows.max(1) + extra) as u16, None)
 }
 

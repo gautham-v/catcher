@@ -867,6 +867,9 @@ impl App {
         let blocks = self.blocks();
         self.folds
             .settle(&self.notes[self.active].path, self.editor.lines(), &blocks);
+        // a `[!kind]-` callout starts folded, the first time the note is seen
+        self.folds
+            .seed(&self.notes[self.active].path, self.editor.lines(), &blocks);
         self.refresh_visible();
         self.sync_title();
     }
@@ -883,14 +886,20 @@ impl App {
         self.folds.is_folded(&self.notes[self.active].path, row)
     }
 
+    /// Is `row` the title line of a callout card?
+    fn callout_title_at(&self, row: usize) -> bool {
+        crate::fold::callout_at(self.editor.lines(), &self.blocks(), row).is_some()
+    }
+
     /// The folded headings of the open note, in order.
     pub fn folded_lines(&self) -> Vec<usize> {
         self.folds.of(&self.notes[self.active].path)
     }
 
-    /// What a folded heading says at its right edge.
+    /// What a folded heading says at its right edge. A folded callout title
+    /// says it inside its top edge instead, so it has no label here.
     pub fn fold_label(&self, row: usize) -> Option<String> {
-        if !self.folded_here(row) {
+        if !self.folded_here(row) || self.callout_title_at(row) {
             return None;
         }
         Some(match self.visible.hidden_under(row) {
@@ -899,9 +908,10 @@ impl App {
         })
     }
 
-    /// Is the cursor on a heading line — the one place the fold keys apply?
+    /// Is the cursor on a heading line, or a callout's title — the places
+    /// the fold keys apply?
     fn on_heading(&self) -> bool {
-        crate::fold::heading_at(self.editor.lines(), &self.blocks(), self.editor.cursor.0).is_some()
+        crate::fold::foldable_at(self.editor.lines(), &self.blocks(), self.editor.cursor.0)
     }
 
     /// Does this key fold rather than move? In the editor only on a heading,
@@ -924,9 +934,7 @@ impl App {
             View::Edit => Some(self.editor.cursor.0),
             View::Preview => {
                 let blocks = self.blocks();
-                let heading = |line: usize| {
-                    crate::fold::heading_at(self.editor.lines(), &blocks, line).is_some()
-                };
+                let heading = |line: usize| crate::fold::foldable_at(self.editor.lines(), &blocks, line);
                 let at_sel = self.preview_span().and_then(|((row, _), _)| {
                     self.preview_rows
                         .iter()
@@ -966,9 +974,11 @@ impl App {
         let path = self.notes[self.active].path.clone();
         let blocks = self.blocks();
         let is_heading = crate::fold::heading_at(self.editor.lines(), &blocks, row).is_some();
+        let is_callout = crate::fold::callout_at(self.editor.lines(), &blocks, row).is_some();
         match self.folds.fold(&path, self.editor.lines(), &blocks, row) {
             Some(_) => self.folds_changed(),
             None if is_heading => self.flash("nothing under this heading".to_string()),
+            None if is_callout => self.flash("nothing under this callout".to_string()),
             None => self.flash("not on a heading".to_string()),
         }
     }
@@ -2822,10 +2832,14 @@ impl App {
             })
     }
 
-    /// Is `row` the last line of a callout, so the card's bottom edge is
-    /// drawn under it?
-    pub fn callout_closes(&self, blocks: &[md::Block], row: usize) -> bool {
-        md::block_at(blocks, row).is_some_and(|b| b.kind == md::BlockKind::Callout && b.end == row)
+    /// The bottom edges drawn under `row`: one for every callout card whose
+    /// last line on screen it is — the block's own card, a card nested in
+    /// it, or one folded down to its title.
+    pub fn callout_close_rows(&self, blocks: &[md::Block], row: usize, width: usize) -> Vec<md::RLine> {
+        let Some(block) = md::block_at(blocks, row).filter(|b| b.kind == md::BlockKind::Callout) else {
+            return Vec::new();
+        };
+        md::callout_closes(self.editor.lines(), block, row, width, &|l| self.visible.is_hidden(l))
     }
 
     /// Does a rule sit under `row` in the editor: a table row with another
@@ -3654,6 +3668,22 @@ impl App {
             Some((_, TableEdge::Left(r))) => Some(r),
             _ => None,
         };
+        // a callout draws its own fold: the marker inside the card's top
+        // edge, and the count with it
+        if let Some(block) = md::block_at(blocks, row).filter(|b| b.kind == md::BlockKind::Callout) {
+            let hidden = self
+                .folded_here(row)
+                .then(|| self.visible.hidden_under(row))
+                .filter(|&n| n > 0);
+            return md::callout_line_folded(
+                self.editor.lines(),
+                block,
+                row,
+                width,
+                row == self.editor.cursor.0,
+                hidden,
+            );
+        }
         let line = view_line(
             self.editor.lines(),
             blocks,
@@ -3738,7 +3768,7 @@ impl App {
             .iter()
             .find(|r| r.rect.contains(at))
             .and_then(|r| r.src_line)
-            .filter(|&l| crate::fold::heading_at(self.editor.lines(), &self.blocks(), l).is_some());
+            .filter(|&l| crate::fold::foldable_at(self.editor.lines(), &self.blocks(), l));
         if heading.is_some_and(|row| self.toggle_fold(row)) {
             return;
         }

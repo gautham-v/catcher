@@ -1468,111 +1468,359 @@ fn is_callout_start(line: &str) -> bool {
     callout_title(&chars, i).is_some()
 }
 
-/// Where a callout line's own text starts: past the indent, the `>` and
-/// one space after it.
-fn quote_body_start(chars: &[char]) -> usize {
-    let mut i = 0;
-    while chars.get(i).is_some_and(|c| c.is_whitespace()) {
-        i += 1;
+/// One card in a callout block: the callout itself, at depth 1, and every
+/// callout nested inside it — `> > [!tip] Inner` — one level deeper for
+/// each `>` in front of its title.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Card {
+    pub start: usize,
+    pub end: usize,
+    /// How many `>` open the card's lines: 1 for the block's own callout.
+    pub depth: usize,
+    pub kind: String,
+    /// The fold marker after `[!kind]`: `-` starts folded, `+` open.
+    pub marker: Option<char>,
+}
+
+impl Card {
+    pub fn contains(&self, row: usize) -> bool {
+        row >= self.start && row <= self.end
     }
-    if chars.get(i) == Some(&'>') {
-        i += 1;
-        if chars.get(i) == Some(&' ') {
+
+    /// Is there anything under the title to fold away?
+    pub fn has_body(&self) -> bool {
+        self.end > self.start
+    }
+}
+
+/// How many `>` open `chars`, each after optional whitespace.
+fn quote_depth(chars: &[char]) -> usize {
+    let mut i = 0;
+    let mut n = 0;
+    loop {
+        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
             i += 1;
         }
+        if chars.get(i) != Some(&'>') {
+            return n;
+        }
+        n += 1;
+        i += 1;
+    }
+}
+
+/// The char index of the `k`-th `>` (from 1) of a quote line — where the
+/// decoration standing for it maps a click back to — or the line's end.
+fn quote_marker_col(chars: &[char], k: usize) -> usize {
+    let mut i = 0;
+    let mut n = 0;
+    loop {
+        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+            i += 1;
+        }
+        if chars.get(i) != Some(&'>') {
+            return i.min(chars.len());
+        }
+        n += 1;
+        if n == k {
+            return i;
+        }
+        i += 1;
+    }
+}
+
+/// Where a quote line's own text starts once `n` of its `>` are stripped:
+/// past the markers and one space after the last.
+fn quote_body_start_n(chars: &[char], n: usize) -> usize {
+    let mut i = 0;
+    for _ in 0..n {
+        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+            i += 1;
+        }
+        if chars.get(i) != Some(&'>') {
+            break;
+        }
+        i += 1;
+    }
+    if chars.get(i) == Some(&' ') {
+        i += 1;
     }
     i
+}
+
+/// Every card in a callout block, in order of their title lines: the block's
+/// own callout first, then each one nested in it. A nested card opens where
+/// a deeper run of `>` begins with `[!kind]` — the same place the reading
+/// view's parser opens a new blockquote — and runs as long as that depth does.
+pub fn callout_cards(lines: &[String], block: &Block) -> Vec<Card> {
+    let mut cards: Vec<Card> = Vec::new();
+    let mut open: Vec<usize> = Vec::new();
+    let mut prev_depth = 0;
+    let last = block.end.min(lines.len().saturating_sub(1));
+    for (row, line) in lines.iter().enumerate().take(last + 1).skip(block.start) {
+        let chars: Vec<char> = line.chars().collect();
+        let q = quote_depth(&chars).max(1);
+        while open.last().is_some_and(|&c| cards[c].depth > q) {
+            let c = open.pop().expect("an open card");
+            cards[c].end = row - 1;
+        }
+        if prev_depth < q {
+            if let Some((kind, after, _)) = callout_title(&chars, quote_body_start_n(&chars, q)) {
+                let marker = chars.get(after).copied().filter(|c| matches!(c, '-' | '+'));
+                open.push(cards.len());
+                cards.push(Card {
+                    start: row,
+                    end: block.end,
+                    depth: q,
+                    kind,
+                    marker,
+                });
+            }
+        }
+        prev_depth = q;
+    }
+    cards
+}
+
+/// The card whose title is on `row`, when the line opens one.
+pub fn callout_card_at(lines: &[String], blocks: &[Block], row: usize) -> Option<Card> {
+    let block = block_at(blocks, row).filter(|b| b.kind == BlockKind::Callout)?;
+    callout_cards(lines, block).into_iter().find(|c| c.start == row)
+}
+
+/// The width a callout card is drawn at on a page `width` wide. A width no
+/// page has means the caller did not care, so the card takes a comfortable
+/// default.
+fn card_page_width(width: usize) -> usize {
+    if width == usize::MAX {
+        60
+    } else {
+        width.max(8)
+    }
+}
+
+/// The decoration to the left of a row inside a callout block, for the
+/// levels before `depth` — a `│ ` for each enclosing card, a `▌ ` for a
+/// plain quote between them — with the right edges those cards close on and
+/// how wide the row's own level may be.
+struct Frame {
+    cells: Vec<Cell>,
+    /// Outermost first: the style of each card's edge and the display
+    /// column its ` │` ends at.
+    closes: Vec<(Style, usize)>,
+    avail: usize,
+}
+
+fn card_frame(cards: &[Card], chars: &[char], row: usize, depth: usize, w: usize) -> Frame {
+    let mut cells = Vec::new();
+    let mut closes = Vec::new();
+    let mut avail = w;
+    let mut x = 0;
+    for k in 1..depth {
+        let col = quote_marker_col(chars, k);
+        match cards.iter().find(|c| c.depth == k && c.contains(row)) {
+            Some(c) => {
+                let style = theme::callout(&c.kind);
+                cells.extend(at("│ ", style, col));
+                closes.push((style, x + avail));
+                avail = avail.saturating_sub(4);
+            }
+            None => {
+                cells.extend(at(&format!("{} ", theme::QUOTE_BAR), theme::marker(), col));
+                avail = avail.saturating_sub(2);
+            }
+        }
+        x += 2;
+    }
+    Frame {
+        cells,
+        closes,
+        avail,
+    }
+}
+
+/// Close the enclosing cards' right edges, innermost first, each padded out
+/// to where its card ends; a row already past an edge leaves it and the
+/// ones outside it off.
+fn close_edges(cells: &mut Vec<Cell>, closes: &[(Style, usize)], src: usize) {
+    for (style, end) in closes.iter().rev() {
+        let used = cells_width(cells);
+        if used + 2 > *end {
+            return;
+        }
+        cells.extend(at(&" ".repeat(end - used - 2), theme::PLAIN, src));
+        cells.extend(at(" │", *style, src));
+    }
 }
 
 /// One line of a callout card, as wide as `width`. The title line is the
 /// card's top edge — glyph, type and title in the callout's colour — and
 /// every other line sits between two rails. On the cursor's line
 /// (`raw`) the text is shown as typed, title syntax included, so it can be
-/// edited; the card stays.
+/// edited; the card stays. A callout nested in the card is a card of its
+/// own, drawn inside the outer one's rails.
 pub fn callout_line(lines: &[String], block: &Block, row: usize, width: usize, raw: bool) -> RLine {
+    callout_line_folded(lines, block, row, width, raw, None)
+}
+
+/// The same line with its fold shown: `hidden` is how many lines the fold
+/// on this title hides, `None` for an open one. A folded title carries `▸ `
+/// before its glyph and the count at its right; an open title that can fold
+/// (`[!kind]-` or `[!kind]+`) carries `▾ `.
+pub fn callout_line_folded(
+    lines: &[String],
+    block: &Block,
+    row: usize,
+    width: usize,
+    raw: bool,
+    hidden: Option<usize>,
+) -> RLine {
     let src = lines.get(row).map(String::as_str).unwrap_or("");
     let chars: Vec<char> = src.chars().collect();
     let src_len = chars.len();
-    let body = quote_body_start(&chars);
-    let kind = {
-        let first: Vec<char> = lines[block.start].chars().collect();
-        callout_title(&first, quote_body_start(&first))
-            .map(|(k, _, _)| k)
-            .unwrap_or_default()
+    let cards = callout_cards(lines, block);
+    let w = card_page_width(width);
+    let q = quote_depth(&chars).max(1);
+    let body = quote_body_start_n(&chars, q);
+    let title = cards.iter().find(|c| c.depth == q && c.start == row);
+    // a body row sits inside every level up to its own; a title row opens
+    // its level, so its frame stops one short
+    let Frame {
+        mut cells,
+        closes,
+        avail,
+    } = card_frame(&cards, &chars, row, q + usize::from(title.is_none()), w);
+    let Some(card) = title else {
+        let text: String = chars[body..].iter().collect();
+        let inner = if raw {
+            RLine::raw(&text).cells
+        } else {
+            style_line(&text).cells
+        };
+        cells.extend(inner.into_iter().map(|c| Cell {
+            src: body + c.src,
+            ..c
+        }));
+        close_edges(&mut cells, &closes, src_len);
+        return done(cells, src);
     };
-    let style = theme::callout(&kind);
-    let w = if width == usize::MAX { 60 } else { width.max(8) };
-    let mut cells: Vec<Cell> = Vec::new();
-    // the prefix stands for the card's edge
-    let edge = |text: &str, cells: &mut Vec<Cell>, src: usize| {
-        cells.extend(text.chars().map(|ch| Cell { ch, style, src }));
-    };
-    if row == block.start {
-        edge("╭─ ", &mut cells, 0);
-        if raw {
-            for (k, ch) in chars.iter().enumerate().skip(body) {
-                cells.push(Cell {
-                    ch: *ch,
-                    style: theme::PLAIN,
-                    src: k,
-                });
-            }
+    let style = theme::callout(&card.kind);
+    let col = quote_marker_col(&chars, q);
+    let x = cells_width(&cells);
+    cells.extend(at("╭─ ", style, col));
+    match hidden {
+        Some(_) => cells.extend(at(theme::FOLDED, theme::fold(), col)),
+        None if card.marker.is_some() => cells.extend(at(theme::UNFOLDED, style, col)),
+        None => {}
+    }
+    if raw {
+        for (k, ch) in chars.iter().enumerate().skip(body) {
             cells.push(Cell {
-                ch: ' ',
-                style,
-                src: src_len,
-            });
-        } else if let Some((kind, after, title)) = callout_title(&chars, body) {
-            let bold = style.add_modifier(Modifier::BOLD);
-            let mut head = String::new();
-            if let Some(g) = callout_glyph(&kind) {
-                head.push(g);
-                head.push(' ');
-            }
-            head.push_str(&kind);
-            edge(&head, &mut cells, body);
-            if title < src_len {
-                edge(" · ", &mut cells, after);
-                let t: String = chars[title..].iter().collect();
-                cells.extend(styled_inline(&t, bold).into_iter().map(|c| Cell {
-                    src: title + c.src,
-                    ..c
-                }));
-            }
-            cells.push(Cell {
-                ch: ' ',
-                style,
-                src: src_len,
+                ch: *ch,
+                style: theme::PLAIN,
+                src: k,
             });
         }
-        let used = cells_width(&cells);
-        let dashes = w.saturating_sub(used + 1);
-        edge(&"─".repeat(dashes), &mut cells, src_len);
-        edge("╮", &mut cells, src_len);
-        return done(cells, src);
+        cells.push(Cell {
+            ch: ' ',
+            style,
+            src: src_len,
+        });
+    } else if let Some((kind, after, title)) = callout_title(&chars, body) {
+        let bold = style.add_modifier(Modifier::BOLD);
+        let mut head = String::new();
+        if let Some(g) = callout_glyph(&kind) {
+            head.push(g);
+            head.push(' ');
+        }
+        head.push_str(&kind);
+        cells.extend(at(&head, style, body));
+        if title < src_len {
+            cells.extend(at(" · ", style, after));
+            let t: String = chars[title..].iter().collect();
+            cells.extend(styled_inline(&t, bold).into_iter().map(|c| Cell {
+                src: title + c.src,
+                ..c
+            }));
+        }
+        cells.push(Cell {
+            ch: ' ',
+            style,
+            src: src_len,
+        });
     }
-    edge("│ ", &mut cells, 0);
-    let text: String = chars[body..].iter().collect();
-    let inner = if raw {
-        RLine::raw(&text).cells
-    } else {
-        style_line(&text).cells
-    };
-    cells.extend(inner.into_iter().map(|c| Cell {
-        src: body + c.src,
-        ..c
-    }));
-    let used = cells_width(&cells);
-    if used + 2 <= w {
-        cells.extend(at(&" ".repeat(w - used - 2), theme::PLAIN, src_len));
-        edge(" │", &mut cells, src_len);
+    let used = cells_width(&cells) - x;
+    let mut dashes = avail.saturating_sub(used + 1);
+    // the count sits in the top edge, with a dash or more before it; a
+    // title that leaves it no room keeps its text, and the marker in front
+    // already says the card is folded
+    let tail = hidden
+        .map(fold_count)
+        .filter(|l| dashes > str_width(l) + 3);
+    if let Some(l) = &tail {
+        dashes -= str_width(l) + 3;
     }
+    cells.extend(at(&"─".repeat(dashes), style, src_len));
+    if let Some(l) = &tail {
+        cells.extend(at(" ", style, src_len));
+        cells.extend(at(l, theme::marker(), src_len));
+        cells.extend(at(" ─", style, src_len));
+    }
+    cells.extend(at("╮", style, src_len));
+    close_edges(&mut cells, &closes, src_len);
     done(cells, src)
 }
 
+/// What a folded callout says about what it hides.
+pub fn fold_count(hidden: usize) -> String {
+    match hidden {
+        1 => "1 line".to_string(),
+        n => format!("{n} lines"),
+    }
+}
+
+/// The bottom edges drawn under `row` of a callout block: one for every
+/// card whose last line on screen it is — a card that closes there, or one
+/// folded down to its title — innermost first, each inside the rails of
+/// the cards around it. `hidden` says which lines a fold has taken off the
+/// screen.
+pub fn callout_closes(
+    lines: &[String],
+    block: &Block,
+    row: usize,
+    width: usize,
+    hidden: &dyn Fn(usize) -> bool,
+) -> Vec<RLine> {
+    let cards = callout_cards(lines, block);
+    let w = card_page_width(width);
+    let mut out = Vec::new();
+    for card in cards.iter().rev() {
+        let last = (card.start..=card.end).rev().find(|&l| !hidden(l));
+        if last != Some(row) {
+            continue;
+        }
+        let chars: Vec<char> = lines[card.start].chars().collect();
+        let Frame {
+            mut cells,
+            closes,
+            avail,
+        } = card_frame(&cards, &chars, card.start, card.depth, w);
+        let style = theme::callout(&card.kind);
+        cells.extend(at(
+            &format!("╰{}╯", "─".repeat(avail.saturating_sub(2))),
+            style,
+            0,
+        ));
+        close_edges(&mut cells, &closes, 0);
+        out.push(RLine { cells, src_len: 0 });
+    }
+    out
+}
+
 /// The bottom edge of a callout card `width` wide.
+#[cfg(test)]
 pub fn callout_close(kind: &str, width: usize) -> RLine {
-    let w = if width == usize::MAX { 60 } else { width.max(8) };
+    let w = card_page_width(width);
     let cells = format!("╰{}╯", "─".repeat(w - 2))
         .chars()
         .map(|ch| Cell {
@@ -1582,14 +1830,6 @@ pub fn callout_close(kind: &str, width: usize) -> RLine {
         })
         .collect();
     RLine { cells, src_len: 0 }
-}
-
-/// The callout kind a block opens with (`note` for anything else).
-pub fn callout_kind(lines: &[String], block: &Block) -> String {
-    let first: Vec<char> = lines[block.start].chars().collect();
-    callout_title(&first, quote_body_start(&first))
-        .map(|(k, _, _)| k)
-        .unwrap_or_else(|| "note".to_string())
 }
 
 /// A footnote label as a superscript: digits in superscript, anything else
@@ -2593,6 +2833,74 @@ mod tests {
         // a click on the rail lands at the line's start, on the text after `> `
         let l = callout_line(&lines, &bs[0], 1, 20, false);
         assert_eq!(l.one_row().display_to_source(2), 2);
+    }
+
+    #[test]
+    fn a_callout_inside_a_callout_is_a_card_of_its_own() {
+        let text = |l: &RLine| l.cells.iter().map(|c| c.ch).collect::<String>();
+        let lines: Vec<String> = "> [!note]+ Outer\n> a\n> > [!tip]- Inner\n> > b\n> c"
+            .lines()
+            .map(String::from)
+            .collect();
+        let bs = blocks(&lines);
+        assert_eq!((bs[0].start, bs[0].end), (0, 4));
+        let cards = callout_cards(&lines, &bs[0]);
+        assert_eq!(cards.len(), 2);
+        assert_eq!((cards[0].start, cards[0].end, cards[0].depth), (0, 4, 1));
+        assert_eq!((cards[0].kind.as_str(), cards[0].marker), ("note", Some('+')));
+        assert_eq!((cards[1].start, cards[1].end, cards[1].depth), (2, 3, 2));
+        assert_eq!((cards[1].kind.as_str(), cards[1].marker), ("tip", Some('-')));
+        assert_eq!(callout_card_at(&lines, &bs, 2).map(|c| c.depth), Some(2));
+        assert!(callout_card_at(&lines, &bs, 1).is_none());
+        // the open card that can fold carries ▾ ; the inner card sits inside the outer rails
+        assert_eq!(text(&callout_line(&lines, &bs[0], 0, 30, false)), "╭─ ▾ i note · Outer ─────────╮");
+        assert_eq!(text(&callout_line(&lines, &bs[0], 2, 30, false)), "│ ╭─ ▾ ✓ tip · Inner ──────╮ │");
+        assert_eq!(text(&callout_line(&lines, &bs[0], 3, 30, false)), "│ │ b                      │ │");
+        assert_eq!(text(&callout_line(&lines, &bs[0], 4, 30, false)), "│ c                          │");
+        // the inner card closes under its last line, inside the outer rails;
+        // the outer closes under the block
+        let closes = callout_closes(&lines, &bs[0], 3, 30, &|_| false);
+        assert_eq!(closes.len(), 1);
+        assert_eq!(text(&closes[0]), "│ ╰────────────────────────╯ │");
+        let closes = callout_closes(&lines, &bs[0], 4, 30, &|_| false);
+        assert_eq!(closes.len(), 1);
+        assert_eq!(text(&closes[0]), "╰────────────────────────────╯");
+        assert!(callout_closes(&lines, &bs[0], 2, 30, &|_| false).is_empty());
+        // both cards close under the inner one's last line when the outer ends there
+        let short: Vec<String> = lines[..4].to_vec();
+        let sb = blocks(&short);
+        let closes = callout_closes(&short, &sb[0], 3, 30, &|_| false);
+        assert_eq!(closes.len(), 2);
+        assert!(text(&closes[0]).starts_with("│ ╰"));
+        assert!(text(&closes[1]).starts_with('╰'));
+        // a click on the inner rail lands on the inner `>`
+        let l = callout_line(&lines, &bs[0], 3, 30, false);
+        assert_eq!(l.one_row().display_to_source(2), 2);
+    }
+
+    #[test]
+    fn a_folded_callout_title_carries_the_marker_and_the_count() {
+        let text = |l: &RLine| l.cells.iter().map(|c| c.ch).collect::<String>();
+        let lines: Vec<String> = "> [!tip]- Go\n> a\n> b".lines().map(String::from).collect();
+        let bs = blocks(&lines);
+        let l = callout_line_folded(&lines, &bs[0], 0, 30, false, Some(2));
+        assert_eq!(text(&l), "╭─ ▸ ✓ tip · Go ─── 2 lines ─╮");
+        assert_eq!(l.cells[3].style, theme::fold());
+        // open, it says it can fold
+        assert_eq!(text(&callout_line(&lines, &bs[0], 0, 30, false)), "╭─ ▾ ✓ tip · Go ─────────────╮");
+        // a title with no room for the count keeps its text
+        let tight = callout_line_folded(&lines, &bs[0], 0, 18, false, Some(2));
+        assert_eq!(text(&tight), "╭─ ▸ ✓ tip · Go ─╮");
+        // the bottom edge sits right under the folded title
+        let closes = callout_closes(&lines, &bs[0], 0, 30, &|l| l > 0);
+        assert_eq!(closes.len(), 1);
+        assert_eq!(text(&closes[0]), "╰────────────────────────────╯");
+        assert!(callout_closes(&lines, &bs[0], 2, 30, &|l| l > 0).is_empty());
+        // a callout without a marker has no ▾
+        let plain: Vec<String> = vec!["> [!tip] Go".to_string()];
+        let pb = blocks(&plain);
+        assert_eq!(text(&callout_line(&plain, &pb[0], 0, 20, false)), "╭─ ✓ tip · Go ─────╮");
+        assert_eq!(fold_count(1), "1 line");
     }
 
     #[test]

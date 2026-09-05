@@ -10,7 +10,7 @@
 //! sections are closed is where you are in a note, not something about it.
 
 use crate::md::{self, Block};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// The level of an ATX heading — `# ` through `###### `, with up to three
@@ -47,9 +47,24 @@ pub fn section_end(lines: &[String], blocks: &[Block], heading: usize) -> usize 
         - 1
 }
 
+/// The callout card whose title is on `row`, if the line opens one — the
+/// other thing a fold can be made on. A card folds to its title line the
+/// way a section folds to its heading.
+pub fn callout_at(lines: &[String], blocks: &[Block], row: usize) -> Option<md::Card> {
+    md::callout_card_at(lines, blocks, row)
+}
+
+/// Can a fold be made on `row`: is it a heading, or a callout's title?
+pub fn foldable_at(lines: &[String], blocks: &[Block], row: usize) -> bool {
+    heading_at(lines, blocks, row).is_some() || callout_at(lines, blocks, row).is_some()
+}
+
 /// The lines a fold on `heading` would hide, or `None` for a line that is not
-/// a heading or has nothing under it.
+/// a heading or a callout title, or has nothing under it.
 fn hidden_span(lines: &[String], blocks: &[Block], heading: usize) -> Option<(usize, usize)> {
+    if let Some(card) = callout_at(lines, blocks, heading) {
+        return card.has_body().then_some((heading + 1, card.end));
+    }
     heading_at(lines, blocks, heading)?;
     let end = section_end(lines, blocks, heading);
     (end > heading).then_some((heading + 1, end))
@@ -64,9 +79,33 @@ fn hidden_span(lines: &[String], blocks: &[Block], heading: usize) -> Option<(us
 #[derive(Default, Debug)]
 pub struct Folds {
     by_note: HashMap<PathBuf, BTreeMap<usize, String>>,
+    /// Notes whose `[!kind]-` callouts have been folded once already: the
+    /// marker sets the state the first time a note is opened in a session,
+    /// and after that the state is whatever the reader made it.
+    seeded: HashSet<PathBuf>,
 }
 
 impl Folds {
+    /// Fold every callout that asks to start folded (`> [!kind]- Title`),
+    /// the first time `path` is opened this session; later openings leave
+    /// the folds as the reader left them. How many were folded.
+    pub fn seed(&mut self, path: &Path, lines: &[String], blocks: &[Block]) -> usize {
+        if !self.seeded.insert(path.to_path_buf()) {
+            return 0;
+        }
+        let closed: Vec<usize> = blocks
+            .iter()
+            .filter(|b| b.kind == md::BlockKind::Callout)
+            .flat_map(|b| md::callout_cards(lines, b))
+            .filter(|c| c.marker == Some('-'))
+            .map(|c| c.start)
+            .collect();
+        closed
+            .into_iter()
+            .filter(|&r| self.fold(path, lines, blocks, r).is_some())
+            .count()
+    }
+
     /// The folded heading lines of `path`, in order.
     pub fn of(&self, path: &Path) -> Vec<usize> {
         self.by_note
@@ -129,6 +168,9 @@ impl Folds {
         }
         if let Some(m) = self.by_note.remove(old) {
             self.by_note.insert(new.to_path_buf(), m);
+        }
+        if self.seeded.remove(old) {
+            self.seeded.insert(new.to_path_buf());
         }
     }
 
@@ -300,6 +342,38 @@ mod tests {
         assert_eq!(heading_level("#"), None);
         assert_eq!(heading_level("plain"), None);
         assert_eq!(heading_level("    # code"), None);
+    }
+
+    #[test]
+    fn a_callout_title_folds_its_body_the_way_a_heading_folds_its_section() {
+        let l = lines("# T\n> [!tip]- Go\n> a\n> > [!note] In\n> > b\nafter\n> [!warn]+ Open\n> c");
+        let b = md::blocks(&l);
+        assert!(callout_at(&l, &b, 1).is_some());
+        assert!(callout_at(&l, &b, 2).is_none());
+        assert_eq!(callout_at(&l, &b, 3).map(|c| c.depth), Some(2));
+        assert!(foldable_at(&l, &b, 0) && foldable_at(&l, &b, 1) && !foldable_at(&l, &b, 5));
+        assert_eq!(hidden_span(&l, &b, 1), Some((2, 4)));
+        assert_eq!(hidden_span(&l, &b, 3), Some((4, 4)));
+        let mut f = Folds::default();
+        let p = Path::new("n.md");
+        // the `-` card starts folded the first time, the `+` one open
+        assert_eq!(f.seed(p, &l, &b), 1);
+        assert!(f.is_folded(p, 1) && !f.is_folded(p, 6));
+        let v = Visible::new(&l, &b, &f.of(p));
+        assert!(v.is_hidden(2) && v.is_hidden(4) && !v.is_hidden(5));
+        assert_eq!(v.hidden_under(1), 3);
+        // the reader's choice sticks: seeding again changes nothing
+        assert!(f.unfold(p, 1));
+        assert_eq!(f.seed(p, &l, &b), 0);
+        assert!(!f.is_folded(p, 1));
+        // a nested card folds on its own
+        assert_eq!(f.fold(p, &l, &b, 3), Some(1));
+        // a title with nothing under it has nothing to fold
+        let one = lines("> [!tip]- alone");
+        let ob = md::blocks(&one);
+        assert_eq!(hidden_span(&one, &ob, 0), None);
+        let mut g = Folds::default();
+        assert_eq!(g.seed(p, &one, &ob), 0);
     }
 
     #[test]
