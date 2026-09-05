@@ -27,23 +27,12 @@ pub fn headings(lines: &[String], blocks: &[Block]) -> Vec<Heading> {
             Some(Heading {
                 line,
                 level,
-                text: heading_text(&lines[line]),
+                text: crate::md::heading_text(&lines[line])
+                    .unwrap_or_default()
+                    .to_string(),
             })
         })
         .collect()
-}
-
-/// The text of a heading line: the opening hashes gone, and a closing run of
-/// hashes too when it stands on its own — `# Title #` is `Title`, `# C#` is
-/// still `C#`.
-fn heading_text(line: &str) -> String {
-    let body = line.trim_start().trim_start_matches('#').trim();
-    let closing = body.trim_end_matches('#');
-    if closing.len() < body.len() && closing.ends_with(char::is_whitespace) {
-        closing.trim_end().to_string()
-    } else {
-        body.to_string()
-    }
 }
 
 /// The headings that answer `query`, in document order: an outline that
@@ -114,10 +103,12 @@ mod tests {
 
     #[test]
     fn a_closing_hash_run_is_dropped_but_a_hash_in_a_word_is_kept() {
-        assert_eq!(heading_text("# Title #"), "Title");
-        assert_eq!(heading_text("## Title ###"), "Title");
-        assert_eq!(heading_text("# C#"), "C#");
-        assert_eq!(heading_text("#   spaced   "), "spaced");
+        let text = |l: &str| crate::md::heading_text(l).map(str::to_string);
+        assert_eq!(text("# Title #").as_deref(), Some("Title"));
+        assert_eq!(text("## Title ###").as_deref(), Some("Title"));
+        assert_eq!(text("# C#").as_deref(), Some("C#"));
+        assert_eq!(text("#   spaced   ").as_deref(), Some("spaced"));
+        assert_eq!(text("## Setup ^abc ##").as_deref(), Some("Setup"));
     }
 
     #[test]

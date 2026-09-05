@@ -3617,23 +3617,55 @@ pub fn embed_card(embed: &NoteEmbed) -> EmbedCard {
     card
 }
 
-/// The text of an ATX heading line, hashes and blanks stripped.
-fn heading_text(line: &str) -> Option<String> {
-    crate::fold::heading_level(line)?;
-    Some(line.trim().trim_start_matches('#').trim().to_string())
+/// The text of an ATX heading line — up to three spaces of indent and the
+/// opening hashes gone, a closing run of hashes dropped when it stands on its
+/// own (`# Title #` is `Title`, `# C#` is still `C#`), and a trailing
+/// ` ^blockid` dropped too — trimmed. `None` for any other line.
+pub fn heading_text(line: &str) -> Option<&str> {
+    let level = crate::fold::heading_level(line)?;
+    let body = line.trim_start()[level..].trim();
+    let closing = body.trim_end_matches('#');
+    let body = if closing.len() < body.len()
+        && (closing.is_empty() || closing.ends_with(char::is_whitespace))
+    {
+        closing.trim_end()
+    } else {
+        body
+    };
+    let body = match block_id_at(body) {
+        Some((col, _)) => {
+            let byte = body.char_indices().nth(col).map_or(body.len(), |(b, _)| b);
+            &body[..byte]
+        }
+        None => body,
+    };
+    Some(body.trim())
 }
 
 /// The lines under the heading called `name` (matched without case), up to
-/// the next heading of the same or a higher level. `None` when no heading
-/// of that name exists.
+/// the next heading of the same or a higher level. Fenced code is stepped
+/// over, as a `# comment` in a shell snippet is not a heading. `None` when
+/// no heading of that name exists.
 fn section_under<'a>(lines: &[&'a str], name: &str) -> Option<Vec<&'a str>> {
     let want = name.trim().to_lowercase();
-    let at = lines
-        .iter()
-        .position(|l| heading_text(l).is_some_and(|t| t.to_lowercase() == want))?;
+    let mut fenced = false;
+    let at = lines.iter().position(|l| {
+        if is_fence(l) {
+            fenced = !fenced;
+            return false;
+        }
+        !fenced && heading_text(l).is_some_and(|t| t.to_lowercase() == want)
+    })?;
     let level = crate::fold::heading_level(lines[at]).unwrap_or(usize::MAX);
+    let mut fenced = false;
     let end = (at + 1..lines.len())
-        .find(|&i| crate::fold::heading_level(lines[i]).is_some_and(|l| l <= level))
+        .find(|&i| {
+            if is_fence(lines[i]) {
+                fenced = !fenced;
+                return false;
+            }
+            !fenced && crate::fold::heading_level(lines[i]).is_some_and(|l| l <= level)
+        })
         .unwrap_or(lines.len());
     Some(lines[at + 1..end].to_vec())
 }
@@ -4066,6 +4098,29 @@ fn table_row(l: &TableLayout, rows: &[String], row: usize, raw: bool) -> RLine {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn heading_text_strips_hashes_block_id_and_closing_hashes() {
+        assert_eq!(super::heading_text("## Setup ^abc ##"), Some("Setup"));
+        assert_eq!(super::heading_text("   # Indented"), Some("Indented"));
+        assert_eq!(super::heading_text("# C#"), Some("C#"));
+        assert_eq!(super::heading_text("#"), None);
+        assert_eq!(super::heading_text("plain"), None);
+    }
+
+    #[test]
+    fn section_under_skips_fenced_code_and_matches_block_id_heading() {
+        let lines = vec![
+            "```sh",
+            "# Setup",
+            "echo",
+            "```",
+            "## Setup ^abc ##",
+            "body",
+            "## Next",
+        ];
+        assert_eq!(super::section_under(&lines, "setup"), Some(vec!["body"]));
+    }
+
     use super::*;
 
     fn text(l: &RLine) -> String {

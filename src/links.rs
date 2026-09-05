@@ -268,26 +268,8 @@ pub fn find_anchor(lines: &[String], fragment: &str) -> Option<usize> {
             fenced = !fenced;
             return false;
         }
-        !fenced && heading_text(line).is_some_and(|t| t.to_lowercase() == want)
+        !fenced && crate::md::heading_text(line).is_some_and(|t| t.to_lowercase() == want)
     })
-}
-
-/// The words of an ATX heading line, or `None` for any other line.
-fn heading_text(line: &str) -> Option<&str> {
-    let t = line.trim_start();
-    let hashes = t.chars().take_while(|&c| c == '#').count();
-    if hashes == 0 || hashes > 6 {
-        return None;
-    }
-    let rest = t[hashes..].strip_prefix(' ')?;
-    let rest = match crate::md::block_id_at(rest) {
-        Some((col, _)) => {
-            let byte = rest.char_indices().nth(col).map_or(rest.len(), |(b, _)| b);
-            &rest[..byte]
-        }
-        None => rest,
-    };
-    Some(rest.trim())
 }
 
 #[cfg(test)]
@@ -507,6 +489,17 @@ mod tests {
     fn a_heading_in_fenced_code_is_not_a_heading() {
         let note = lines("```sh\n# Install\n```\n\n# Install");
         assert_eq!(find_anchor(&note, "Install"), Some(4));
+    }
+
+    #[test]
+    fn a_heading_with_a_block_id_and_closing_hashes_is_found_by_its_words() {
+        let note = lines(
+            "# Intro
+
+## Setup ^abc ##
+",
+        );
+        assert_eq!(find_anchor(&note, "setup"), Some(2));
     }
 
     #[test]
