@@ -783,6 +783,56 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
         }
     }
 
+    // <tag>, </tag>, <br> and <!-- comments --> — the little HTML Obsidian
+    // users write. Tags stay on the page, dimmed; a known pair styles its body
+    if c == '<' {
+        if let Some(end) = html_comment_end(b.src, i) {
+            for k in i..end {
+                b.keep(k, theme::marker());
+            }
+            return Some(end);
+        }
+        if let Some(tag) = html_tag_at(b.src, i) {
+            let dim = theme::marker();
+            if tag.name == "br" {
+                b.sub("↵", dim, i);
+                for k in i + 1..tag.end {
+                    b.sub("", dim, k);
+                }
+                return Some(tag.end);
+            }
+            if tag.opens() {
+                if let Some(style) = html_style(&tag.name, base) {
+                    if let Some((close, close_end)) = html_close_at(b.src, tag.end, &tag.name) {
+                        for k in i..tag.end {
+                            b.keep(k, dim);
+                        }
+                        for k in tag.end..close {
+                            let ch = b.src[k];
+                            let shown = match tag.name.as_str() {
+                                "sub" => sub_char(ch),
+                                "sup" => sup_char(ch),
+                                _ => None,
+                            };
+                            match shown {
+                                Some(s) => b.sub(&s.to_string(), style, k),
+                                None => b.keep(k, style),
+                            }
+                        }
+                        for k in close..close_end {
+                            b.keep(k, dim);
+                        }
+                        return Some(close_end);
+                    }
+                }
+            }
+            for k in i..tag.end {
+                b.keep(k, dim);
+            }
+            return Some(tag.end);
+        }
+    }
+
     // bare URL
     if let Some(end) = url_at(b.src, i) {
         let style = base.patch(theme::link());
@@ -1595,15 +1645,202 @@ pub fn callout_kind(lines: &[String], block: &Block) -> String {
 /// A footnote label as a superscript: digits in superscript, anything else
 /// as `^name`.
 pub fn superscript(label: &str) -> String {
-    const DIGITS: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
     if !label.is_empty() && label.chars().all(|c| c.is_ascii_digit()) {
-        label
-            .chars()
-            .map(|c| DIGITS[c.to_digit(10).unwrap_or(0) as usize])
-            .collect()
+        label.chars().filter_map(sup_char).collect()
     } else {
         format!("^{label}")
     }
+}
+
+/// The superscript form of `c`, for the characters Unicode has one for.
+pub fn sup_char(c: char) -> Option<char> {
+    Some(match c {
+        '0' => '⁰',
+        '1' => '¹',
+        '2' => '²',
+        '3' => '³',
+        '4' => '⁴',
+        '5' => '⁵',
+        '6' => '⁶',
+        '7' => '⁷',
+        '8' => '⁸',
+        '9' => '⁹',
+        '+' => '⁺',
+        '-' => '⁻',
+        '=' => '⁼',
+        '(' => '⁽',
+        ')' => '⁾',
+        _ => return None,
+    })
+}
+
+/// The subscript form of `c`, for the characters Unicode has one for.
+pub fn sub_char(c: char) -> Option<char> {
+    Some(match c {
+        '0' => '₀',
+        '1' => '₁',
+        '2' => '₂',
+        '3' => '₃',
+        '4' => '₄',
+        '5' => '₅',
+        '6' => '₆',
+        '7' => '₇',
+        '8' => '₈',
+        '9' => '₉',
+        '+' => '₊',
+        '-' => '₋',
+        '=' => '₌',
+        '(' => '₍',
+        ')' => '₎',
+        _ => return None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Inline HTML
+//
+// Obsidian lets a note fall back to HTML for the few things markdown has no
+// spelling for — a key cap, a subscript, an underline, a hard break. Only the
+// tag grammar lives here; what each tag looks like is decided by the two
+// views, which share `html_style` for the pairs they both know.
+
+/// One HTML tag as written: `<name attrs>`, `</name>` or `<name/>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HtmlTag {
+    /// The tag name, lower-cased.
+    pub name: String,
+    /// `</name>`.
+    pub closing: bool,
+    /// `<name/>`.
+    pub self_closing: bool,
+    /// One past the closing `>`, in chars from the start of the source.
+    pub end: usize,
+}
+
+impl HtmlTag {
+    /// Does this tag open a span that a later `</name>` closes?
+    pub fn opens(&self) -> bool {
+        !self.closing && !self.self_closing
+    }
+}
+
+/// The HTML tag starting at column `i`, or `None` when the `<` there is just
+/// a less-than sign: a tag name has to follow it (after an optional `/`),
+/// letters first, and the tag has to close with `>` on this line.
+pub(crate) fn html_tag_at(src: &[char], i: usize) -> Option<HtmlTag> {
+    if src.get(i) != Some(&'<') {
+        return None;
+    }
+    let mut k = i + 1;
+    let closing = src.get(k) == Some(&'/');
+    if closing {
+        k += 1;
+    }
+    if !src.get(k).is_some_and(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let name_start = k;
+    while src
+        .get(k)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '-')
+    {
+        k += 1;
+    }
+    let name: String = src[name_start..k].iter().collect::<String>().to_lowercase();
+    // what follows the name: `>`, `/>`, or whitespace and then attributes
+    let mut self_closing = false;
+    match src.get(k) {
+        Some('>') => {}
+        Some('/') if src.get(k + 1) == Some(&'>') => {
+            self_closing = true;
+            k += 1;
+        }
+        Some(c) if c.is_whitespace() && !closing => {
+            let mut quote: Option<char> = None;
+            loop {
+                let c = *src.get(k)?;
+                match quote {
+                    Some(q) if c == q => quote = None,
+                    Some(_) => {}
+                    None if c == '"' || c == '\'' => quote = Some(c),
+                    None if c == '>' => break,
+                    None if c == '/' && src.get(k + 1) == Some(&'>') => {
+                        self_closing = true;
+                        k += 1;
+                        break;
+                    }
+                    None if c == '<' => return None,
+                    None => {}
+                }
+                k += 1;
+            }
+        }
+        Some(c) if c.is_whitespace() => {
+            while src.get(k).is_some_and(|c| c.is_whitespace()) {
+                k += 1;
+            }
+            if src.get(k) != Some(&'>') {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    Some(HtmlTag {
+        name,
+        closing,
+        self_closing,
+        end: k + 1,
+    })
+}
+
+/// One past the `-->` of the comment opening at column `i`, when `<!--`
+/// starts there and the comment closes on this line.
+pub(crate) fn html_comment_end(src: &[char], i: usize) -> Option<usize> {
+    if !starts_with(src, i, "<!--") {
+        return None;
+    }
+    let mut k = i + 4;
+    while k + 3 <= src.len() {
+        if starts_with(src, k, "-->") {
+            return Some(k + 3);
+        }
+        k += 1;
+    }
+    None
+}
+
+/// Does a `-->` start at column `k`? For a comment opened on an earlier line.
+pub(crate) fn html_comment_close_at(src: &[char], k: usize) -> bool {
+    starts_with(src, k, "-->")
+}
+
+fn starts_with(src: &[char], i: usize, s: &str) -> bool {
+    s.chars()
+        .enumerate()
+        .all(|(n, c)| src.get(i + n) == Some(&c))
+}
+
+/// Where `</name>` next appears from column `from`: the column of its `<`
+/// and one past its `>`.
+pub(crate) fn html_close_at(src: &[char], from: usize, name: &str) -> Option<(usize, usize)> {
+    (from..src.len()).find_map(|k| {
+        html_tag_at(src, k)
+            .filter(|t| t.closing && t.name == name)
+            .map(|t| (k, t.end))
+    })
+}
+
+/// The style the body of a `<name>…</name>` pair is drawn in, for the tags
+/// both views know how to draw. Sub- and superscripts change their glyphs,
+/// not their style, so they come back plain.
+pub fn html_style(name: &str, base: Style) -> Option<Style> {
+    Some(match name {
+        "kbd" => base.patch(theme::inline_code()),
+        "u" => base.add_modifier(Modifier::UNDERLINED),
+        "mark" => base.patch(theme::highlight()),
+        "sub" | "sup" => base,
+        _ => return None,
+    })
 }
 
 /// The glyph a callout type is drawn with in its title row.
@@ -2400,6 +2637,104 @@ mod tests {
         let l = style_line("a **b** c *d* `e` ==f== ~~g~~");
         assert_eq!(text(&l), "a b c d e f g");
         assert_eq!(l.one_row().display_to_source(2), 4); // "b"
+    }
+
+    #[test]
+    fn html_tags_stay_dimmed_and_a_kbd_body_reads_as_code() {
+        let l = style_line("Press <kbd>Ctrl</kbd> now");
+        assert_eq!(text(&l), "Press <kbd>Ctrl</kbd> now");
+        // the tags are kept, dimmed
+        assert_eq!(l.cells[6].style, theme::marker()); // <
+        assert_eq!(l.cells[10].style, theme::marker()); // >
+        assert_eq!(l.cells[15].style, theme::marker()); // < of </kbd>
+        // the body is inline code, and the prose around it is plain
+        assert_eq!(l.cells[11].style.fg, theme::inline_code().fg); // C
+        assert_eq!(l.cells[22].style, theme::PLAIN); // n
+        // every column is its own cell, so the cursor maps straight through
+        for col in 0..l.cells.len() {
+            assert_eq!(l.one_row().display_to_source(col), col);
+        }
+    }
+
+    #[test]
+    fn sub_and_sup_bodies_take_their_unicode_forms() {
+        let l = style_line("H<sub>2</sub>O and x<sup>(n-1)</sup>");
+        assert_eq!(text(&l), "H<sub>₂</sub>O and x<sup>⁽n⁻¹⁾</sup>");
+        // the raised digit still stands for its own source column
+        assert_eq!(l.one_row().display_to_source(6), 6);
+        let two = l.cells.iter().find(|c| c.ch == '₂').unwrap();
+        assert_eq!(two.src, 6);
+        assert_eq!(two.style, theme::PLAIN);
+    }
+
+    #[test]
+    fn u_underlines_and_mark_highlights_in_the_editor() {
+        let l = style_line("<u>under</u> <mark>lit</mark>");
+        assert_eq!(text(&l), "<u>under</u> <mark>lit</mark>");
+        let u = l.cells.iter().find(|c| c.ch == 'n').unwrap();
+        assert!(u.style.add_modifier.contains(Modifier::UNDERLINED));
+        let m = l.cells.iter().find(|c| c.ch == 'l').unwrap();
+        assert_eq!(m.style.bg, theme::highlight().bg);
+        // the tags themselves carry neither style
+        assert_eq!(l.cells[0].style, theme::marker());
+        assert_eq!(l.cells[13].style, theme::marker());
+    }
+
+    #[test]
+    fn br_is_a_return_glyph_and_a_comment_is_dimmed() {
+        let l = style_line("a<br>b <!-- hush --> c<br/>d");
+        assert_eq!(text(&l), "a↵b <!-- hush --> c↵d");
+        assert_eq!(l.one_row().display_to_source(1), 1); // ↵ is the <
+        assert_eq!(l.one_row().display_to_source(2), 5); // b
+        let hush: Vec<&Cell> = l.cells.iter().filter(|c| "<!-hush>".contains(c.ch)).collect();
+        assert!(hush.iter().all(|c| c.style == theme::marker()));
+        let d = l.cells.last().unwrap();
+        assert_eq!(d.ch, 'd');
+        assert_eq!(d.src, 27);
+    }
+
+    #[test]
+    fn an_unknown_tag_is_dimmed_and_an_unpaired_one_styles_nothing() {
+        let l = style_line("<span class=\"x\">y</span> <u>lonely");
+        assert_eq!(text(&l), "<span class=\"x\">y</span> <u>lonely");
+        assert_eq!(l.cells[0].style, theme::marker());
+        assert_eq!(l.cells[15].style, theme::marker()); // the closing >
+        assert_eq!(l.cells[16].style, theme::PLAIN); // y
+        let e = l.cells.iter().rev().find(|c| c.ch == 'e').unwrap();
+        assert!(!e.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(l.cells[25].style, theme::marker()); // < of <u>
+    }
+
+    #[test]
+    fn a_less_than_sign_is_not_a_tag() {
+        for src in ["a < b and 1<2", "x <3 y", "a <- b", "1 <= 2 <> 3"] {
+            let l = style_line(src);
+            assert_eq!(text(&l), src);
+            assert!(l.cells.iter().all(|c| c.style == theme::PLAIN), "{src}");
+        }
+    }
+
+    #[test]
+    fn html_tag_at_reads_the_grammar() {
+        let t = |s: &str| html_tag_at(&s.chars().collect::<Vec<_>>(), 0);
+        let kbd = t("<kbd>x").unwrap();
+        assert_eq!((kbd.name.as_str(), kbd.closing, kbd.end), ("kbd", false, 5));
+        let close = t("</KBD >").unwrap();
+        assert_eq!((close.name.as_str(), close.closing, close.end), ("kbd", true, 7));
+        let br = t("<br/>").unwrap();
+        assert!(br.self_closing && br.name == "br" && br.end == 5);
+        let attr = t("<a href=\"a>b\" title='c'>t</a>").unwrap();
+        assert_eq!((attr.name.as_str(), attr.end), ("a", 24));
+        assert!(t("<3").is_none());
+        assert!(t("< b>").is_none());
+        assert!(t("<b").is_none());
+        assert!(t("<a <b>").is_none());
+        assert!(t("</a b>").is_none());
+        let chars: Vec<char> = "x <!-- a -- b --> y".chars().collect();
+        assert_eq!(html_comment_end(&chars, 2), Some(17));
+        assert_eq!(html_comment_end(&chars, 0), None);
+        let open: Vec<char> = "<!-- never".chars().collect();
+        assert_eq!(html_comment_end(&open, 0), None);
     }
 
     #[test]
