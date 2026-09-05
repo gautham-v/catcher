@@ -2294,7 +2294,11 @@ impl App {
         };
         self.preview_scroll = 0;
         self.preview_hscroll = 0;
-        self.preview_goto = None;
+        // the page opens where the editor was, not at its top
+        self.preview_goto = match self.view {
+            View::Preview => Some(self.editor.scroll),
+            View::Edit => None,
+        };
     }
 
     /// Pan the page sideways, clamped to what the last draw measured. A

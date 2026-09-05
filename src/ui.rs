@@ -260,7 +260,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// The add-column `+` after every row of a table whose right edge the
+/// The add-column `+` beside the middle row of a table whose right edge the
 /// pointer is at, remembered for the click that follows. (The add-row `+`
 /// is drawn on the row under the table.)
 fn table_handle(
@@ -275,6 +275,10 @@ fn table_handle(
         return;
     };
     if block.kind != crate::md::BlockKind::Table || !app.hovered_table_right(blocks, row) {
+        return;
+    }
+    // one handle, on the table's middle row
+    if row != block.start + (block.end - block.start) / 2 {
         return;
     }
     let used = line.width();
