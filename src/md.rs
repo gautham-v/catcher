@@ -1412,6 +1412,20 @@ pub(crate) fn find_pair(src: &[char], from: usize, ch: char) -> Option<usize> {
     (from..src.len().saturating_sub(1)).find(|&k| src[k] == ch && src[k + 1] == ch)
 }
 
+/// If column `i` opens a span nothing inline is read from — a closed
+/// `` `code` `` span, a backslash escape, a closed `%% comment %%` — the
+/// column just past it. The line scanners for tags, wikilinks and footnotes
+/// all step over the same set, so none of them finds a thing the others (or
+/// the reading view) would not.
+fn skip_inert(src: &[char], i: usize) -> Option<usize> {
+    match src[i] {
+        '`' => find(src, i + 1, '`').map(|end| end + 1),
+        '\\' => Some(i + 2),
+        '%' if src.get(i + 1) == Some(&'%') => find_pair(src, i + 2, '%').map(|end| end + 2),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tags
 //
@@ -1466,13 +1480,11 @@ pub fn tags_in(line: &str) -> Vec<(usize, usize)> {
     let mut found = Vec::new();
     let mut i = 0;
     while i < src.len() {
+        if let Some(next) = skip_inert(&src, i) {
+            i = next;
+            continue;
+        }
         match src[i] {
-            '`' => {
-                if let Some(end) = find(&src, i + 1, '`') {
-                    i = end + 1;
-                    continue;
-                }
-            }
             '[' => {
                 // a [[wikilink]] is one thing, the way `link_at` and the
                 // styling take it: `[[#heading]]` names a heading, not a tag
@@ -1823,6 +1835,10 @@ pub fn wikilinks(line: &str) -> Vec<Wikilink> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < src.len() {
+        if let Some(next) = skip_inert(&src, i) {
+            i = next;
+            continue;
+        }
         match wikilink_at(&src, i) {
             // past the whole span, so `[[a]] [[b]]` is two links and the
             // brackets of the first can never start a third
@@ -2719,25 +2735,13 @@ pub fn footnote_refs(line: &str) -> Vec<FootnoteRef> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < src.len() {
-        let c = src[i];
-        if c == '`' {
-            if let Some(end) = find(&src, i + 1, '`') {
-                i = end + 1;
-                continue;
-            }
-        }
-        // an escaped `\[^1]` or `\^[note]` is text, not a footnote
-        if c == '\\' {
-            i += 2;
+        // an escaped `\[^1]`, a code span or a `%% comment %%` is text, not
+        // a footnote
+        if let Some(next) = skip_inert(&src, i) {
+            i = next;
             continue;
         }
-        // a `%% comment %%` is not on the page, so nothing in it is numbered
-        if c == '%' && src.get(i + 1) == Some(&'%') {
-            if let Some(end) = find_pair(&src, i + 2, '%') {
-                i = end + 2;
-                continue;
-            }
-        }
+        let c = src[i];
         if c == '[' && src.get(i + 1) == Some(&'^') {
             if let Some(close) = find(&src, i + 2, ']') {
                 let label = &src[i + 2..close];
@@ -2773,13 +2777,19 @@ pub fn footnote_refs(line: &str) -> Vec<FootnoteRef> {
     out
 }
 
-/// The number the first footnote reference on line `row` gets: one more than
-/// the references on the lines above it, fenced code left out.
-pub fn footnote_ordinal(lines: &[String], row: usize) -> usize {
+/// The number the first footnote reference on each line would get: one more
+/// than the references on the lines above it, with fenced code and `%%`
+/// block comments left out. One entry per line, plus a last one for the
+/// count after the final line. Both the editor and the reading view number
+/// from this, so a footnote is never two different numbers.
+pub fn footnote_counts<S: AsRef<str>>(lines: &[S]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(lines.len() + 1);
     let mut n = 1;
     let mut fenced = false;
     let mut commented = false;
-    for (i, line) in lines.iter().enumerate().take(row) {
+    for (i, line) in lines.iter().enumerate() {
+        let line = line.as_ref();
+        out.push(n);
         if is_fence(line) {
             fenced = !fenced;
             continue;
@@ -2788,16 +2798,24 @@ pub fn footnote_ordinal(lines: &[String], row: usize) -> usize {
         // an unclosed one is text, so only a `%%` with a partner opens one
         if !fenced
             && line.trim() == "%%"
-            && (commented || lines[i + 1..].iter().any(|l| l.trim() == "%%"))
+            && (commented || lines[i + 1..].iter().any(|l| l.as_ref().trim() == "%%"))
         {
             commented = !commented;
             continue;
         }
-        if !fenced && !commented {
+        if !fenced && !commented && (line.contains("[^") || line.contains("^[")) {
             n += footnote_refs(line).len();
         }
     }
-    n
+    out.push(n);
+    out
+}
+
+/// The number the first footnote reference on line `row` gets: one more than
+/// the references on the lines above it, fenced code left out.
+pub fn footnote_ordinal(lines: &[String], row: usize) -> usize {
+    let counts = footnote_counts(lines);
+    counts[row.min(counts.len() - 1)]
 }
 
 /// `footnote_ordinal`, but only paid for when `src` — the text about to be
@@ -2839,7 +2857,7 @@ pub fn callout_glyph(kind: &str) -> Option<char> {
 
 /// `[!type] Title` at the start of `rest` (a quote line's body, bars
 /// stripped): the type, the title, and the char index the title starts at.
-fn callout_title(chars: &[char], i: usize) -> Option<(String, usize, usize)> {
+pub(crate) fn callout_title(chars: &[char], i: usize) -> Option<(String, usize, usize)> {
     if chars.get(i) != Some(&'[') || chars.get(i + 1) != Some(&'!') {
         return None;
     }
@@ -3869,7 +3887,7 @@ pub(crate) fn split_row(src: &str) -> (Vec<TCell>, Vec<usize>) {
     (cells, pipes)
 }
 
-fn align_of(spec: &str) -> Align {
+pub(crate) fn align_of(spec: &str) -> Align {
     let t = spec.trim();
     match (t.starts_with(':'), t.ends_with(':')) {
         (true, true) => Align::Center,
@@ -4593,6 +4611,22 @@ mod tests {
         assert_eq!(footnote_ordinal(&lines, 3), 1);
         let lines: Vec<String> = ["%%", "^[shown]", "A^[two]"].iter().map(|s| s.to_string()).collect();
         assert_eq!(footnote_ordinal(&lines, 2), 2);
+    }
+
+    #[test]
+    fn inert_spans_hide_tags_and_wikilinks() {
+        assert!(tags_in("%% #hidden %% text").is_empty());
+        assert_eq!(tags_in("%% #a %% #b"), vec![(9, 11)]);
+        assert!(tags_in("\\#escaped").is_empty());
+        assert!(wikilinks("`[[code]]` text").is_empty());
+        assert!(wikilinks("%% [[hidden]] %%").is_empty());
+        assert_eq!(wikilinks("`[[a]]` [[b]]").len(), 1);
+    }
+
+    #[test]
+    fn footnote_counts_number_every_line() {
+        let lines = ["a^[1]", "```", "^[x]", "```", "%%", "^[y]", "%%", "b[^z]", "c"];
+        assert_eq!(footnote_counts(&lines), vec![1, 2, 2, 2, 2, 2, 2, 2, 3, 3]);
     }
 
     #[test]

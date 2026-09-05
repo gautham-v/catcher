@@ -231,24 +231,22 @@ fn inline_footnotes(markdown: &str) -> (String, Vec<InlineNote>) {
     let mut out = String::with_capacity(markdown.len());
     let mut notes: Vec<InlineNote> = Vec::new();
     let mut bodies: Vec<&str> = Vec::new();
-    let mut ordinal = 1;
-    let mut fenced = false;
-    for raw in markdown.split_inclusive('\n') {
-        let line = raw.trim_end_matches('\n').trim_end_matches('\r');
-        if crate::md::is_fence(line) {
-            fenced = !fenced;
-        }
-        let refs = if fenced || !line.contains("^[") {
+    let lines: Vec<&str> = markdown
+        .split_inclusive('\n')
+        .map(|raw| raw.trim_end_matches('\n').trim_end_matches('\r'))
+        .collect();
+    let counts = crate::md::footnote_counts(&lines);
+    for (row, raw) in markdown.split_inclusive('\n').enumerate() {
+        let line = lines[row];
+        let mut ordinal = counts[row];
+        // a line the count skipped — fenced, commented, or without a `^[` —
+        // has nothing to rewrite
+        let refs = if counts[row + 1] == ordinal || !line.contains("^[") {
             Vec::new()
         } else {
             crate::md::footnote_refs(line)
         };
         if refs.is_empty() {
-            ordinal += if fenced || !line.contains("[^") {
-                0
-            } else {
-                crate::md::footnote_refs(line).len()
-            };
             out.push_str(raw);
             continue;
         }
@@ -2459,18 +2457,12 @@ fn callout_at(src: &str, start: usize) -> Option<(String, String, Option<char>, 
     let rest = src.get(start..)?;
     let line_end = rest.find('\n').map_or(rest.len(), |i| i + 1);
     let line = &rest[..line_end];
-    let body = line.trim_start_matches(['>', ' ', '\t']);
-    let inner = body.strip_prefix("[!")?;
-    let close = inner.find(']')?;
-    let kind = inner[..close].trim();
-    if kind.is_empty() || kind.chars().any(|c| c.is_whitespace()) {
-        return None;
-    }
-    let rest = &inner[close + 1..];
-    let marker = rest.chars().next().filter(|c| matches!(c, '-' | '+'));
-    let after = rest.trim_start_matches(['-', '+']);
-    let title = after.trim().to_string();
-    Some((kind.to_lowercase(), title, marker, start + line_end))
+    let chars: Vec<char> = line.trim_start_matches(['>', ' ', '\t']).chars().collect();
+    // the editor's rule, so the two views never disagree about a title
+    let (kind, after, title) = crate::md::callout_title(&chars, 0)?;
+    let marker = chars.get(after).copied().filter(|c| matches!(c, '-' | '+'));
+    let title: String = chars[title..].iter().collect();
+    Some((kind, title.trim().to_string(), marker, start + line_end))
 }
 
 /// pulldown's alignment in the shared vocabulary.

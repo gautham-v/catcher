@@ -55,7 +55,7 @@ impl Table {
         for r in &mut rows {
             r.resize(cols, String::new());
         }
-        let mut aligns: Vec<Align> = rule.iter().map(|c| align_of(&c.text)).collect();
+        let mut aligns: Vec<Align> = rule.iter().map(|c| md::align_of(&c.text)).collect();
         aligns.resize(cols, Align::Left);
         Some(Table { rows, head, aligns })
     }
@@ -391,15 +391,6 @@ pub fn parse_tsv(text: &str) -> Vec<Vec<String>> {
                 .collect()
         })
         .collect()
-}
-
-fn align_of(spec: &str) -> Align {
-    let t = spec.trim();
-    match (t.starts_with(':'), t.ends_with(':')) {
-        (true, true) => Align::Center,
-        (false, true) => Align::Right,
-        _ => Align::Left,
-    }
 }
 
 /// Which cell of a source row column `col` is in, or would be: the index of
