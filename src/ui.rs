@@ -1,4 +1,4 @@
-use crate::app::{App, EditRow, Item, Overlay, PageRow, PreviewPage, QuickTab, View};
+use crate::app::{App, EditRow, Item, Overlay, PageRow, PreviewPage, QuickTab, TableEdge, View};
 use crate::config::BorderStyle;
 use crate::md::truncate;
 use crate::theme;
@@ -180,7 +180,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                 // of: one row before the table's own, a grip over each column
                 let mut y = y;
                 let mut h = *h;
-                if app.hovered_table_top(&blocks, *row) && h > 1 {
+                if app.hovered_table_edge(&blocks, *row, TableEdge::Top) && h > 1 {
                     let block = *crate::md::block_at(&blocks, *row).expect("a table row");
                     let raw = Some(app.editor.cursor.0)
                         .filter(|c| block.contains(*c))
@@ -290,7 +290,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                     line.spans.insert(0, Span::raw(" ".repeat(crate::app::TABLE_GUTTER)));
                     // the add-column handle, when the table's middle is this rule
                     let mut handle = None;
-                    if app.hovered_table_right(&blocks, *row)
+                    if app.hovered_table_edge(&blocks, *row, TableEdge::Right)
                         && table_middle(app, &blocks, &block) == (*row, true)
                     {
                         let used_w = line.width();
@@ -302,7 +302,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                     }
                     extra(app, line, handle);
                 }
-                if app.hovered_table_end(&blocks, *row) {
+                if app.hovered_table_edge(&blocks, *row, TableEdge::Bottom) {
                     // centred under the columns, gutter and all
                     let block = *crate::md::block_at(&blocks, *row).expect("a table row");
                     let raw = Some(app.editor.cursor.0)
@@ -380,7 +380,7 @@ fn table_handle(
     let Some(block) = crate::md::block_at(blocks, row) else {
         return;
     };
-    if block.kind != crate::md::BlockKind::Table || !app.hovered_table_right(blocks, row) {
+    if block.kind != crate::md::BlockKind::Table || !app.hovered_table_edge(blocks, row, TableEdge::Right) {
         return;
     }
     // one handle, on the row at the middle of the drawn table, rules
@@ -444,8 +444,8 @@ fn row_height(
     // a table row carries the rule under it, and the last row of a table
     // whose bottom edge the pointer is at carries the add-row handle
     let extra = usize::from(app.table_rule_under(blocks, row))
-        + usize::from(app.hovered_table_end(blocks, row))
-        + usize::from(app.hovered_table_top(blocks, row))
+        + usize::from(app.hovered_table_edge(blocks, row, TableEdge::Bottom))
+        + usize::from(app.hovered_table_edge(blocks, row, TableEdge::Top))
         + app.callout_close_rows(blocks, row, width.max(1) as usize).len()
         + app.embed_rows(blocks, row, width.max(1) as usize).len();
     ((rows.max(1) + extra) as u16, None)

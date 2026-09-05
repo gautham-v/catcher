@@ -428,6 +428,12 @@ pub fn cell_span(line: &str, i: usize) -> Option<(usize, usize)> {
     cells.get(i).map(|c| (c.start, c.end()))
 }
 
+/// The source column at the end of cell `c`'s text on `line`, where the
+/// cursor lands when it moves into the cell; 0 when there is no such cell.
+pub fn cell_end(line: &str, c: usize) -> usize {
+    cell_span(line, c).map_or(0, |(_, e)| e)
+}
+
 /// Where the cursor settles on a grid row: inside the cell it is in, or at
 /// the edge of the nearest one when it has drifted into a pipe or padding.
 /// `forward` says which neighbour wins from a gap.
@@ -570,6 +576,9 @@ mod tests {
         let l = "| ab |  cd | ";
         assert_eq!(cell_span(l, 0), Some((2, 4)));
         assert_eq!(cell_span(l, 1), Some((8, 10)));
+        assert_eq!(cell_end(l, 0), 4);
+        assert_eq!(cell_end(l, 1), 10);
+        assert_eq!(cell_end(l, 2), 0);
         assert_eq!(settle(l, 3, true), 3);
         assert_eq!(settle(l, 0, true), 2);
         assert_eq!(settle(l, 6, true), 8);

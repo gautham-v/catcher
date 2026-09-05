@@ -1898,14 +1898,20 @@ impl App {
         None
     }
 
-    /// Is `row` the first line of the table the pointer is above, so the
-    /// column grips are drawn over it?
-    pub fn hovered_table_top(&self, blocks: &[md::Block], row: usize) -> bool {
+    /// Is the pointer at `edge` of the table `row` is in? `Top` only holds
+    /// on the table's first line (the column grips are drawn over it) and
+    /// `Bottom` only on its last; `Right` on every row of it (the
+    /// add-column handle).
+    pub fn hovered_table_edge(&self, blocks: &[md::Block], row: usize, edge: TableEdge) -> bool {
         self.view == View::Edit
             && md::block_at(blocks, row).is_some_and(|b| {
                 b.kind == md::BlockKind::Table
-                    && b.start == row
-                    && self.table_hover == Some((b.start, TableEdge::Top))
+                    && match edge {
+                        TableEdge::Top => b.start == row,
+                        TableEdge::Bottom => b.end == row,
+                        _ => true,
+                    }
+                    && self.table_hover == Some((b.start, edge))
             })
     }
 
@@ -1946,9 +1952,7 @@ impl App {
             .editor
             .lines()
             .get(src)
-            .and_then(|l| crate::table::cell_span(l, c))
-            .map(|(_, e)| e)
-            .unwrap_or(0);
+            .map_or(0, |l| crate::table::cell_end(l, c));
         self.editor.clear_selection();
         self.editor.set_cursor((src, col));
     }
@@ -3137,13 +3141,9 @@ impl App {
             return;
         }
         // ⏎ with a modifier on a ^O row opens the note beside this one; it
-        // must get there before the keymap, where ⌥⏎ is follow-link
-        if self.overlay == Overlay::QuickOpen && key.code == KeyCode::Enter {
-            self.on_palette_key(key);
-            return;
-        }
-        // and ⌥⏎ on an outline row folds it, for the same reason
-        if self.overlay == Overlay::Outline && key.code == KeyCode::Enter {
+        // must get there before the keymap, where ⌥⏎ is follow-link; and
+        // ⌥⏎ on an outline row folds it, for the same reason
+        if matches!(self.overlay, Overlay::QuickOpen | Overlay::Outline) && key.code == KeyCode::Enter {
             self.on_palette_key(key);
             return;
         }
@@ -3255,36 +3255,20 @@ impl App {
     /// acts on. `None` outside a table, on its separator, or while the
     /// table's source is showing.
     pub fn table_cell(&self) -> Option<(md::Block, crate::table::Table, usize, usize)> {
-        let (row, col) = self.editor.cursor;
+        self.table_cell_at(self.editor.cursor)
+            .filter(|(block, ..)| self.table_source != Some(block.start))
+    }
+
+    /// The table block at `pos`, parsed, with `pos`'s row and column in its
+    /// matrix. `None` outside a table or on its separator.
+    fn table_cell_at(&self, (row, col): (usize, usize)) -> Option<(md::Block, crate::table::Table, usize, usize)> {
         let blocks = self.blocks();
-        let block = *md::block_at(&blocks, row)?;
-        if block.kind != md::BlockKind::Table || self.table_source == Some(block.start) {
-            return None;
-        }
+        let block = *md::block_at(&blocks, row).filter(|b| b.kind == md::BlockKind::Table)?;
         let lines = self.editor.lines();
         let table = crate::table::Table::parse(&lines[block.start..=block.end])?;
         let r = table.row_of(row - block.start)?;
         let c = crate::table::cell_at(&lines[row], col, true)?;
         Some((block, table, r, c))
-    }
-
-    /// Is `row` the last line of the table the pointer is over?
-    pub fn hovered_table_end(&self, blocks: &[md::Block], row: usize) -> bool {
-        self.view == View::Edit
-            && md::block_at(blocks, row).is_some_and(|b| {
-                b.kind == md::BlockKind::Table
-                    && b.end == row
-                    && self.table_hover == Some((b.start, TableEdge::Bottom))
-            })
-    }
-
-    /// Is `row` a table row the pointer is right of, so it carries the
-    /// add-column handle?
-    pub fn hovered_table_right(&self, blocks: &[md::Block], row: usize) -> bool {
-        self.view == View::Edit
-            && md::block_at(blocks, row).is_some_and(|b| {
-                b.kind == md::BlockKind::Table && self.table_hover == Some((b.start, TableEdge::Right))
-            })
     }
 
     /// The bottom edges drawn under `row`: one for every callout card whose
@@ -3502,9 +3486,7 @@ impl App {
             return;
         };
         let src = block.start + table.src_row(nr);
-        let col = crate::table::cell_span(&self.editor.lines()[src], nc)
-            .map(|(_, e)| e)
-            .unwrap_or(0);
+        let col = crate::table::cell_end(&self.editor.lines()[src], nc);
         self.editor.set_cursor((src, col));
     }
 
@@ -3560,9 +3542,7 @@ impl App {
         let src = block.start + table.src_row(r);
         let col = lines
             .get(table.src_row(r))
-            .and_then(|l| crate::table::cell_span(l, c))
-            .map(|(_, e)| e)
-            .unwrap_or(0);
+            .map_or(0, |l| crate::table::cell_end(l, c));
         self.editor.replace_lines(block.start, block.end, lines, (src, col));
         self.sync_editor_to_note();
     }
@@ -3923,33 +3903,44 @@ impl App {
             KeyCode::Esc => self.overlay = Overlay::None,
             KeyCode::Right if tree => self.browse_right(),
             KeyCode::Left if tree => self.browse_left(),
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => {
-                // the row count is only ever wanted here, and asking for it
-                // builds every row of the overlay — in browse mode the whole
-                // tree — so a typed character must not pay for one
-                let count = self.overlay_items().len();
-                if count > 0 && self.selected + 1 < count {
-                    self.selected += 1;
-                }
-            }
+            KeyCode::Up => self.select_step(-1),
+            KeyCode::Down => self.select_step(1),
             KeyCode::Enter => {
                 if let Some(item) = self.overlay_items().get(self.selected).cloned() {
-                    match beside_place(key.modifiers) {
-                        Some(place) if self.overlay == Overlay::QuickOpen => {
-                            self.run_item_beside(item, place)
-                        }
-                        // ⌥⏎ on a heading folds it and leaves the picker up
-                        Some(_) if self.overlay == Overlay::Outline => {
-                            if let Item::Heading(line) = item {
-                                self.toggle_outline_fold(line);
-                            }
-                        }
-                        _ => self.run_item(item),
-                    }
+                    self.activate_item(item, key.modifiers);
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Move the overlay's selection by `delta` rows, clamped to the list.
+    fn select_step(&mut self, delta: isize) {
+        if delta < 0 {
+            self.selected = self.selected.saturating_sub(1);
+        } else {
+            // the row count is only ever wanted here, and asking for it
+            // builds every row of the overlay — in browse mode the whole
+            // tree — so a typed character must not pay for one
+            let count = self.overlay_items().len();
+            if count > 0 && self.selected + 1 < count {
+                self.selected += 1;
+            }
+        }
+    }
+
+    /// ⏎ or a click on an overlay row: with a beside modifier a ^O row opens
+    /// the note in a new split or tab, and an outline heading folds and
+    /// leaves the picker up; otherwise the row runs.
+    fn activate_item(&mut self, item: Item, modifiers: KeyModifiers) {
+        match beside_place(modifiers) {
+            Some(place) if self.overlay == Overlay::QuickOpen => self.run_item_beside(item, place),
+            Some(_) if self.overlay == Overlay::Outline => {
+                if let Item::Heading(line) = item {
+                    self.toggle_outline_fold(line);
+                }
+            }
+            _ => self.run_item(item),
         }
     }
 
@@ -4676,14 +4667,7 @@ impl App {
     fn on_wheel(&mut self, delta: isize) {
         match (self.overlay, self.view) {
             (Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile | Overlay::Outline, _) => {
-                if delta < 0 {
-                    self.selected = self.selected.saturating_sub(1);
-                } else {
-                    let count = self.overlay_items().len();
-                    if count > 0 && self.selected + 1 < count {
-                        self.selected += 1;
-                    }
-                }
+                self.select_step(delta)
             }
             (_, View::Preview) => {
                 let n = delta.unsigned_abs() as u16;
@@ -4717,18 +4701,7 @@ impl App {
                 .find(|(r, _)| r.contains(ratatui::layout::Position { x, y }))
                 .cloned()
             {
-                match beside_place(modifiers) {
-                    Some(place) if self.overlay == Overlay::QuickOpen => {
-                        self.run_item_beside(item, place)
-                    }
-                    // ⌥click on a heading folds it, as ⌥⏎ does
-                    Some(_) if self.overlay == Overlay::Outline => {
-                        if let Item::Heading(line) = item {
-                            self.toggle_outline_fold(line);
-                        }
-                    }
-                    _ => self.run_item(item),
-                }
+                self.activate_item(item, modifiers);
             } else if !self
                 .overlay_rect
                 .contains(ratatui::layout::Position { x, y })
@@ -4807,16 +4780,7 @@ impl App {
             return;
         };
         let pos = self.pos_at(x, y);
-        let blocks = self.blocks();
-        let lines = self.editor.lines();
-        let here = md::block_at(&blocks, pos.0)
-            .filter(|b| b.start == start)
-            .and_then(|b| {
-                let t = crate::table::Table::parse(&lines[b.start..=b.end])?;
-                let r = t.row_of(pos.0 - b.start)?;
-                let c = crate::table::cell_at(&lines[pos.0], pos.1, true)?;
-                Some((*b, t, r, c))
-            });
+        let here = self.table_cell_at(pos).filter(|(b, ..)| b.start == start);
         match here {
             Some((b, t, r, c)) if (r, c) != from => {
                 self.cell_sel = Some(CellSel {
