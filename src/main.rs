@@ -19,6 +19,7 @@ mod mermaid;
 mod notes;
 mod render;
 mod search;
+mod table;
 mod terminal;
 mod theme;
 #[cfg(test)]

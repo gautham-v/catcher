@@ -236,6 +236,35 @@ impl Editor {
         }
     }
 
+    /// Replace lines `from..=to` with `with`, as one undo step; the cursor
+    /// goes to `cursor`. What a table operation does to its block.
+    pub fn replace_lines(&mut self, from: usize, to: usize, with: Vec<String>, cursor: Pos) {
+        if from > to || to >= self.lines.len() {
+            return;
+        }
+        self.record(EditKind::Other);
+        self.lines.splice(from..=to, with);
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.anchor = None;
+        self.cursor = self.clamp(cursor);
+        self.follow_cursor = true;
+        self.last_kind = None;
+    }
+
+    /// Insert `with` before line `at` (or at the end when `at` is past the
+    /// last line), as one undo step; the cursor goes to `cursor`.
+    pub fn insert_lines(&mut self, at: usize, with: Vec<String>, cursor: Pos) {
+        self.record(EditKind::Other);
+        let at = at.min(self.lines.len());
+        self.lines.splice(at..at, with);
+        self.anchor = None;
+        self.cursor = self.clamp(cursor);
+        self.follow_cursor = true;
+        self.last_kind = None;
+    }
+
     /// Swap the whole buffer for `content` as a single undo step: what a
     /// reload after another program wrote the file does. The cursor stays on
     /// its line number, clamped to the new length, and the scroll is left

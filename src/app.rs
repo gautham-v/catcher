@@ -35,6 +35,13 @@ pub fn best_title_match(notes: &[Note], name: &str) -> Option<usize> {
         .map(|(_, i)| i)
 }
 
+/// The two handles drawn beside a hovered table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableHandle {
+    AddColumn,
+    AddRow,
+}
+
 /// One drawn display row of the editor: which source line it belongs to, and
 /// which of that line's soft-wrapped rows it is.
 #[derive(Clone, Copy, Debug)]
@@ -104,9 +111,32 @@ pub enum Command {
     SplitRight,
     SplitDown,
     NewTab,
+    InsertTable,
+    Table(crate::table::Op),
+    TableSource,
 }
 
-const COMMANDS: [Command; 25] = [
+/// The palette's row and column commands, in the order they are listed.
+const TABLE_OPS: [crate::table::Op; 13] = {
+    use crate::table::Op;
+    [
+        Op::RowAbove,
+        Op::RowBelow,
+        Op::RowDelete,
+        Op::RowDuplicate,
+        Op::ColLeft,
+        Op::ColRight,
+        Op::ColDelete,
+        Op::ColMoveLeft,
+        Op::ColMoveRight,
+        Op::ColDuplicate,
+        Op::AlignLeft,
+        Op::AlignCenter,
+        Op::AlignRight,
+    ]
+};
+
+const COMMANDS: [Command; 26] = [
     Command::NewNote,
     Command::DailyNote,
     Command::QuickOpen,
@@ -132,6 +162,7 @@ const COMMANDS: [Command; 25] = [
     Command::SplitRight,
     Command::SplitDown,
     Command::NewTab,
+    Command::InsertTable,
 ];
 
 impl Command {
@@ -140,7 +171,10 @@ impl Command {
     pub fn action(&self) -> Option<Action> {
         Some(match self {
             // palette-only: a move is rare enough that it earns no key
-            Command::MoveFile => return None,
+            Command::MoveFile
+            | Command::InsertTable
+            | Command::Table(_)
+            | Command::TableSource => return None,
             Command::NewNote => Action::NewNote,
             Command::DailyNote => Action::DailyNote,
             Command::QuickOpen => Action::QuickOpen,
@@ -195,6 +229,26 @@ impl Command {
             Command::SplitRight => ("Open in split right", "this note again, beside this one"),
             Command::SplitDown => ("Open in split down", "this note again, below this one"),
             Command::NewTab => ("Open in new tab", "this note again, in a terminal tab"),
+            Command::InsertTable => ("Table: Insert table", "a 2×2 grid at the cursor"),
+            Command::TableSource => ("Table: Edit source", "the pipes, until the cursor leaves"),
+            Command::Table(op) => {
+                use crate::table::Op;
+                match op {
+                    Op::RowAbove => ("Table: Add row above", "an empty row over this one"),
+                    Op::RowBelow => ("Table: Add row below", "an empty row under this one"),
+                    Op::RowDelete => ("Table: Delete row", "this row"),
+                    Op::RowDuplicate => ("Table: Duplicate row", "this row again, under it"),
+                    Op::ColLeft => ("Table: Add column to the left", "an empty column before this one"),
+                    Op::ColRight => ("Table: Add column to the right", "an empty column after this one"),
+                    Op::ColDelete => ("Table: Delete column", "this column"),
+                    Op::ColMoveLeft => ("Table: Move column left", "swap with the column before"),
+                    Op::ColMoveRight => ("Table: Move column right", "swap with the column after"),
+                    Op::ColDuplicate => ("Table: Duplicate column", "this column again, after it"),
+                    Op::AlignLeft => ("Table: Align left", "this column"),
+                    Op::AlignCenter => ("Table: Align center", "this column"),
+                    Op::AlignRight => ("Table: Align right", "this column"),
+                }
+            }
         }
     }
 }
@@ -210,6 +264,9 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⌥⌫", "delete the word before the cursor"),
             ("⌘⌫", "delete to the start of the line"),
             ("tab", "indent (tab_width spaces)"),
+            ("tab / ⇧tab", "in a table: next / previous cell; past the last, a new row"),
+            ("↵", "in a table: a row below"),
+            ("esc", "in a table: show its source, and back"),
         ],
     ),
     (
@@ -375,6 +432,14 @@ pub struct App {
     /// The picture taking the whole terminal, if one is: its URL as written.
     pub zoom: Option<String>,
     pub preview_checkboxes: Vec<(Rect, usize)>,
+    /// The table block (by its first line) showing its raw pipes while the
+    /// cursor is in it, rather than the grid.
+    pub table_source: Option<usize>,
+    /// The table block the pointer is over in the editor, for the add-row
+    /// and add-column handles.
+    pub table_hover: Option<usize>,
+    /// The handles the last draw put beside a hovered table.
+    pub table_handles: Vec<(Rect, TableHandle)>,
     /// Every row the last draw put on screen, in order.
     pub preview_rows: Vec<PreviewRow>,
     pub images: Images,
@@ -657,6 +722,9 @@ impl App {
             preview_image_urls: Vec::new(),
             zoom: None,
             preview_checkboxes: Vec::new(),
+            table_source: None,
+            table_hover: None,
+            table_handles: Vec::new(),
             preview_rows: Vec::new(),
             dragging: false,
             open_index: Vec::new(),
@@ -1358,6 +1426,27 @@ impl App {
     /// boxes the last draw cached, and touches no file. The read happens in
     /// [`Self::maybe_peek`] once the pointer has rested for [`PEEK_DWELL`].
     fn on_hover(&mut self, x: u16, y: u16) {
+        if self.view == View::Edit && self.overlay == Overlay::None {
+            // over a table's rows, or its handles, the handles show
+            let on_handle = self
+                .table_handles
+                .iter()
+                .any(|(r, _)| r.contains(ratatui::layout::Position { x, y }));
+            let line = self
+                .edit_rows
+                .iter()
+                .find(|r| y >= r.rect.y && y < r.rect.y + r.rect.height)
+                .map(|r| r.line);
+            let blocks = self.blocks();
+            let over = line
+                .and_then(|l| md::block_at(&blocks, l))
+                .filter(|b| b.kind == md::BlockKind::Table)
+                .map(|b| b.start);
+            if !(on_handle && over.is_none()) {
+                self.table_hover = over;
+            }
+            return;
+        }
         if self.view != View::Preview || self.overlay != Overlay::None {
             return;
         }
@@ -1966,7 +2055,14 @@ impl App {
     /// live behind ^O, the way Obsidian keeps them out of its palette too.
     pub fn palette_items(&self) -> Vec<Item> {
         let mut scored: Vec<(i64, Item)> = Vec::new();
-        for c in COMMANDS {
+        let mut commands: Vec<Command> = COMMANDS.to_vec();
+        // the row and column commands only mean something with the cursor
+        // in a table, so that is the only time they are offered
+        if self.view == View::Edit && self.table_cell().is_some() {
+            commands.extend(TABLE_OPS.iter().map(|op| Command::Table(*op)));
+            commands.push(Command::TableSource);
+        }
+        for c in commands {
             if let Some(s) = search::fuzzy(&self.query, c.label().0) {
                 scored.push((s, Item::Command(c)));
             }
@@ -2062,6 +2158,9 @@ impl App {
             Item::Folder(_) | Item::Notice => {}
             // palette-only: the one command without a key
             Item::Command(Command::MoveFile) => self.open_move(),
+            Item::Command(Command::InsertTable) => self.insert_table(),
+            Item::Command(Command::Table(op)) => self.table_op(op),
+            Item::Command(Command::TableSource) => self.toggle_table_source(),
             // the rest are plain actions: one path, whether by key or palette;
             // the overlay is already closed, so the toggling ones just open
             Item::Command(c) => {
@@ -2310,7 +2409,12 @@ impl App {
             .modifiers
             .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT);
         let select = key.modifiers.contains(KeyModifiers::SHIFT);
-        let before = self.editor.cursor.0;
+        let before = self.editor.cursor;
+        if self.table_key(key) {
+            self.settle_table_cursor(before);
+            self.leave_folds(before.0);
+            return;
+        }
         match key.code {
             KeyCode::Up if plain => self.move_vertical(false, select),
             KeyCode::Down if plain => self.move_vertical(true, select),
@@ -2320,7 +2424,238 @@ impl App {
                 }
             }
         }
-        self.leave_folds(before);
+        self.settle_table_cursor(before);
+        self.leave_folds(before.0);
+    }
+
+    /// The table block the cursor is in while it is drawn as a grid, with the
+    /// cursor's row and column in the grid's matrix: what every table command
+    /// acts on. `None` outside a table, on its separator, or while the
+    /// table's source is showing.
+    pub fn table_cell(&self) -> Option<(md::Block, crate::table::Table, usize, usize)> {
+        let (row, col) = self.editor.cursor;
+        let blocks = self.blocks();
+        let block = *md::block_at(&blocks, row)?;
+        if block.kind != md::BlockKind::Table || self.table_source == Some(block.start) {
+            return None;
+        }
+        let lines = self.editor.lines();
+        let table = crate::table::Table::parse(&lines[block.start..=block.end])?;
+        let r = table.row_of(row - block.start)?;
+        let c = crate::table::cell_at(&lines[row], col, true)?;
+        Some((block, table, r, c))
+    }
+
+    /// Is the cursor in a table drawn as a grid?
+    fn in_table_grid(&self) -> bool {
+        let row = self.editor.cursor.0;
+        let blocks = self.blocks();
+        md::block_at(&blocks, row).is_some_and(|b| {
+            b.kind == md::BlockKind::Table && self.table_source != Some(b.start)
+        })
+    }
+
+    /// The keys that mean something else with the cursor in a grid: tab and
+    /// enter walk and grow the table, esc shows its source, and a delete at a
+    /// cell's edge is refused rather than allowed to eat a pipe. Returns true
+    /// when the key was taken.
+    fn table_key(&mut self, key: KeyEvent) -> bool {
+        let (row, col) = self.editor.cursor;
+        // esc works both ways: grid to source, and source back to grid
+        if key.code == KeyCode::Esc && self.editor.selection().is_none() {
+            let blocks = self.blocks();
+            if md::block_at(&blocks, row).is_some_and(|b| b.kind == md::BlockKind::Table) {
+                self.toggle_table_source();
+                return true;
+            }
+        }
+        if !self.in_table_grid() {
+            return false;
+        }
+        let modified = key
+            .modifiers
+            .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Tab if !modified => {
+                self.table_step(true);
+                true
+            }
+            KeyCode::BackTab => {
+                self.table_step(false);
+                true
+            }
+            KeyCode::Enter if !modified => {
+                self.table_op(crate::table::Op::RowBelow);
+                true
+            }
+            KeyCode::Backspace | KeyCode::Delete => {
+                let line = &self.editor.lines()[row];
+                let Some(i) = crate::table::cell_at(line, col, true) else {
+                    return true;
+                };
+                let (start, end) = crate::table::cell_span(line, i).unwrap_or((col, col));
+                let at_edge = if key.code == KeyCode::Backspace {
+                    col <= start
+                } else {
+                    col >= end
+                };
+                // a modified delete reaches past the cell; a plain one at
+                // the edge has nothing in the cell to take
+                if modified || at_edge {
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Tab / shift-tab in a grid: the next or previous cell, and past the
+    /// last cell a new row.
+    fn table_step(&mut self, forward: bool) {
+        let Some((block, mut table, r, c)) = self.table_cell() else {
+            return;
+        };
+        let cols = table.cols();
+        let (nr, nc) = if forward {
+            if c + 1 < cols {
+                (r, c + 1)
+            } else if r + 1 < table.rows.len() {
+                (r + 1, 0)
+            } else {
+                let Some(to) = table.apply(crate::table::Op::RowBelow, r, 0) else {
+                    return;
+                };
+                self.write_table(block, &table, to);
+                return;
+            }
+        } else if c > 0 {
+            (r, c - 1)
+        } else if r > 0 {
+            (r - 1, cols - 1)
+        } else {
+            return;
+        };
+        let src = block.start + table.src_row(nr);
+        let col = crate::table::cell_span(&self.editor.lines()[src], nc)
+            .map(|(_, e)| e)
+            .unwrap_or(0);
+        self.editor.set_cursor((src, col));
+    }
+
+    /// One of the palette's row or column commands on the cursor's cell.
+    fn table_op(&mut self, op: crate::table::Op) {
+        self.enter_edit_view();
+        let Some((block, mut table, r, c)) = self.table_cell() else {
+            self.flash("not in a table".to_string());
+            return;
+        };
+        match table.apply(op, r, c) {
+            Some(to) => self.write_table(block, &table, to),
+            None => self.flash("can't do that here".to_string()),
+        }
+    }
+
+    /// Put `table` back over `block`'s lines and leave the cursor in cell
+    /// `(r, c)` of it.
+    fn write_table(&mut self, block: md::Block, table: &crate::table::Table, (r, c): (usize, usize)) {
+        let lines = table.emit();
+        let src = block.start + table.src_row(r);
+        let col = lines
+            .get(table.src_row(r))
+            .and_then(|l| crate::table::cell_span(l, c))
+            .map(|(_, e)| e)
+            .unwrap_or(0);
+        self.editor.replace_lines(block.start, block.end, lines, (src, col));
+        self.sync_editor_to_note();
+    }
+
+    /// A 2×2 table at the cursor, on a paragraph of its own.
+    fn insert_table(&mut self) {
+        self.enter_edit_view();
+        let (row, _) = self.editor.cursor;
+        let lines = self.editor.lines();
+        let here_blank = lines[row].trim().is_empty();
+        let mut with = crate::table::Table::blank(1, 2).emit();
+        // an empty line takes the table; a line with text gets it after
+        let at = if here_blank { row } else { row + 1 };
+        if !here_blank {
+            with.insert(0, String::new());
+        }
+        let below_blank = lines.get(at).is_none_or(|l| l.trim().is_empty());
+        if !below_blank {
+            with.push(String::new());
+        }
+        let first = at + usize::from(!here_blank);
+        let col = crate::table::cell_span(&with[usize::from(!here_blank)], 0)
+            .map(|(_, e)| e)
+            .unwrap_or(2);
+        if here_blank {
+            // the blank line becomes the table's first row
+            self.editor.replace_lines(row, row, with, (first, col));
+        } else {
+            self.editor.insert_lines(at, with, (first, col));
+        }
+        self.sync_editor_to_note();
+    }
+
+    /// Esc in a grid: show this table's pipes until the cursor leaves it, and
+    /// esc again puts the grid back.
+    fn toggle_table_source(&mut self) {
+        self.enter_edit_view();
+        let row = self.editor.cursor.0;
+        let blocks = self.blocks();
+        let Some(block) = md::block_at(&blocks, row).filter(|b| b.kind == md::BlockKind::Table)
+        else {
+            self.flash("not in a table".to_string());
+            return;
+        };
+        self.table_source = if self.table_source == Some(block.start) {
+            None
+        } else {
+            Some(block.start)
+        };
+    }
+
+    /// After any move: a cursor in a grid sits in a cell, never on a pipe,
+    /// in the padding or on the separator row; and a table whose source was
+    /// showing goes back to a grid once the cursor has left it. `before` is
+    /// where the cursor was, which says which way it was going.
+    fn settle_table_cursor(&mut self, before: Pos) {
+        let (row, col) = self.editor.cursor;
+        let blocks = self.blocks();
+        let block = md::block_at(&blocks, row)
+            .filter(|b| b.kind == md::BlockKind::Table)
+            .copied();
+        if let Some(start) = self.table_source {
+            if block.map(|b| b.start) != Some(start) {
+                self.table_source = None;
+            }
+        }
+        let Some(block) = block else {
+            return;
+        };
+        if self.table_source == Some(block.start) || self.editor.selection().is_some() {
+            return;
+        }
+        let down = row > before.0 || (row == before.0 && col >= before.1);
+        let mut row = row;
+        if md::is_table_rule(&self.editor.lines()[row]) {
+            // the separator is drawn, not edited: step over it
+            let n = self.editor.lines().len();
+            row = if down {
+                (row + 1).min(n - 1)
+            } else {
+                row.saturating_sub(1)
+            };
+            if row == before.0 || !block.contains(row) {
+                self.editor.set_cursor(before);
+                return;
+            }
+        }
+        let forward = row != before.0 || col > before.1;
+        let col = crate::table::settle(&self.editor.lines()[row], col, forward);
+        self.editor.set_cursor((row, col));
     }
 
     /// Do one of the actions a key can be bound to. The single place a
@@ -2448,6 +2783,20 @@ impl App {
 
     fn move_lines(&mut self, down: bool) {
         self.enter_edit_view();
+        // in a grid a row moves within its part of the table: never onto the
+        // separator, out of the block, or across the header line
+        if let Some((block, table, r, _)) = self.table_cell() {
+            let (from, to) = self.editor.selected_rows();
+            let other = if down { to + 1 } else { from.wrapping_sub(1) };
+            let ok = block.contains(other)
+                && table
+                    .row_of(other - block.start)
+                    .is_some_and(|o| (o < table.head) == (r < table.head));
+            if !ok {
+                self.flash("nowhere to move".to_string());
+                return;
+            }
+        }
         if self.editor.move_selected_lines(down) {
             self.sync_editor_to_note();
         } else {
@@ -2743,6 +3092,7 @@ impl App {
             width,
             self.editor.cursor,
             self.editor.selection(),
+            self.table_source,
         );
         if self.folded_here(row) {
             fold_marked(line)
@@ -3283,6 +3633,11 @@ impl App {
                 self.toggle_checkbox(row);
                 return;
             }
+            let at = ratatui::layout::Position { x, y };
+            if let Some((_, handle)) = self.table_handles.iter().find(|(r, _)| r.contains(at)) {
+                self.table_handle(*handle);
+                return;
+            }
             let pos = self.pos_at(x, y);
             // modifier-click follows a link instead of moving the cursor
             if follows_link(modifiers) {
@@ -3297,9 +3652,36 @@ impl App {
                 }
             }
             self.editor.clear_selection();
+            let before = self.editor.cursor;
             self.editor.set_cursor(pos);
+            self.settle_table_cursor(before);
             self.editor.anchor = Some(self.editor.cursor);
             self.dragging = true;
+        }
+    }
+
+    /// A click on one of the handles beside a hovered table: a column on the
+    /// right, or a row at the bottom.
+    fn table_handle(&mut self, handle: TableHandle) {
+        let Some(start) = self.table_hover else {
+            return;
+        };
+        let blocks = self.blocks();
+        let Some(block) = md::block_at(&blocks, start).copied() else {
+            return;
+        };
+        let Some(mut table) = crate::table::Table::parse(&self.editor.lines()[block.start..=block.end])
+        else {
+            return;
+        };
+        let last = table.rows.len().saturating_sub(1);
+        let to = match handle {
+            TableHandle::AddColumn => table.apply(crate::table::Op::ColRight, 0, table.cols() - 1),
+            TableHandle::AddRow => table.apply(crate::table::Op::RowBelow, last, 0),
+        };
+        if let Some(to) = to {
+            self.table_source = None;
+            self.write_table(block, &table, to);
         }
     }
 }
@@ -3378,10 +3760,20 @@ fn view_line(
     width: usize,
     cursor: Pos,
     selection: Option<(Pos, Pos)>,
+    table_source: Option<usize>,
 ) -> md::RLine {
     let cursor_row = cursor.0;
     let src = lines.get(row).map(String::as_str).unwrap_or("");
     if let Some(block) = md::block_at(blocks, row) {
+        // a table stays a grid with the cursor in it — the cursor moves cell
+        // to cell — unless its source was asked for
+        if block.kind == md::BlockKind::Table && table_source != Some(block.start) {
+            return if block.contains(cursor_row) {
+                md::table_line_editing(lines, block, row, width, cursor_row - block.start)
+            } else {
+                md::style_block_line(lines, block, row, width)
+            };
+        }
         return if revealed_by(block, cursor_row, selection) {
             md::RLine::raw(src)
         } else {
@@ -3594,7 +3986,7 @@ mod tests {
         for c in super::COMMANDS {
             assert_eq!(
                 c.action().is_none(),
-                c == super::Command::MoveFile,
+                matches!(c, super::Command::MoveFile | super::Command::InsertTable),
                 "{}",
                 c.label().0
             );
@@ -3780,7 +4172,7 @@ mod tests {
             .collect();
         let blocks = md::blocks(&lines);
         let view = |row, cursor| {
-            view_line(&lines, &blocks, row, 20, (cursor, 0), None)
+            view_line(&lines, &blocks, row, 20, (cursor, 0), None, None)
                 .cells
                 .iter()
                 .map(|c| c.ch)
@@ -3801,15 +4193,44 @@ mod tests {
             .collect();
         let bs = md::blocks(&table);
         let raw = |row, cursor| {
-            view_line(&table, &bs, row, 20, (cursor, 0), None)
+            view_line(&table, &bs, row, 20, (cursor, 0), None, None)
                 .cells
                 .iter()
                 .map(|c| c.ch)
                 .collect::<String>()
         };
         assert_eq!(raw(0, 9), "a │ bbbb"); // cursor elsewhere: laid out
-        assert_eq!(raw(0, 2), "| a | bbbb |"); // cursor on row 2: all raw
-        assert_eq!(raw(1, 2), "| --- | --- |");
+        // a table is the exception: the grid stays with the cursor in it,
+        // and its source shows only when asked for
+        assert_eq!(raw(0, 2), "a │ bbbb");
+        assert_eq!(raw(1, 2), "──┼─────");
+        let source = |row, cursor| {
+            view_line(&table, &bs, row, 20, (cursor, 0), None, Some(0))
+                .cells
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+        };
+        assert_eq!(source(0, 2), "| a | bbbb |");
+        assert_eq!(source(1, 2), "| --- | --- |");
+        // the cursor's own row keeps its markup as typed so every column is
+        // somewhere on screen; the others style theirs
+        let marked: Vec<String> = "| a | **b** |
+| --- | --- |
+| 1 | 2 |"
+            .lines()
+            .map(String::from)
+            .collect();
+        let mbs = md::blocks(&marked);
+        let text = |row, cursor| {
+            view_line(&marked, &mbs, row, 20, (cursor, 0), None, None)
+                .cells
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+        };
+        assert_eq!(text(0, 0), "a │ **b**");
+        assert_eq!(text(0, 2), "a │ b");
     }
 
     #[test]
@@ -3878,7 +4299,7 @@ mod tests {
             .collect();
         let blocks = blocks_with(&lines, FrontMatter::Dim);
         let view = |row, cursor| {
-            view_line(&lines, &blocks, row, 20, (cursor, 0), None)
+            view_line(&lines, &blocks, row, 20, (cursor, 0), None, None)
                 .cells
                 .iter()
                 .map(|c| c.ch)

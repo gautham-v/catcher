@@ -153,6 +153,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     // (rect on screen, url, rows of the whole band)
     let mut images: Vec<(Rect, String, u16)> = Vec::new();
     app.edit_rows.clear();
+    app.table_handles.clear();
     let mut y = area.y;
     for (row, h, url, band) in &plan {
         match url {
@@ -184,6 +185,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                         if let Some(label) = &label {
                             fold_note(&mut line, label, width);
                         }
+                        table_handle(app, &blocks, *row, &mut line, area, y);
                     }
                     lines.push(line);
                 }
@@ -210,6 +212,40 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
     }
+}
+
+/// The handles beside a hovered table: `+ column` after the header row and
+/// `+ row` after the last row, each remembered for the click that follows.
+fn table_handle(
+    app: &mut App,
+    blocks: &[crate::md::Block],
+    row: usize,
+    line: &mut Line<'static>,
+    area: Rect,
+    y: u16,
+) {
+    let Some(block) = crate::md::block_at(blocks, row) else {
+        return;
+    };
+    if block.kind != crate::md::BlockKind::Table || app.table_hover != Some(block.start) {
+        return;
+    }
+    let (label, handle) = if row == block.start {
+        ("+ column", crate::app::TableHandle::AddColumn)
+    } else if row == block.end {
+        ("+ row", crate::app::TableHandle::AddRow)
+    } else {
+        return;
+    };
+    let used = line.width();
+    let need = label.len() + 2;
+    if used + need > area.width as usize {
+        return;
+    }
+    line.spans.push(Span::raw("  "));
+    line.spans.push(Span::styled(label, theme::state()));
+    let rect = Rect::new(area.x + used as u16 + 2, y, label.len() as u16, 1);
+    app.table_handles.push((rect, handle));
 }
 
 /// Put a folded heading's count at the right edge of its first row, when the
@@ -839,6 +875,12 @@ fn hint_pairs(app: &App) -> Vec<(String, &'static str)> {
     // ← → only earns a place in the bar when there is something to pan
     if app.view == View::Preview && app.preview_hmax > 0 {
         pairs.push(("← →".to_string(), "table"));
+    }
+    // in a grid, the keys that behave differently there
+    if app.view == View::Edit && app.overlay == Overlay::None && app.table_cell().is_some() {
+        pairs.push(("tab".to_string(), "next cell"));
+        pairs.push(("↵".to_string(), "row below"));
+        pairs.push(("esc".to_string(), "source"));
     }
     // only the two that get you everywhere else: the card lists every other
     // binding, and a bar that lists them all is a bar you stop reading

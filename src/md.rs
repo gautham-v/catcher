@@ -1300,7 +1300,7 @@ pub fn mermaid_style(role: crate::mermaid::Role) -> Style {
 // ---------------------------------------------------------------------------
 
 /// A multi-line markdown construct the live preview draws as a whole.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockKind {
     /// A ```-fenced code block, fences included.
     Fence,
@@ -1320,7 +1320,7 @@ pub enum BlockKind {
 }
 
 /// One block, as an inclusive range of source lines.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Block {
     pub kind: BlockKind,
     pub start: usize,
@@ -1357,7 +1357,7 @@ pub fn is_rule(line: &str) -> bool {
 }
 
 /// A `| --- | :-: |` table separator row.
-fn is_table_rule(line: &str) -> bool {
+pub(crate) fn is_table_rule(line: &str) -> bool {
     let t = line.trim();
     t.starts_with('|')
         && t.contains('-')
@@ -1691,13 +1691,20 @@ fn image_fallback_line(src: &str) -> RLine {
 }
 
 /// One source cell of a table row: its trimmed text and where that text starts.
-struct TCell {
-    start: usize,
-    text: String,
+pub(crate) struct TCell {
+    pub(crate) start: usize,
+    pub(crate) text: String,
+}
+
+impl TCell {
+    /// Source column just past the cell's text.
+    pub(crate) fn end(&self) -> usize {
+        self.start + self.text.chars().count()
+    }
 }
 
 /// Split `| a | b |` into its cells and the source columns of its pipes.
-fn split_row(src: &str) -> (Vec<TCell>, Vec<usize>) {
+pub(crate) fn split_row(src: &str) -> (Vec<TCell>, Vec<usize>) {
     let chars: Vec<char> = src.chars().collect();
     let pipes: Vec<usize> = chars
         .iter()
@@ -1775,8 +1782,10 @@ struct TableLayout {
     widths: Vec<usize>,
 }
 
-/// Lay a table's rows out in aligned columns.
-fn table_layout(rows: &[String], width: usize) -> TableLayout {
+/// Lay a table's rows out in aligned columns. `raw_row` is the row whose
+/// cells are shown as typed, markup and all — the cursor's row while the
+/// grid is being edited — so its columns are measured on the raw text.
+fn table_layout(rows: &[String], width: usize, raw_row: Option<usize>) -> TableLayout {
     let parsed: Vec<(Vec<TCell>, Vec<usize>)> = rows.iter().map(|r| split_row(r)).collect();
     let rule_row = rows.iter().position(|r| is_table_rule(r));
     let aligns: Vec<Align> = rule_row
@@ -1787,9 +1796,15 @@ fn table_layout(rows: &[String], width: usize) -> TableLayout {
         .iter()
         .enumerate()
         .filter(|(i, _)| Some(*i) != rule_row)
-        .map(|(_, (c, _))| {
+        .map(|(i, (c, _))| {
             c.iter()
-                .map(|c| cells_width(&styled_cell(&c.text, theme::PLAIN)))
+                .map(|c| {
+                    if Some(i) == raw_row {
+                        str_width(&c.text)
+                    } else {
+                        cells_width(&styled_cell(&c.text, theme::PLAIN))
+                    }
+                })
                 .collect()
         })
         .collect();
@@ -1803,7 +1818,7 @@ fn table_layout(rows: &[String], width: usize) -> TableLayout {
 }
 
 /// One remembered table layout: the rows, the width, and what they laid out to.
-type TableMemo = (Vec<String>, usize, std::rc::Rc<TableLayout>);
+type TableMemo = (Vec<String>, usize, Option<usize>, std::rc::Rc<TableLayout>);
 
 thread_local! {
     /// The last table laid out for the editor.
@@ -1816,16 +1831,16 @@ thread_local! {
 /// single slot `rendered_memo` keeps for a diagram, and for the same reason:
 /// the rows of one table are visited back to back, and an edit to any of them
 /// changes the key.
-fn layout_memo(rows: &[String], width: usize) -> std::rc::Rc<TableLayout> {
+fn layout_memo(rows: &[String], width: usize, raw_row: Option<usize>) -> std::rc::Rc<TableLayout> {
     TABLE_MEMO.with(|memo| {
         let mut memo = memo.borrow_mut();
-        if let Some((r, w, l)) = memo.as_ref() {
-            if r == rows && *w == width {
+        if let Some((r, w, rr, l)) = memo.as_ref() {
+            if r == rows && *w == width && *rr == raw_row {
                 return l.clone();
             }
         }
-        let l = std::rc::Rc::new(table_layout(rows, width));
-        *memo = Some((rows.to_vec(), width, l.clone()));
+        let l = std::rc::Rc::new(table_layout(rows, width, raw_row));
+        *memo = Some((rows.to_vec(), width, raw_row, l.clone()));
         l
     })
 }
@@ -1833,11 +1848,22 @@ fn layout_memo(rows: &[String], width: usize) -> std::rc::Rc<TableLayout> {
 /// Draw row `row` of a table. Every source row is exactly one display row,
 /// separator included.
 fn table_line(rows: &[String], row: usize, width: usize) -> RLine {
-    table_row(&layout_memo(rows, width), rows, row)
+    table_row(&layout_memo(rows, width, None), rows, row, false)
 }
 
-/// Row `row` of `rows`, drawn to the layout `l`.
-fn table_row(l: &TableLayout, rows: &[String], row: usize) -> RLine {
+/// A table row drawn while the cursor is in the grid: `row` of the block
+/// `lines[block.start..=block.end]`, with the cursor's own row (`raw_row`,
+/// block-relative) shown as typed so every source column has a place on
+/// screen for the cursor to sit.
+pub fn table_line_editing(lines: &[String], block: &Block, row: usize, width: usize, raw_row: usize) -> RLine {
+    let rows = &lines[block.start..=block.end];
+    let r = row - block.start;
+    table_row(&layout_memo(rows, width, Some(raw_row)), rows, r, r == raw_row)
+}
+
+/// Row `row` of `rows`, drawn to the layout `l`. A `raw` row keeps every
+/// character of its cells rather than styling their markup.
+fn table_row(l: &TableLayout, rows: &[String], row: usize, raw: bool) -> RLine {
     let TableLayout {
         parsed,
         rule_row,
@@ -1880,7 +1906,16 @@ fn table_row(l: &TableLayout, rows: &[String], row: usize) -> RLine {
         };
         let cell = row_cells.get(ci).unwrap_or(&empty);
         let align = aligns.get(ci).copied().unwrap_or(Align::Left);
-        let styled = truncate_cells(styled_cell(&cell.text, body), *w);
+        let styled = if raw {
+            cell.text
+                .chars()
+                .enumerate()
+                .map(|(i, ch)| Cell { ch, style: body, src: i })
+                .collect()
+        } else {
+            styled_cell(&cell.text, body)
+        };
+        let styled = truncate_cells(styled, *w);
         let (left, right) = pad_for(cells_width(&styled), *w, align);
         cells.extend(at(&" ".repeat(left), body, cell.start));
         cells.extend(styled.into_iter().map(|c| Cell {
