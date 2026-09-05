@@ -334,14 +334,17 @@ fn hanging_indent(cells: &[Cell]) -> usize {
         space(&mut i, &mut w);
     }
     // one list marker: a bullet/checkbox we drew, a raw -/*/+, or "12."
-    let markers = [
-        first_char(theme::BULLET),
-        first_char(theme::CHECKED),
-        first_char(theme::UNCHECKED),
-    ];
+    let mut markers = vec![first_char(theme::BULLET)];
+    markers.extend(theme::TASK_GLYPHS.iter().map(|g| first_char(g)));
+    // a drawn box has a colour; a `?` that opens a plain sentence has none
+    let drawn = |k: usize| {
+        cells
+            .get(k)
+            .is_some_and(|c| c.ch != '?' || c.style.fg.is_some())
+    };
     let mut j = i;
     match ch(j) {
-        Some(c) if markers.contains(&c) => j += 1,
+        Some(c) if markers.contains(&c) && drawn(j) => j += 1,
         Some('-') | Some('*') | Some('+') => j += 1,
         Some(c) if c.is_ascii_digit() => {
             while matches!(ch(j), Some(c) if c.is_ascii_digit()) {
@@ -351,6 +354,13 @@ fn hanging_indent(cells: &[Cell]) -> usize {
                 return w;
             }
             j += 1;
+            // a numbered task: `1. ☐ text` hangs under the text
+            if ch(j) == Some(' ')
+                && matches!(ch(j + 1), Some(c) if markers.contains(&c) && drawn(j + 1))
+                && ch(j + 2) == Some(' ')
+            {
+                j += 2;
+            }
         }
         _ => return w,
     }
@@ -617,7 +627,21 @@ pub fn style_line(src: &str) -> RLine {
             }
         }
         i += width;
-        if marker == theme::CHECKED {
+        if struck(marker) {
+            base = base.patch(theme::done_text());
+        }
+    } else if let Some((at, marker, style, end)) = ordered_task(&chars, i) {
+        // `1. [ ] text`: the number stays, the box becomes a glyph
+        for k in i..at {
+            b.keep(k, base);
+        }
+        b.sub(marker, style, at);
+        b.sub(" ", style, at + 1);
+        for k in at + 2..end {
+            b.sub("", style, k);
+        }
+        i = end;
+        if struck(marker) {
             base = base.patch(theme::done_text());
         }
     }
@@ -629,18 +653,67 @@ pub fn style_line(src: &str) -> RLine {
     }
 }
 
-/// The source columns `start..end` of the `- [ ] ` prefix of a task line,
-/// indent excluded from `start`. `None` for any other line.
+/// The source columns `start..end` of a task line's box: from the list
+/// marker of `- [ ] ` (indent excluded), or from the `[` of a numbered
+/// `1. [ ] ` — in both cases `start` is the column the glyph is drawn at.
+/// `None` for any other line.
 pub fn task_prefix(src: &str) -> Option<(usize, usize)> {
     let chars: Vec<char> = src.chars().collect();
     let mut i = 0;
     while matches!(chars.get(i), Some(' ') | Some('\t')) {
         i += 1;
     }
-    match list_marker(&chars, i) {
-        Some((_, _, 6)) => Some((i, i + 6)),
-        _ => None,
+    task_at(&chars, i).map(|(at, _, _, end)| (at, end))
+}
+
+/// The glyph, style and end column of the task box at the list marker at
+/// `i`, bullet or numbered, with the column the glyph stands at.
+fn task_at(chars: &[char], i: usize) -> Option<(usize, &'static str, Style, usize)> {
+    match list_marker(chars, i) {
+        Some((marker, style, 6)) => Some((i, marker, style, i + 6)),
+        Some(_) => None,
+        None => ordered_task(chars, i),
     }
+}
+
+/// The task box after an ordered marker at `i`: `12. [ ] ` or `12) [x] `.
+/// Returns (column of the `[`, glyph, style, end column).
+fn ordered_task(chars: &[char], i: usize) -> Option<(usize, &'static str, Style, usize)> {
+    let at = |k: usize| chars.get(k).copied();
+    let mut j = i;
+    while matches!(at(j), Some(c) if c.is_ascii_digit()) {
+        j += 1;
+    }
+    if j == i || !matches!(at(j), Some('.') | Some(')')) || at(j + 1) != Some(' ') {
+        return None;
+    }
+    let b = j + 2;
+    if at(b) != Some('[') || at(b + 2) != Some(']') || at(b + 3) != Some(' ') {
+        return None;
+    }
+    let (glyph, style) = task_state(at(b + 1)?)?;
+    Some((b, glyph, style, b + 4))
+}
+
+/// The glyph and style a task box holding `c` is drawn as: the two Markdown
+/// states, and the Obsidian Tasks ones — `/` in progress, `-` cancelled,
+/// `>` forwarded, `?` a question. Any other character is not a box.
+pub fn task_state(c: char) -> Option<(&'static str, Style)> {
+    Some(match c {
+        ' ' => (theme::UNCHECKED, theme::marker()),
+        'x' | 'X' => (theme::CHECKED, theme::done()),
+        '/' => (theme::IN_PROGRESS, theme::done()),
+        '-' => (theme::CANCELLED, theme::marker()),
+        '>' => (theme::FORWARDED, theme::forwarded()),
+        '?' => (theme::QUESTION, theme::done()),
+        _ => return None,
+    })
+}
+
+/// Whether the text of a task drawn with `glyph` reads as struck through:
+/// done and cancelled, the two states that are over.
+pub fn struck(glyph: &str) -> bool {
+    glyph == theme::CHECKED || glyph == theme::CANCELLED
 }
 
 /// The cursor's own line, raw except for its checkbox: the `- [ ] ` stays a
@@ -662,7 +735,7 @@ pub fn raw_with_task(src: &str, cursor_col: usize) -> RLine {
     for k in 0..start {
         b.keep(k, theme::PLAIN);
     }
-    let (marker, style, _) = list_marker(&chars, start).expect("task_prefix said so");
+    let (marker, style) = task_glyph_at(&chars, start).expect("task_prefix said so");
     b.sub(marker, style, start);
     b.sub(" ", style, start + 1);
     for k in start + 2..end {
@@ -686,13 +759,22 @@ fn list_marker(chars: &[char], i: usize) -> Option<(&'static str, Style, usize)>
         return None;
     }
     if at(i + 2) == Some('[') && at(i + 4) == Some(']') && at(i + 5) == Some(' ') {
-        return match at(i + 3) {
-            Some(' ') => Some((theme::UNCHECKED, theme::marker(), 6)),
-            Some('x') | Some('X') => Some((theme::CHECKED, theme::done(), 6)),
-            _ => Some((theme::BULLET, theme::marker(), 2)),
+        return match at(i + 3).and_then(task_state) {
+            Some((glyph, style)) => Some((glyph, style, 6)),
+            None => Some((theme::BULLET, theme::marker(), 2)),
         };
     }
     Some((theme::BULLET, theme::marker(), 2))
+}
+
+/// The glyph and style of the box whose `[` — or whose bullet — sits at
+/// column `at`, as `task_prefix` reports it.
+fn task_glyph_at(chars: &[char], at: usize) -> Option<(&'static str, Style)> {
+    match list_marker(chars, at) {
+        Some((glyph, style, 6)) => Some((glyph, style)),
+        _ if chars.get(at) == Some(&'[') => task_state(*chars.get(at + 1)?),
+        _ => None,
+    }
 }
 
 /// Inline emphasis, code, links and highlights from source column `i` on.
@@ -2508,6 +2590,81 @@ mod tests {
         assert_eq!(text(&l), "▌ hi");
         assert_eq!(l.one_row().display_to_source(0), 0);
         assert_eq!(l.one_row().display_to_source(2), 2);
+    }
+
+    #[test]
+    fn numbered_tasks_draw_a_box_after_their_number() {
+        let l = style_line("1. [ ] hi");
+        assert_eq!(text(&l), format!("1. {} hi", theme::UNCHECKED));
+        assert_eq!(l.src_len, 9);
+        // the number is source, the box stands for the `[`, the text follows
+        let row = l.one_row();
+        assert_eq!(row.display_to_source(0), 0);
+        assert_eq!(row.display_to_source(3), 3);
+        assert_eq!(row.display_to_source(5), 7);
+        let l = style_line("12) [x] hi");
+        assert_eq!(text(&l), format!("12) {} hi", theme::CHECKED));
+        let h = l.cells.iter().find(|c| c.ch == 'h').unwrap();
+        assert!(h.style.add_modifier.contains(Modifier::CROSSED_OUT));
+        // no box without the space after it, none for an unknown state
+        assert_eq!(text(&style_line("1. [ ]hi")), "1. [ ]hi");
+        assert_eq!(text(&style_line("1. [z] hi")), "1. [z] hi");
+        // the prefix the click and the cursor line work from starts at the `[`
+        assert_eq!(task_prefix("  1. [ ] a"), Some((5, 9)));
+        assert_eq!(task_prefix("1. a"), None);
+        assert_eq!(
+            text(&raw_with_task("1. [x] **hi**", 8)),
+            format!("1. {} **hi**", theme::CHECKED)
+        );
+        assert_eq!(text(&raw_with_task("1. [x] hi", 5)), "1. [x] hi");
+        // wrapped rows hang under the text, past both number and box
+        let rows = wrap_rline(&style_line("1. [ ] alpha beta gamma delta"), 12);
+        assert_eq!(rows[1].indent, 5);
+    }
+
+    #[test]
+    fn the_other_task_states_get_their_own_glyphs() {
+        let l = style_line("- [/] a");
+        assert_eq!(text(&l), format!("{} a", theme::IN_PROGRESS));
+        assert_eq!(l.cells[0].style.fg, theme::done().fg);
+        let l = style_line("- [-] a");
+        assert_eq!(text(&l), format!("{} a", theme::CANCELLED));
+        assert_eq!(l.cells[0].style.fg, theme::marker().fg);
+        let a = l.cells.iter().find(|c| c.ch == 'a').unwrap();
+        assert!(a.style.add_modifier.contains(Modifier::CROSSED_OUT));
+        let l = style_line("- [>] a");
+        assert_eq!(text(&l), format!("{} a", theme::FORWARDED));
+        assert_eq!(l.cells[0].style.fg, theme::forwarded().fg);
+        let l = style_line("- [?] a");
+        assert_eq!(text(&l), format!("{} a", theme::QUESTION));
+        let a = l.cells.iter().find(|c| c.ch == 'a').unwrap();
+        assert!(!a.style.add_modifier.contains(Modifier::CROSSED_OUT));
+        // an unknown state is a bullet with literal text
+        assert_eq!(
+            text(&style_line("- [z] a")),
+            format!("{} [z] a", theme::BULLET)
+        );
+        // numbered items take the same states
+        assert_eq!(
+            text(&style_line("3. [/] a")),
+            format!("3. {} a", theme::IN_PROGRESS)
+        );
+        assert_eq!(task_prefix("- [>] a"), Some((0, 6)));
+        assert_eq!(
+            text(&raw_with_task("- [-] a", 7)),
+            format!("{} a", theme::CANCELLED)
+        );
+        // every glyph is one column wide, so the hang stays where it was
+        for g in theme::TASK_GLYPHS {
+            assert_eq!(str_width(g), 1, "{g}");
+        }
+        let rows = wrap_rline(&style_line("- [/] alpha beta gamma delta"), 12);
+        assert_eq!(rows[1].indent, 2);
+        let rows = wrap_rline(&style_line("- [?] alpha beta gamma delta"), 12);
+        assert_eq!(rows[1].indent, 2);
+        // a sentence that opens with a question mark is not a task
+        let rows = wrap_rline(&style_line("? alpha beta gamma delta"), 12);
+        assert_eq!(rows[1].indent, 0);
     }
 
     #[test]

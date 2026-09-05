@@ -457,6 +457,10 @@ struct Ren {
     /// A footnote's superscript label, waiting for its first paragraph.
     footnote: Option<String>,
     done_item: bool,
+    /// A list item has just opened and nothing but its marker is drawn, so a
+    /// `[/] ` at the head of its text is a box in a state pulldown does not
+    /// know, not text.
+    item_fresh: bool,
     image_alt: Option<(String, String)>,
     /// Byte offset the renderer has already drawn past. pulldown-cmark has
     /// never heard of a wikilink and hands `[[a|b]]` back as a run of separate
@@ -502,6 +506,7 @@ impl Ren {
             pending_checkbox: None,
             footnote: None,
             done_item: false,
+            item_fresh: false,
             image_alt: None,
             wiki_until: 0,
         }
@@ -748,6 +753,34 @@ impl Ren {
         "  ".repeat(self.list_depth.saturating_sub(1))
     }
 
+    /// Draw a task's box in place of the bullet pushed when the item opened
+    /// — or after its number, which a numbered task keeps. The item's text
+    /// is struck from here on when the state is one that is over. `space`
+    /// says whether to follow the glyph with its own space or leave that to
+    /// the text pulldown sends next.
+    fn task_box(&mut self, glyph: &'static str, style: Style, src_line: usize, space: bool) {
+        let ordered = matches!(self.list_numbers.last(), Some(Some(_)));
+        if !ordered {
+            self.cells.clear();
+            let indent = self.indent();
+            self.hang = crate::md::str_width(&indent);
+            self.push(&indent, style, None);
+        }
+        let mark = if space {
+            format!("{glyph} ")
+        } else {
+            glyph.to_string()
+        };
+        self.hang += crate::md::str_width(glyph) + 1;
+        self.push(&mark, style, None);
+        self.pending_checkbox = Some(src_line);
+        if crate::md::struck(glyph) {
+            // done items read as struck-through and dim until the item ends
+            self.styles.push(self.style().patch(theme::done_text()));
+            self.done_item = true;
+        }
+    }
+
     /// The `[[wikilink]]` starting at byte offset `off` of the source, as
     /// (byte offset just past it, target, label start, label end).
     ///
@@ -986,6 +1019,7 @@ impl Ren {
         if range.start < self.wiki_until && emits_cells(&event) {
             return;
         }
+        let fresh = std::mem::take(&mut self.item_fresh);
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 self.blank();
@@ -1005,6 +1039,8 @@ impl Ren {
                 if let Some(mark) = self.footnote.take() {
                     self.push(&format!("{mark} "), theme::state(), None);
                 }
+                // a loose item's text starts inside its paragraph
+                self.item_fresh = fresh;
             }
             Event::End(TagEnd::Paragraph) => self.flush(),
             Event::Start(Tag::BlockQuote(_)) => {
@@ -1066,6 +1102,7 @@ impl Ren {
                 let text = format!("{}{marker} ", self.indent());
                 self.hang = crate::md::str_width(&text);
                 self.push(&text, theme::marker(), None);
+                self.item_fresh = true;
             }
             Event::End(TagEnd::Item) => {
                 if self.done_item {
@@ -1075,22 +1112,12 @@ impl Ren {
                 self.flush()
             }
             Event::TaskListMarker(done) => {
-                // replace the bullet we pushed at the start of the item
-                self.cells.clear();
                 let (mark, style) = if done {
                     (theme::CHECKED, theme::done())
                 } else {
                     (theme::UNCHECKED, theme::marker())
                 };
-                let text = format!("{}{mark} ", self.indent());
-                self.hang = crate::md::str_width(&text);
-                self.push(&text, style, None);
-                self.pending_checkbox = Some(src_line);
-                if done {
-                    // done items read as struck-through and dim until the item ends
-                    self.styles.push(self.style().patch(theme::done_text()));
-                    self.done_item = true;
-                }
+                self.task_box(mark, style, src_line, true);
             }
             Event::Start(Tag::CodeBlock(kind)) => {
                 self.blank();
@@ -1250,6 +1277,18 @@ impl Ren {
                         let src_line = self.src_line;
                         self.emit_wrapped(cells, None, None, src_line, 2);
                     }
+                } else if let Some((glyph, style)) = fresh
+                    .then(|| other_task(&self.src[range.start..]))
+                    .flatten()
+                {
+                    // `- [/] text`, `- [-] text`…: pulldown only knows ` ` and
+                    // `x` as task boxes, so the other states arrive as text —
+                    // `[`, `/` and `]` a piece each. The box is drawn from the
+                    // source the way `TaskListMarker` draws its two, the rest
+                    // of the bracket is skipped, and the space after it is
+                    // left to arrive as the text it is.
+                    self.task_box(glyph, style, src_line, false);
+                    self.wiki_until = range.start + 3;
                 } else if let Some((alt, url, end)) = self.embed_here(range.start) {
                     // `![[picture.png]]` on a line of its own is a picture,
                     // the same as `![](picture.png)`; pulldown sees only text
@@ -1600,6 +1639,19 @@ fn truncate_cells(cells: &[PCell], width: usize) -> Vec<PCell> {
 /// Display width of a run of cells, in terminal columns.
 pub fn cells_width(cells: &[PCell]) -> usize {
     cells.iter().map(|c| crate::md::char_width(c.ch)).sum()
+}
+
+/// The head of a list item's source as a task box in one of the states
+/// pulldown-cmark does not recognise — `[/] `, `[-] `, `[>] `, `[?] ` —
+/// as the glyph and its style. `[ ]` and `[x]` never get here: pulldown
+/// turns those into `TaskListMarker` events.
+fn other_task(src: &str) -> Option<(&'static str, Style)> {
+    let rest = src.strip_prefix('[')?;
+    let c = rest.chars().next()?;
+    if matches!(c, ' ' | 'x' | 'X') || !rest[c.len_utf8()..].starts_with("] ") {
+        return None;
+    }
+    crate::md::task_state(c)
 }
 
 /// Does this event put something on the page at a source offset of its own?
@@ -2120,6 +2172,71 @@ mod tests {
         assert_eq!(done.text(), "✓ done");
         assert_eq!(done.checkbox, Some(3));
         assert!(done.cells[0].style.fg == theme::done().fg);
+    }
+
+    #[test]
+    fn numbered_tasks_keep_their_number_in_front_of_the_box() {
+        let r = render("1. [ ] todo\n2. [x] done\n");
+        let todo = r.lines.iter().find(|l| l.text().contains("todo")).unwrap();
+        assert_eq!(todo.text(), "1. ☐ todo");
+        assert_eq!(todo.checkbox, Some(0));
+        let done = r.lines.iter().find(|l| l.text().contains("done")).unwrap();
+        assert_eq!(done.text(), "2. ✓ done");
+        assert_eq!(done.checkbox, Some(1));
+        let d = done.cells.iter().find(|c| c.ch == 'd').unwrap();
+        assert!(d.style.add_modifier.contains(Modifier::CROSSED_OUT));
+        // a wrapped numbered task hangs under its text, past number and box
+        assert_eq!(todo.hang, 5);
+        let plain = render("- [ ] todo\n");
+        assert_eq!(plain.lines[0].hang, 2);
+    }
+
+    #[test]
+    fn the_other_task_states_render_as_glyphs_with_a_clickable_box() {
+        let r = render(
+            "- [/] going\n- [-] dropped\n- [>] later\n- [?] maybe **x**\n- [z] plain\n1. [/] first\n\n- [/] loose\n\n- b\n",
+        );
+        let line = |s: &str| r.lines.iter().find(|l| l.text().contains(s)).unwrap();
+        let going = line("going");
+        assert_eq!(going.text(), format!("{} going", theme::IN_PROGRESS));
+        assert_eq!(going.checkbox, Some(0));
+        assert_eq!(going.cells[0].style.fg, theme::done().fg);
+        // the text keeps its own source columns, so a click lands in it
+        assert_eq!(going.cells[2].src, Some((0, 6)));
+        let dropped = line("dropped");
+        assert_eq!(dropped.text(), format!("{} dropped", theme::CANCELLED));
+        assert_eq!(dropped.checkbox, Some(1));
+        assert_eq!(dropped.cells[0].style.fg, theme::marker().fg);
+        let d = dropped.cells.iter().find(|c| c.ch == 'd').unwrap();
+        assert!(d.style.add_modifier.contains(Modifier::CROSSED_OUT));
+        // the struck style ends with the item
+        let later = line("later");
+        assert_eq!(later.text(), format!("{} later", theme::FORWARDED));
+        assert_eq!(later.cells[0].style.fg, theme::forwarded().fg);
+        let struck = |l: &PLine| {
+            l.cells
+                .iter()
+                .any(|c| c.style.add_modifier.contains(Modifier::CROSSED_OUT))
+        };
+        assert!(!struck(later));
+        let maybe = line("maybe");
+        assert_eq!(maybe.text(), format!("{} maybe x", theme::QUESTION));
+        let x = maybe.cells.last().unwrap();
+        assert!(x.style.add_modifier.contains(Modifier::BOLD));
+        // an unknown state is text, and not a box to click
+        let plain = line("plain");
+        assert_eq!(plain.text(), format!("{} [z] plain", theme::BULLET));
+        assert_eq!(plain.checkbox, None);
+        // numbered and loose items take the states too
+        let first = line("first");
+        assert_eq!(first.text(), format!("1. {} first", theme::IN_PROGRESS));
+        assert_eq!(first.checkbox, Some(5));
+        let loose = line("loose");
+        assert_eq!(loose.text(), format!("{} loose", theme::IN_PROGRESS));
+        assert_eq!(loose.checkbox, Some(7));
+        let bullet = format!("{} b", theme::BULLET);
+        assert!(r.lines.iter().any(|l| l.text() == bullet));
+        assert_eq!(loose.hang, 2);
     }
 
     /// What the reading view hands the renderer: the body, and the line it

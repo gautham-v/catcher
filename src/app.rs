@@ -3544,8 +3544,7 @@ impl App {
         let dcol = x.checked_sub(self.editor_area.x)? as usize;
         let cell = segs.first()?.cell_at_display(dcol)?;
         let glyph = cell.ch.to_string();
-        (cell.src == start && (glyph == crate::theme::CHECKED || glyph == crate::theme::UNCHECKED))
-            .then_some(row)
+        (cell.src == start && crate::theme::TASK_GLYPHS.contains(&glyph.as_str())).then_some(row)
     }
 
     /// The wrapped rows of one source line, as the draw lays them out.
@@ -4496,6 +4495,8 @@ pub fn fold_marked(mut line: md::RLine) -> md::RLine {
 }
 
 /// Flip the `[ ]`/`[x]` box of a task line, keeping everything else intact.
+/// A box in one of the other states (`[/]`, `[-]`, `[>]`, `[?]`) is done
+/// with, so it becomes `[x]`; a numbered `1. [ ]` flips like a bullet.
 pub fn toggle_task(line: &str) -> Option<String> {
     let chars: Vec<char> = line.chars().collect();
     // only the leading list marker counts, so text that merely looks like a
@@ -4504,7 +4505,14 @@ pub fn toggle_task(line: &str) -> Option<String> {
     while matches!(chars.get(start), Some(' ') | Some('\t')) {
         start += 1;
     }
-    if !matches!(chars.get(start), Some('-') | Some('*') | Some('+')) {
+    if matches!(chars.get(start), Some(c) if c.is_ascii_digit()) {
+        while matches!(chars.get(start), Some(c) if c.is_ascii_digit()) {
+            start += 1;
+        }
+        if !matches!(chars.get(start), Some('.') | Some(')')) {
+            return None;
+        }
+    } else if !matches!(chars.get(start), Some('-') | Some('*') | Some('+')) {
         return None;
     }
     if chars.get(start + 1) != Some(&' ') || chars.get(start + 2) != Some(&'[') {
@@ -4518,6 +4526,7 @@ pub fn toggle_task(line: &str) -> Option<String> {
     let new = match inner {
         ' ' => 'x',
         'x' | 'X' => ' ',
+        c if md::task_state(c).is_some() => 'x',
         _ => return None,
     };
     let mut out: String = chars[..idx].iter().collect();
@@ -4754,6 +4763,21 @@ mod tests {
         assert_eq!(toggle_task("  - [x] milk").as_deref(), Some("  - [ ] milk"));
         assert_eq!(toggle_task("- milk"), None);
         assert_eq!(toggle_task("plain text"), None);
+    }
+
+    #[test]
+    fn numbered_tasks_and_the_other_states_toggle_too() {
+        assert_eq!(toggle_task("1. [ ] a").as_deref(), Some("1. [x] a"));
+        assert_eq!(toggle_task("  12) [x] a").as_deref(), Some("  12) [ ] a"));
+        assert_eq!(toggle_task("1. a"), None);
+        assert_eq!(toggle_task("1.[ ] a"), None);
+        // in progress, cancelled, forwarded, question: a click finishes them
+        assert_eq!(toggle_task("- [/] a").as_deref(), Some("- [x] a"));
+        assert_eq!(toggle_task("- [-] a").as_deref(), Some("- [x] a"));
+        assert_eq!(toggle_task("- [>] a").as_deref(), Some("- [x] a"));
+        assert_eq!(toggle_task("3. [?] a").as_deref(), Some("3. [x] a"));
+        // an unknown state is text, not a box
+        assert_eq!(toggle_task("- [z] a"), None);
     }
 
     #[test]
