@@ -3128,7 +3128,7 @@ fn is_setext_text(line: &str) -> bool {
 }
 
 /// `- `, `* `, `+ `, `1. ` or `1) ` at the start of `chars`.
-fn is_list_item(chars: &[char]) -> bool {
+pub(crate) fn is_list_item(chars: &[char]) -> bool {
     if list_marker(chars, 0, 1).is_some() {
         return true;
     }

@@ -3333,12 +3333,71 @@ impl App {
         let Some(item) = c.items.get(c.selected) else {
             return;
         };
+        if let Some(stamp_row) = item.stamp {
+            if let crate::complete::Kind::Anchor { note } = &c.token.kind {
+                if !self.stamp_block(note, stamp_row, &item.insert) {
+                    return;
+                }
+            }
+        }
         let (row, col) = self.editor.cursor;
         let line = self.editor.lines()[row].clone();
         let (text, cursor) = crate::complete::accept(&line, col, &c.token, &item.insert);
         self.editor.set_line(row, text);
         self.editor.set_cursor((row, cursor));
         self.sync_editor_to_note();
+    }
+
+    /// Write ` ^id` onto line `row` of `note` — the open buffer when the
+    /// link points at this note, else the file on disk — so the block link
+    /// being inserted has something to land on. False when it could not.
+    fn stamp_block(&mut self, note: &str, row: usize, insert: &str) -> bool {
+        let here = self.notes.get(self.active).map(|n| {
+            std::fs::canonicalize(&n.path).unwrap_or_else(|_| n.path.clone())
+        });
+        let target = if note.is_empty() {
+            None
+        } else {
+            index::resolve(&self.open_index, note).map(|e| e.path.clone())
+        };
+        let in_buffer = match &target {
+            None => true,
+            Some(p) => here.as_ref() == Some(p),
+        };
+        if in_buffer {
+            let Some(line) = self.editor.lines().get(row).cloned() else {
+                return false;
+            };
+            self.editor.set_line(row, crate::complete::stamp_line(&line, insert));
+            return true;
+        }
+        let Some(path) = target else {
+            self.flash(format!("no note called {note}"));
+            return false;
+        };
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            self.flash("could not read the note to mark the block".to_string());
+            return false;
+        };
+        let mut lines: Vec<String> = body.lines().map(String::from).collect();
+        let Some(line) = lines.get(row).cloned() else {
+            return false;
+        };
+        lines[row] = crate::complete::stamp_line(&line, insert);
+        let mut out = lines.join("\n");
+        if body.ends_with('\n') {
+            out.push('\n');
+        }
+        if notes::write_atomic(&path, &out).is_err() {
+            self.flash("could not mark the block".to_string());
+            return false;
+        }
+        let report = crate::links::Report {
+            notes: vec![path],
+            ..Default::default()
+        };
+        self.adopt_rewritten(&report);
+        true
     }
 
     /// Work out what the popup should offer for the cursor as it now

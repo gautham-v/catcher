@@ -33,6 +33,9 @@ pub struct Token {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
     pub label: String,
+    /// For a block with no `^id` yet: the row of the target note the fresh id
+    /// in `insert` is written onto when the row is taken.
+    pub stamp: Option<usize>,
     /// A dim note beside the label: the folder, only when two candidates
     /// share a name and it is what tells them apart. Empty otherwise.
     pub detail: String,
@@ -139,6 +142,7 @@ pub fn link_candidates(query: &str, entries: &[Entry]) -> Vec<Candidate> {
                 s,
                 Candidate {
                     label: name.clone(),
+                    stamp: None,
                     detail: e.folder.clone(),
                     insert: name.clone(),
                 },
@@ -150,6 +154,7 @@ pub fn link_candidates(query: &str, entries: &[Entry]) -> Vec<Candidate> {
                     s * 10 + 90,
                     Candidate {
                         label: a.clone(),
+                        stamp: None,
                         detail: format!("→ {name}"),
                         insert: a.clone(),
                     },
@@ -173,33 +178,141 @@ pub fn link_candidates(query: &str, entries: &[Entry]) -> Vec<Candidate> {
     out
 }
 
-/// The headings and `^block` ids of a note that answer `query`, in document
-/// order, the way the outline lists them.
+/// The headings of a note that answer `query`, in document order, the way
+/// the outline lists them — or, when the query opens with `^`, its blocks.
 pub fn anchor_candidates(query: &str, lines: &[String]) -> Vec<Candidate> {
+    if let Some(q) = query.strip_prefix('^') {
+        return block_candidates(q, lines);
+    }
     let blocks = crate::md::blocks(lines);
     let mut out: Vec<Candidate> = crate::outline::headings(lines, &blocks)
         .into_iter()
         .filter(|h| search::fuzzy(query, &h.text).is_some())
         .map(|h| Candidate {
             label: format!("{}{}", "  ".repeat(h.level.saturating_sub(1)), h.text),
+            stamp: None,
             detail: String::new(),
             insert: h.text,
         })
         .collect();
-    for line in lines {
-        if let Some((_, id)) = crate::md::block_id_at(line) {
-            let insert = format!("^{id}");
-            if search::fuzzy(query, &insert).is_some() {
-                out.push(Candidate {
-                    label: insert.clone(),
-                    detail: String::new(),
-                    insert,
-                });
-            }
-        }
-    }
     out.truncate(MAX_ROWS);
     out
+}
+
+/// One linkable block of a note: a paragraph or a list item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockRef {
+    /// The first line, trimmed, without its `^id`.
+    pub text: String,
+    /// The line a `^id` sits on, or goes on: the block's last line.
+    pub last: usize,
+    /// The id the block already carries, if any.
+    pub id: Option<String>,
+}
+
+/// The paragraphs and list items of `lines`, in document order. Headings,
+/// fences, tables, front matter, comments, maths and indented code are not
+/// blocks one links to. A list item is a block of its own; a run of plain
+/// lines is one paragraph, and its id belongs on the run's last line.
+pub fn block_refs(lines: &[String]) -> Vec<BlockRef> {
+    let special = crate::md::blocks(lines);
+    let skip = |row: usize| special.iter().any(|b| b.contains(row));
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = &lines[i];
+        if skip(i) || line.trim().is_empty() || crate::fold::heading_level(line).is_some() {
+            i += 1;
+            continue;
+        }
+        let chars: Vec<char> = line.trim_start().chars().collect();
+        let mut last = i;
+        if !crate::md::is_list_item(&chars) {
+            while last + 1 < lines.len() {
+                let next = &lines[last + 1];
+                let next_chars: Vec<char> = next.trim_start().chars().collect();
+                if skip(last + 1)
+                    || next.trim().is_empty()
+                    || crate::fold::heading_level(next).is_some()
+                    || crate::md::is_list_item(&next_chars)
+                {
+                    break;
+                }
+                last += 1;
+            }
+        }
+        let id = crate::md::block_id_at(&lines[last]).map(|(_, id)| id);
+        let text = match crate::md::block_id_at(line) {
+            Some((cut, _)) => line.chars().take(cut).collect::<String>(),
+            None => line.clone(),
+        }
+        .trim()
+        .to_string();
+        out.push(BlockRef { text, last, id });
+        i = last + 1;
+    }
+    out
+}
+
+/// A six-character id for the block on `row`, unlike any in `taken`. Made
+/// from the text so the same block gets the same id on a retry, and never
+/// the same one twice within a note.
+pub fn fresh_block_id(text: &str, row: usize, taken: &[String]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut salt = 0u64;
+    loop {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (text, row, salt).hash(&mut h);
+        let mut n = h.finish();
+        let mut id = String::with_capacity(6);
+        for _ in 0..6 {
+            let d = (n % 36) as u8;
+            id.push(if d < 10 { (b'0' + d) as char } else { (b'a' + d - 10) as char });
+            n /= 36;
+        }
+        if !taken.contains(&id) {
+            return id;
+        }
+        salt += 1;
+    }
+}
+
+/// The blocks of a note that answer `query`, in document order: the row
+/// shows the block's first line and, dimmed, the id it already has. A block
+/// without one is offered a fresh id, written onto it when the row is taken.
+pub fn block_candidates(query: &str, lines: &[String]) -> Vec<Candidate> {
+    let refs = block_refs(lines);
+    let taken: Vec<String> = refs.iter().filter_map(|b| b.id.clone()).collect();
+    refs.into_iter()
+        .filter(|b| {
+            query.is_empty()
+                || search::fuzzy(query, &b.text).is_some()
+                || b.id.as_deref().is_some_and(|id| search::fuzzy(query, id).is_some())
+        })
+        .map(|b| match b.id {
+            Some(id) => Candidate {
+                label: b.text,
+                stamp: None,
+                detail: format!("^{id}"),
+                insert: format!("^{id}"),
+            },
+            None => {
+                let id = fresh_block_id(&b.text, b.last, &taken);
+                Candidate {
+                    label: b.text,
+                    stamp: Some(b.last),
+                    detail: String::new(),
+                    insert: format!("^{id}"),
+                }
+            }
+        })
+        .take(MAX_ROWS)
+        .collect()
+}
+
+/// `line` with ` ^id` on its end, the way Obsidian stamps a block.
+pub fn stamp_line(line: &str, insert: &str) -> String {
+    format!("{} {}", line.trim_end(), insert)
 }
 
 /// The tags that answer `query`, best first.
@@ -213,6 +326,7 @@ pub fn tag_candidates(query: &str, tags: &[String]) -> Vec<Candidate> {
         .into_iter()
         .map(|(_, t)| Candidate {
             label: format!("#{t}"),
+            stamp: None,
             detail: String::new(),
             insert: t.clone(),
         })
@@ -355,6 +469,54 @@ mod tests {
     }
 
     #[test]
+    fn blocks_are_paragraphs_and_list_items_with_ids_kept_or_minted() {
+        let lines: Vec<String> = [
+            "# Title",
+            "",
+            "First paragraph line one",
+            "line two ^keep1",
+            "",
+            "- item a",
+            "- item b ^itemb",
+            "",
+            "```",
+            "code",
+            "```",
+            "",
+            "Last one",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let refs = block_refs(&lines);
+        assert_eq!(refs.len(), 4);
+        assert_eq!(refs[0].text, "First paragraph line one");
+        assert_eq!(refs[0].last, 3);
+        assert_eq!(refs[0].id.as_deref(), Some("keep1"));
+        assert_eq!(refs[1], BlockRef { text: "- item a".into(), last: 5, id: None });
+        assert_eq!(refs[2].text, "- item b");
+        assert_eq!(refs[2].id.as_deref(), Some("itemb"));
+        assert_eq!(refs[3].last, 12);
+
+        let all = block_candidates("", &lines);
+        assert_eq!(all[0].insert, "^keep1");
+        assert_eq!(all[0].stamp, None);
+        assert_eq!(all[1].stamp, Some(5));
+        assert_eq!(all[1].insert.len(), 7);
+        assert_ne!(all[1].insert, all[3].insert);
+        // a fresh id never repeats one the note has
+        assert_eq!(fresh_block_id("x", 0, &["abcdef".into()]).len(), 6);
+        let id = fresh_block_id("item a", 5, &[]);
+        assert_ne!(fresh_block_id("item a", 5, std::slice::from_ref(&id)), id);
+
+        let by_text = block_candidates("last", &lines);
+        assert_eq!(by_text.len(), 1);
+        assert_eq!(by_text[0].label, "Last one");
+        assert_eq!(anchor_candidates("^la", &lines)[0].label, "Last one");
+        assert_eq!(stamp_line("Last one  ", "^ab12cd"), "Last one ^ab12cd");
+    }
+
+    #[test]
     fn the_folder_shows_only_when_two_notes_share_a_name() {
         let entry = |rel: &str, folder: &str| Entry {
             path: std::path::PathBuf::from(format!("/v/{rel}.md")),
@@ -402,8 +564,10 @@ mod tests {
             .into_iter()
             .map(|c| c.insert)
             .collect();
-        assert_eq!(got, vec!["Title", "Setup", "Use", "^abc"]);
+        assert_eq!(got, vec!["Title", "Setup", "Use"]);
+        // blocks live behind `^`, with the id the line already carries
         assert_eq!(anchor_candidates("^", &lines)[0].insert, "^abc");
+        assert_eq!(anchor_candidates("^", &lines)[0].label, "text");
 
         let tags = vec!["work".to_string(), "home".to_string(), "wip".to_string()];
         let got: Vec<String> = tag_candidates("w", &tags)
