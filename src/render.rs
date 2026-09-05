@@ -438,6 +438,10 @@ fn append_mention_row(r: &mut Rendered, m: &crate::mentions::Mention, namew: usi
     }
 }
 
+/// The href on the properties box's top edge and on the line it folds to:
+/// not a link anywhere, a click the app answers by flipping the setting.
+pub const PROPERTIES_HREF: &str = "catcher:properties";
+
 /// The widest an excerpt is ever drawn, however wide the window is. Past this
 /// the eye stops reading the column and starts reading the page twice.
 const MAX_EXCERPT_COLS: usize = 80;
@@ -457,9 +461,16 @@ const MAX_NAME_COLS: usize = 28;
 /// on the line that sets it; the frame carries none.
 ///
 /// A note without front matter gets nothing, not even an empty frame.
-pub fn prepend_properties(r: &mut Rendered, content: &str, width: usize, today: (i32, u32, u32)) {
+pub fn prepend_properties(
+    r: &mut Rendered,
+    content: &str,
+    width: usize,
+    today: (i32, u32, u32),
+    mode: crate::config::Properties,
+) {
+    use crate::config::Properties;
     let props = crate::md::front_matter_properties(content);
-    if props.is_empty() {
+    if props.is_empty() || mode == Properties::Hide {
         return;
     }
     let border = theme::border();
@@ -468,6 +479,36 @@ pub fn prepend_properties(r: &mut Rendered, content: &str, width: usize, today: 
     } else {
         width.max(8)
     };
+    // the cells that take the click that folds the box or opens it again
+    let toggle = r.urls.len();
+    r.urls.push(PROPERTIES_HREF.to_string());
+    let linked = |mut cells: Vec<PCell>| {
+        for c in &mut cells {
+            c.link = Some(toggle);
+        }
+        cells
+    };
+
+    if mode == Properties::Line {
+        let n = props.len();
+        let label = if n == 1 {
+            "1 property".to_string()
+        } else {
+            format!("{n} properties")
+        };
+        let mut cells = linked(str_cells(theme::FOLDED, theme::fold()));
+        cells.extend(linked(str_cells(&label, theme::marker())));
+        let mut lines = vec![
+            PLine {
+                cells,
+                ..Default::default()
+            },
+            PLine::default(),
+        ];
+        lines.append(&mut r.lines);
+        r.lines = lines;
+        return;
+    }
     let inner = width - 4;
     let keyw = props
         .iter()
@@ -480,11 +521,14 @@ pub fn prepend_properties(r: &mut Rendered, content: &str, width: usize, today: 
     let mut top = str_cells("┌ ", border);
     top.extend(str_cells("properties", theme::grey()));
     top.push(cell(' ', border));
-    let fill = width.saturating_sub(cells_width(&top) + 1);
+    // `hide` sits in the edge at the right, as dim as the rule; the whole
+    // edge answers the click, the word only says what the click does
+    let tail = str_cells(" hide ┐", border);
+    let fill = width.saturating_sub(cells_width(&top) + cells_width(&tail));
     top.extend(str_cells(&"─".repeat(fill), border));
-    top.push(cell('┐', border));
+    top.extend(tail);
     lines.push(PLine {
-        cells: top,
+        cells: linked(top),
         ..Default::default()
     });
 
@@ -3351,10 +3395,39 @@ mod tests {
     }
 
     #[test]
+    fn the_properties_box_folds_to_a_line_or_to_nothing() {
+        use crate::config::Properties;
+        let content = "---\ntitle: Launch\ndue: 2026-10-10\ntags: [work]\n---\n# Title\n";
+        // the box's top edge says `hide` and answers a click
+        let mut r = body_of(content);
+        prepend_properties(&mut r, content, 40, (2026, 9, 5), Properties::Box);
+        let top = &r.lines[0];
+        assert!(top.text().ends_with(" hide ┐"), "{:?}", top.text());
+        assert_eq!(top.text().chars().count(), 40);
+        let link = top.cells[0].link.expect("edge is clickable");
+        assert_eq!(r.url(link), Some(PROPERTIES_HREF));
+        assert!(top.cells.iter().all(|c| c.link == Some(link)));
+        // the line: a fold glyph, a count, no tags, one click back
+        let mut r = body_of(content);
+        prepend_properties(&mut r, content, 40, (2026, 9, 5), Properties::Line);
+        assert_eq!(r.lines[0].text(), "▸ 3 properties");
+        assert_eq!(r.lines[1].text(), "");
+        assert_eq!(r.lines[2].text(), "Title");
+        let link = r.lines[0].cells[0].link.expect("line is clickable");
+        assert_eq!(r.url(link), Some(PROPERTIES_HREF));
+        // hide: nothing at all
+        let mut r = body_of(content);
+        let before = r.lines.len();
+        prepend_properties(&mut r, content, 40, (2026, 9, 5), Properties::Hide);
+        assert_eq!(r.lines.len(), before);
+        assert_eq!(r.lines[0].text(), "Title");
+    }
+
+    #[test]
     fn front_matter_is_drawn_as_a_box_of_properties_above_the_body() {
         let content = "---\ntitle: Launch\ndue: 2026-10-10\ntags: [work, q3]\naliases:\n  - launch\n  - go live\n---\n# Title\n";
         let mut r = body_of(content);
-        prepend_properties(&mut r, content, 60, (2026, 9, 5));
+        prepend_properties(&mut r, content, 60, (2026, 9, 5), crate::config::Properties::Box);
         let page: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
         assert!(page[0].starts_with("┌ properties ─"));
         assert!(page[0].ends_with('┐'));
@@ -3380,7 +3453,7 @@ mod tests {
         assert_eq!(tag.style.fg, theme::tag().fg);
         // and a note without front matter is left exactly as it was
         let mut plain = body_of("# Title\n");
-        prepend_properties(&mut plain, "# Title\n", 60, (2026, 9, 5));
+        prepend_properties(&mut plain, "# Title\n", 60, (2026, 9, 5), crate::config::Properties::Box);
         assert!(plain.lines[0].text().contains("Title"));
     }
 

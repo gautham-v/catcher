@@ -50,6 +50,7 @@ pub enum Action {
     FoldAll,
     UnfoldAll,
     Outline,
+    ToggleProperties,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -260,6 +261,12 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_outline",
         None,
         "outline — jump to a heading in this note, or fold it",
+    ),
+    (
+        Action::ToggleProperties,
+        "key_properties",
+        None,
+        "properties — fold the front matter box to a line and back",
     ),
 ];
 

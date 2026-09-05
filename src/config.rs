@@ -48,8 +48,8 @@ pub enum PreviewClick {
     Edit,
 }
 
-/// What the editor does with a note's YAML front matter. The reading view
-/// drops the block in all three: it is metadata, and reading is for the prose.
+/// What the editor does with a note's YAML front matter. The reading view has
+/// a setting of its own, `Properties`: it draws the block as a box, not as YAML.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FrontMatter {
     /// Visible and editable, drawn quiet, and never read as markdown.
@@ -60,6 +60,29 @@ pub enum FrontMatter {
     /// Not drawn at all until the cursor moves into it. The text is still in
     /// the file; this is only about what the page spends rows on.
     Hide,
+}
+
+/// What the reading view does with a note's front matter: the box of
+/// properties, a single line standing in for it, or nothing. A click on the
+/// box or the *Toggle properties* command flips between the first two and
+/// writes the choice here, so every note follows; `hide` is only ever set by
+/// hand, and the command then shows the box for the session without touching it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Properties {
+    #[default]
+    Box,
+    Line,
+    Hide,
+}
+
+impl Properties {
+    pub fn name(self) -> &'static str {
+        match self {
+            Properties::Box => "box",
+            Properties::Line => "line",
+            Properties::Hide => "hide",
+        }
+    }
 }
 
 /// Panel and overlay border treatment.
@@ -167,6 +190,8 @@ pub struct Config {
     pub preview_click: PreviewClick,
     /// What the editor does with a note's front matter.
     pub front_matter: FrontMatter,
+    /// What the reading view does with it.
+    pub properties: Properties,
     /// Whether `[[wikilinks]]` are links. Off leaves them as the literal text
     /// a reader without Obsidian sees.
     pub wikilinks: bool,
@@ -218,6 +243,7 @@ impl Default for Config {
             table_style: TableStyle::Auto,
             preview_click: PreviewClick::Select,
             front_matter: FrontMatter::Dim,
+            properties: Properties::Box,
             wikilinks: true,
             tags: true,
             linked_mentions: true,
@@ -438,6 +464,12 @@ impl Config {
             Some("dim") => FrontMatter::Dim,
             _ => c.front_matter,
         };
+        c.properties = match value(text, "properties").as_deref() {
+            Some("box") => Properties::Box,
+            Some("line") => Properties::Line,
+            Some("hide") => Properties::Hide,
+            _ => c.properties,
+        };
         c
     }
 
@@ -585,8 +617,7 @@ impl Config {
             yn(self.update_links),
             "a rename fixes [[links]] to the note",
         );
-        // an editor setting: the reading view has no choice to make, it never
-        // shows front matter whatever this says
+        // an editor setting: the reading view's is `properties`, under Reading
         d.row(
             "front_matter",
             match self.front_matter {
@@ -616,6 +647,11 @@ impl Config {
                 PreviewClick::Edit => "edit",
             },
             "select · edit",
+        );
+        d.row(
+            "properties",
+            self.properties.name(),
+            "front matter as a box · one line · hide",
         );
         d.row("wikilinks", yn(self.wikilinks), "[[links]] open notes");
         d.row(
@@ -670,6 +706,53 @@ impl Config {
         }
         d.finish()
     }
+}
+
+/// Change one setting in the settings note on disk, leaving every other line
+/// — comments, order, the user's own spacing — as it was. The value on the
+/// `- key:` line is replaced up to its `#` hint; a key the file lacks is
+/// appended. Used by the commands that flip a setting from inside the app,
+/// where regenerating the whole document would also write the environment's
+/// overrides into it for good.
+pub fn set_value(key: &str, new: &str) -> Result<()> {
+    let path = settings_path()?;
+    let text = fs::read_to_string(&path).unwrap_or_default();
+    let out = with_value(&text, key, new);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    fs::write(&path, out).with_context(|| format!("writing {}", path.display()))
+}
+
+/// `text`, a settings document, with `key` set to `new`: see `set_value`.
+fn with_value(text: &str, key: &str, new: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 32);
+    let mut found = false;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let stripped = strip_comment(body);
+        let head = stripped.trim().trim_start_matches(['-', '*', '>', ' ']);
+        let is_key = head
+            .split_once([':', '='])
+            .is_some_and(|(k, _)| k.trim() == key);
+        if !is_key || found {
+            out.push_str(line);
+            continue;
+        }
+        found = true;
+        let hint = &body[stripped.len()..];
+        let (prefix, _) = stripped.split_once([':', '=']).unwrap_or((stripped, ""));
+        let pad = if hint.is_empty() { "" } else { "  " };
+        out.push_str(&format!("{prefix}: {new}{pad}{}", hint.trim_start()));
+        out.push_str(&line[body.len()..]);
+    }
+    if !found {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("- {key}: {new}\n"));
+    }
+    out
 }
 
 fn write_settings(path: &Path, config: &Config) -> Result<()> {
@@ -1235,6 +1318,31 @@ mod tests {
         assert!(c.to_document().contains("- key_search: ctrl+⇧F"));
         let back = Config::from_str("- key_search: f3\n");
         assert_eq!(back.keys.label(Action::SearchAll), "F3");
+    }
+
+    #[test]
+    fn properties_is_a_reading_setting_that_round_trips() {
+        let c = Config::from_str("- properties: line\n");
+        assert_eq!(c.properties, Properties::Line);
+        assert_eq!(Config::from_str("- properties: hide\n").properties, Properties::Hide);
+        assert_eq!(Config::from_str("").properties, Properties::Box);
+        assert!(c.to_document().contains("- properties: line"));
+    }
+
+    #[test]
+    fn setting_one_value_leaves_the_rest_of_the_document_alone() {
+        let text = "# Settings\n\n- properties: box  # front matter as a box · one line · hide\n- wikilinks: yes\n";
+        let out = with_value(text, "properties", "line");
+        assert_eq!(
+            out,
+            "# Settings\n\n- properties: line  # front matter as a box · one line · hide\n- wikilinks: yes\n"
+        );
+        assert_eq!(Config::from_str(&out).properties, Properties::Line);
+        // a key the file lacks is appended
+        let out = with_value("- wikilinks: yes\n", "properties", "hide");
+        assert!(out.ends_with("- wikilinks: yes\n- properties: hide\n"));
+        // a value without a hint
+        assert_eq!(with_value("- front_matter: dim\n", "front_matter", "hide"), "- front_matter: hide\n");
     }
 
     #[test]

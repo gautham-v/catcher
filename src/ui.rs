@@ -483,17 +483,24 @@ fn preview_key(app: &mut App, area: Rect) -> u64 {
 /// Lay the note out for `area`: the whole page, before any scrolling.
 fn layout_preview(app: &mut App, area: Rect) -> PreviewPage {
     let width = area.width.max(1) as usize;
-    // front matter is metadata, not prose: the reading view never shows it,
-    // whatever the editor has been told to do with it. The body's lines are
-    // still counted from the top of the file, so a click on a checkbox or a
-    // word still lands on the source line it came from.
+    // front matter is metadata, not prose: the reading view never shows it as
+    // YAML, whatever the editor has been told to do with it — it comes back
+    // below as the properties box, a line, or nothing, per `properties`. The
+    // body's lines are still counted from the top of the file, so a click on a
+    // checkbox or a word still lands on the source line it came from.
     let content = &app.active_note().content;
     let (skip, first) = crate::notes::front_matter_range(content)
         .map_or((0, 0), |r| (r.end, content[..r.end].lines().count()));
     let mut rendered =
         crate::render::render_page_at(&content[skip..], first, width, app.config.table_style);
     // the front matter comes back as a box of properties, not as the YAML
-    crate::render::prepend_properties(&mut rendered, content, width, crate::dates::today());
+    crate::render::prepend_properties(
+        &mut rendered,
+        content,
+        width,
+        crate::dates::today(),
+        app.properties_mode(),
+    );
     // the same folds the editor has: one set per note, whichever view made them
     let folded = app.folded_lines();
     crate::render::apply_folds(&mut rendered, &app.visible, &folded, width);

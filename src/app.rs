@@ -176,6 +176,7 @@ pub enum Command {
     InsertMath,
     InsertFootnote,
     Outline,
+    ToggleProperties,
 }
 
 /// The palette's row and column commands, in the order they are listed.
@@ -198,12 +199,13 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 30] = [
+const COMMANDS: [Command; 31] = [
     Command::NewNote,
     Command::DailyNote,
     Command::QuickOpen,
     Command::SearchAll,
     Command::Outline,
+    Command::ToggleProperties,
     Command::DeleteNote,
     Command::RenameFile,
     Command::MoveFile,
@@ -269,6 +271,7 @@ impl Command {
             Command::SplitDown => Action::OpenSplitDown,
             Command::NewTab => Action::OpenTab,
             Command::Outline => Action::Outline,
+            Command::ToggleProperties => Action::ToggleProperties,
         })
     }
 
@@ -304,6 +307,7 @@ impl Command {
             Command::InsertMath => ("Insert math block", "$$ … $$ on lines of their own"),
             Command::InsertFootnote => ("Insert footnote", "[^n] here, its text at the end of the note"),
             Command::Outline => ("Outline", "every heading in this note; ⏎ goes there, ⌥⏎ folds"),
+            Command::ToggleProperties => ("Toggle properties", "the front matter: box or line on the page, dim or hidden in the editor"),
             Command::TableSource => ("Table: Edit source", "the pipes, until the cursor leaves"),
             Command::Table(op) => {
                 use crate::table::Op;
@@ -474,6 +478,9 @@ pub struct App {
     pub active: usize,
     pub editor: Editor,
     pub view: View,
+    /// *Toggle properties* on a `properties: hide` setting: the box is shown
+    /// for the rest of the session, the setting untouched.
+    pub properties_peek: bool,
     pub overlay: Overlay,
     pub query: String,
     pub selected: usize,
@@ -808,6 +815,7 @@ impl App {
             active,
             editor: Editor::default(),
             view: View::Edit,
+            properties_peek: false,
             overlay: Overlay::None,
             query: String::new(),
             selected: 0,
@@ -1426,6 +1434,63 @@ impl App {
                 self.remember_active();
             }
             Err(e) => self.flash(format!("open failed: {e}")),
+        }
+    }
+
+    /// How the reading view draws this note's front matter right now: the
+    /// setting, except that *Toggle properties* on a `hide` setting shows the
+    /// box for the rest of the session without rewriting the setting.
+    pub fn properties_mode(&self) -> crate::config::Properties {
+        use crate::config::Properties;
+        match self.config.properties {
+            Properties::Hide if self.properties_peek => Properties::Box,
+            mode => mode,
+        }
+    }
+
+    /// *Toggle properties*, a click on the box's edge or on the line standing
+    /// in for it. On the page: box ⇄ line, written to the settings so every
+    /// note follows; from `hide`, a session-only peek at the box. In the
+    /// editor the same command flips `front_matter` between dim and hide.
+    fn toggle_properties(&mut self) {
+        use crate::config::{FrontMatter, Properties};
+        let (key, value) = match self.view {
+            View::Preview => {
+                let next = match self.config.properties {
+                    Properties::Box => Properties::Line,
+                    Properties::Line => Properties::Box,
+                    Properties::Hide => {
+                        self.properties_peek = !self.properties_peek;
+                        self.flash(if self.properties_peek {
+                            "properties: shown for now (setting stays hide)".to_string()
+                        } else {
+                            "properties: hide".to_string()
+                        });
+                        return;
+                    }
+                };
+                self.config.properties = next;
+                ("properties", next.name())
+            }
+            View::Edit => {
+                let next = match self.config.front_matter {
+                    FrontMatter::Hide => FrontMatter::Dim,
+                    FrontMatter::Dim | FrontMatter::Show => FrontMatter::Hide,
+                };
+                self.config.front_matter = next;
+                (
+                    "front_matter",
+                    match next {
+                        FrontMatter::Dim => "dim",
+                        FrontMatter::Show => "show",
+                        FrontMatter::Hide => "hide",
+                    },
+                )
+            }
+        };
+        match crate::config::set_value(key, value) {
+            Ok(()) => self.flash(format!("{key}: {value}")),
+            Err(e) => self.flash(format!("{key}: {value} (not saved: {e})")),
         }
     }
 
@@ -3428,6 +3493,10 @@ impl App {
                     self.open_outline();
                 }
             }
+            Action::ToggleProperties => {
+                self.overlay = Overlay::None;
+                self.toggle_properties();
+            }
             Action::NewNote => {
                 self.overlay = Overlay::None;
                 self.new_note();
@@ -3927,6 +3996,11 @@ impl App {
         let at = ratatui::layout::Position { x, y };
         if let Some((_, url)) = self.preview_links.iter().find(|(r, _)| r.contains(at)) {
             let url = url.clone();
+            // the properties box's own edge, and the line it folds to
+            if url == crate::render::PROPERTIES_HREF {
+                self.toggle_properties();
+                return;
+            }
             self.follow(md::LinkTarget::parse(&url));
             return;
         }
@@ -5456,6 +5530,19 @@ mod tests {
             assert!(c.action().is_some());
             assert!(!c.label().0.is_empty());
         }
+    }
+
+    #[test]
+    fn toggle_properties_is_a_palette_command_with_a_rebindable_key() {
+        assert!(COMMANDS.contains(&Command::ToggleProperties));
+        assert_eq!(Command::ToggleProperties.action(), Some(Action::ToggleProperties));
+        assert_eq!(Command::ToggleProperties.label().0, "Toggle properties");
+        let map = crate::keys::Keymap::default();
+        assert_eq!(map.label(Action::ToggleProperties), "");
+        assert!(map
+            .settings_rows()
+            .iter()
+            .any(|(k, v, _)| *k == "key_properties" && v == "none"));
     }
 
     #[test]
