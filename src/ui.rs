@@ -36,6 +36,15 @@ fn panel(app: &App) -> Block<'static> {
     }
 }
 
+/// Open an overlay panel: clear what is under `rect`, draw `block` there and
+/// hand back the area inside its border for the caller to fill.
+fn open_panel(f: &mut Frame, rect: Rect, block: Block) -> Rect {
+    f.render_widget(Clear, rect);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    inner
+}
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     if let Some(url) = app.zoom.clone() {
         draw_zoom(f, app, &url);
@@ -1136,7 +1145,6 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let shown = items.len().min(room) as u16;
     let rect = overlay_rect_wide(f, shown + chrome, 100);
     app.overlay_rect = rect;
-    f.render_widget(Clear, rect);
     let mut block = panel(app);
     // a tag's list is titled with the tag, so the box says what it is a list of
     if let Some((tag, _)) = app.tag_filter.as_ref().filter(|_| quick) {
@@ -1144,8 +1152,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     } else if quick {
         block = block.title(tab_strip(app));
     }
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    let inner = open_panel(f, rect, block);
 
     let rows = vec![Constraint::Length(1); shown as usize + 2 + usize::from(quick || outline)];
     let chunks = Layout::vertical(rows).split(inner);
@@ -1649,7 +1656,6 @@ fn draw_peek(f: &mut Frame, app: &mut App) {
     let rect = Rect::new(x, y, width, height);
     peek.rect = rect;
 
-    f.render_widget(Clear, rect);
     let title = format!(" {} ", truncate(&peek.name, inner_w.saturating_sub(2)));
     let mut block = block.title(Span::styled(title, theme::state()));
     let pos = (peek.rows.len() > peek.view_rows).then(|| {
@@ -1666,8 +1672,7 @@ fn draw_peek(f: &mut Frame, app: &mut App) {
     if let Some(pos) = pos {
         block = block.title_bottom(Line::from(Span::styled(pos, dim())).right_aligned());
     }
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    let inner = open_panel(f, rect, block);
     f.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -1751,19 +1756,14 @@ fn draw_help(f: &mut Frame, app: &App) {
         width,
         height,
     );
-    f.render_widget(Clear, rect);
     let block = panel(app).title(Span::styled(" help ", theme::state()));
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    let inner = open_panel(f, rect, block);
     f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_confirm(f: &mut Frame, app: &mut App) {
     let rect = overlay_rect(f, 4);
-    f.render_widget(Clear, rect);
-    let block = panel(app).border_style(theme::danger());
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    let inner = open_panel(f, rect, panel(app).border_style(theme::danger()));
     let title = app.active_note().title();
     let lines = vec![
         Line::from(Span::styled(
@@ -1782,10 +1782,7 @@ fn draw_confirm(f: &mut Frame, app: &mut App) {
 /// editable filename stem instead of a question.
 fn draw_rename(f: &mut Frame, app: &mut App) {
     let rect = overlay_rect(f, 4);
-    f.render_widget(Clear, rect);
-    let block = panel(app);
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    let inner = open_panel(f, rect, panel(app));
     let lines = vec![
         Line::from(vec![
             Span::styled(" rename file  ", theme::state()),

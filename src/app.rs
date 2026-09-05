@@ -1534,7 +1534,7 @@ impl App {
     /// would be nothing left to click). Written to the settings so every note
     /// follows. In the editor the command flips `front_matter` dim ⇄ hide.
     fn toggle_properties(&mut self, click: bool) {
-        use crate::config::{FrontMatter, Properties};
+        use crate::config::{FrontMatter, Properties, Words};
         let (key, value) = match self.view {
             View::Preview => {
                 let next = match self.config.properties {

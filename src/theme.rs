@@ -64,54 +64,75 @@ pub struct Palette {
     pub ground: Color,
 }
 
-/// The colour field names the settings file accepts, in the order the
-/// settings document lists them. The single source of truth: a name that
-/// isn't here can't be set and isn't documented.
-pub const COLOR_KEYS: [&str; 13] = [
-    "accent", "bright", "grey", "heading", "dim", "link", "code", "code_bg", "code_fg", "border",
-    "danger", "success", "ground",
+/// One settable colour: its settings-file name, the field it sets, and the
+/// one-line hint the settings document prints beside it.
+pub struct ColorKey {
+    pub name: &'static str,
+    field: fn(&mut Palette) -> &mut Color,
+    pub hint: &'static str,
+}
+
+/// Every colour the settings file accepts, in the order the settings document
+/// lists them. The single source of truth: a name that isn't here can't be
+/// set and isn't documented.
+pub const COLORS: [ColorKey; 13] = [
+    color("accent", |p| &mut p.accent, "h1, ticked boxes, the status bar"),
+    color("bright", |p| &mut p.bright, "h3, and the step that leads"),
+    color("grey", |p| &mut p.grey, "structure that recedes"),
+    color("heading", |p| &mut p.heading, "h2"),
+    color("dim", |p| &mut p.dim, "markers, rules, quotes"),
+    color("link", |p| &mut p.link, "links, which also underline"),
+    color("code", |p| &mut p.code, "inline code, no box"),
+    color("code_bg", |p| &mut p.code_bg, "behind a code block"),
+    color("code_fg", |p| &mut p.code_fg, "and the code on it"),
+    color("border", |p| &mut p.border, "panel borders"),
+    color(
+        "danger",
+        |p| &mut p.danger,
+        "the delete prompt, and a broken [[link]]",
+    ),
+    color("success", |p| &mut p.success, "tip and success callouts"),
+    color("ground", |p| &mut p.ground, "under a highlight"),
 ];
+
+const fn color(
+    name: &'static str,
+    field: fn(&mut Palette) -> &mut Color,
+    hint: &'static str,
+) -> ColorKey {
+    ColorKey { name, field, hint }
+}
+
+/// Just the names, derived from `COLORS`.
+pub const COLOR_KEYS: [&str; 13] = {
+    let mut keys = [""; 13];
+    let mut i = 0;
+    while i < keys.len() {
+        keys[i] = COLORS[i].name;
+        i += 1;
+    }
+    keys
+};
 
 impl Palette {
     /// Set one field by its settings-file name. Returns false for a name
     /// that isn't a colour, so the caller can report the typo.
     pub fn set(&mut self, key: &str, color: Color) -> bool {
-        match key {
-            "accent" => self.accent = color,
-            "bright" => self.bright = color,
-            "grey" => self.grey = color,
-            "heading" => self.heading = color,
-            "dim" => self.dim = color,
-            "link" => self.link = color,
-            "code" => self.code = color,
-            "code_bg" => self.code_bg = color,
-            "code_fg" => self.code_fg = color,
-            "border" => self.border = color,
-            "danger" => self.danger = color,
-            "success" => self.success = color,
-            "ground" => self.ground = color,
-            _ => return false,
+        match COLORS.iter().find(|c| c.name == key) {
+            Some(c) => {
+                *(c.field)(self) = color;
+                true
+            }
+            None => false,
         }
-        true
     }
 
     pub fn get(&self, key: &str) -> Option<Color> {
-        Some(match key {
-            "accent" => self.accent,
-            "bright" => self.bright,
-            "grey" => self.grey,
-            "heading" => self.heading,
-            "dim" => self.dim,
-            "link" => self.link,
-            "code" => self.code,
-            "code_bg" => self.code_bg,
-            "code_fg" => self.code_fg,
-            "border" => self.border,
-            "danger" => self.danger,
-            "success" => self.success,
-            "ground" => self.ground,
-            _ => return None,
-        })
+        let mut copy = *self;
+        COLORS
+            .iter()
+            .find(|c| c.name == key)
+            .map(|c| *(c.field)(&mut copy))
     }
 }
 

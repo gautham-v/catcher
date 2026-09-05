@@ -11,14 +11,35 @@
 //! given. A directory named after the tool can only be the tool's.
 //!
 //! `CATCHER_DIR` still wins over `notes_dir`, which keeps
-//! `CATCHER_DIR=/tmp/x cargo run` working. An old `config.toml` is read once,
-//! to seed `settings.md` the first time, and never again.
+//! `CATCHER_DIR=/tmp/x cargo run` working.
 
 use crate::keys::Keymap;
 use crate::theme::{self, Mode, Palette};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// A setting spelt as one of a few words. `WORDS` pairs each variant with
+/// its word, once; the settings file is read and written through it.
+pub trait Words: Copy + PartialEq + 'static {
+    const WORDS: &'static [(Self, &'static str)];
+
+    fn name(self) -> &'static str {
+        Self::WORDS
+            .iter()
+            .find(|(v, _)| *v == self)
+            .map(|(_, w)| *w)
+            .expect("every variant is listed in WORDS")
+    }
+
+    /// The variant `s` names, whatever its case; `None` for anything else.
+    fn parse(s: &str) -> Option<Self> {
+        Self::WORDS
+            .iter()
+            .find(|(_, w)| w.eq_ignore_ascii_case(s))
+            .map(|(v, _)| *v)
+    }
+}
 
 /// How a table too wide for the page is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -38,6 +59,16 @@ pub enum TableStyle {
     Cards,
 }
 
+impl Words for TableStyle {
+    const WORDS: &'static [(Self, &'static str)] = &[
+        (TableStyle::Auto, "auto"),
+        (TableStyle::Scroll, "scroll"),
+        (TableStyle::Fit, "fit"),
+        (TableStyle::Wrap, "wrap"),
+        (TableStyle::Cards, "cards"),
+    ];
+}
+
 /// What a plain click in the preview does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PreviewClick {
@@ -46,6 +77,11 @@ pub enum PreviewClick {
     Select,
     /// Drop into the editor at the same spot (how catcher used to behave).
     Edit,
+}
+
+impl Words for PreviewClick {
+    const WORDS: &'static [(Self, &'static str)] =
+        &[(PreviewClick::Select, "select"), (PreviewClick::Edit, "edit")];
 }
 
 /// What the editor does with a note's YAML front matter. The reading view has
@@ -62,6 +98,14 @@ pub enum FrontMatter {
     Hide,
 }
 
+impl Words for FrontMatter {
+    const WORDS: &'static [(Self, &'static str)] = &[
+        (FrontMatter::Dim, "dim"),
+        (FrontMatter::Show, "show"),
+        (FrontMatter::Hide, "hide"),
+    ];
+}
+
 /// What the reading view does with a note's front matter: the box of
 /// properties, a single line standing in for it, or nothing. The *Toggle
 /// properties* command cycles through all three and a click on the box or
@@ -75,14 +119,12 @@ pub enum Properties {
     Hide,
 }
 
-impl Properties {
-    pub fn name(self) -> &'static str {
-        match self {
-            Properties::Box => "box",
-            Properties::Line => "line",
-            Properties::Hide => "hide",
-        }
-    }
+impl Words for Properties {
+    const WORDS: &'static [(Self, &'static str)] = &[
+        (Properties::Box, "box"),
+        (Properties::Line, "line"),
+        (Properties::Hide, "hide"),
+    ];
 }
 
 /// Panel and overlay border treatment.
@@ -92,6 +134,14 @@ pub enum BorderStyle {
     Rounded,
     Square,
     None,
+}
+
+impl Words for BorderStyle {
+    const WORDS: &'static [(Self, &'static str)] = &[
+        (BorderStyle::Rounded, "rounded"),
+        (BorderStyle::Square, "square"),
+        (BorderStyle::None, "none"),
+    ];
 }
 
 /// One thing the status bar can show. The order they are listed in the
@@ -147,6 +197,14 @@ pub enum Theme {
     Auto,
     Dark,
     Light,
+}
+
+impl Words for Theme {
+    const WORDS: &'static [(Self, &'static str)] = &[
+        (Theme::Auto, "auto"),
+        (Theme::Dark, "dark"),
+        (Theme::Light, "light"),
+    ];
 }
 
 impl Theme {
@@ -287,15 +345,8 @@ fn default_notes_dir(home: &Path) -> PathBuf {
     new
 }
 
-/// The pre-markdown config file. Only ever read to seed `settings.md`.
-pub fn legacy_config_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("config.toml"))
-}
-
 impl Config {
-    /// Read the settings note, writing it on first run. Values found in an old
-    /// `config.toml` are carried across once, so an upgrade keeps its notes
-    /// dir and theme without the user doing anything.
+    /// Read the settings note, writing it on first run.
     pub fn load() -> Result<Config> {
         let (config, warning) = Config::load_reporting()?;
         if let Some(w) = warning {
@@ -312,13 +363,9 @@ impl Config {
     pub fn load_reporting() -> Result<(Config, Option<String>)> {
         let path = settings_path()?;
         if !path.exists() {
-            let seed = legacy_config_path()
-                .ok()
-                .and_then(|p| fs::read_to_string(p).ok())
-                .unwrap_or_default();
-            let migrated = Config::from_str(&seed);
-            write_settings(&path, &migrated)?;
-            return Ok((migrated, None));
+            let fresh = Config::from_str("");
+            write_settings(&path, &fresh)?;
+            return Ok((fresh, None));
         }
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -354,9 +401,7 @@ impl Config {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Config {
         let mut c = Config::from_file_text(text);
-        if let Some(d) =
-            std::env::var_os("CATCHER_DIR").or_else(|| std::env::var_os("TINYNOTE_DIR"))
-        {
+        if let Some(d) = std::env::var_os("CATCHER_DIR") {
             c.notes_dir = PathBuf::from(d);
             if value(text, "attachments_dir").is_none() {
                 c.attachments_dir = c.notes_dir.join("attachments");
@@ -380,11 +425,7 @@ impl Config {
 
         // anything unrecognised is auto: a typo should leave the terminal's
         // own polarity standing rather than pin a palette that reads wrong
-        c.theme = match value(text, "theme").as_deref() {
-            Some("light") => Theme::Light,
-            Some("dark") => Theme::Dark,
-            _ => Theme::Auto,
-        };
+        c.theme = word(text, "theme").unwrap_or(Theme::Auto);
         c.palette = theme::base(c.theme.mode());
         for key in theme::COLOR_KEYS {
             if let Some(color) = value(text, key).and_then(|v| theme::parse_color(&v)) {
@@ -400,12 +441,7 @@ impl Config {
                 v.parse().unwrap_or(c.page_width)
             };
         }
-        c.borders = match value(text, "borders").as_deref() {
-            Some("square") => BorderStyle::Square,
-            Some("none") => BorderStyle::None,
-            Some("rounded") => BorderStyle::Rounded,
-            _ => c.borders,
-        };
+        c.borders = word(text, "borders").unwrap_or(c.borders);
         c.bold_headings = flag(text, "bold_headings", c.bold_headings);
         c.status_bar = flag(text, "status_bar", c.status_bar);
         c.key_hints = flag(text, "key_hints", c.key_hints);
@@ -447,14 +483,7 @@ impl Config {
         if let Some(v) = value(text, "tab_width").and_then(|v| v.parse::<usize>().ok()) {
             c.tab_width = v.clamp(1, 16);
         }
-        c.table_style = match value(text, "table_style").as_deref() {
-            Some("scroll") => TableStyle::Scroll,
-            Some("fit") => TableStyle::Fit,
-            Some("wrap") => TableStyle::Wrap,
-            Some("cards") => TableStyle::Cards,
-            Some("auto") => TableStyle::Auto,
-            _ => c.table_style,
-        };
+        c.table_style = word(text, "table_style").unwrap_or(c.table_style);
         c.quick_open_dirs = values(text, "quick_open_dirs")
             .iter()
             // one folder per line, or several on one line separated by commas
@@ -469,24 +498,10 @@ impl Config {
             c.daily_template = expand(&v, &home);
         }
         c.keys = Keymap::from_settings(|key| value(text, key));
-        c.preview_click = match value(text, "preview_click").as_deref() {
-            Some("edit") => PreviewClick::Edit,
-            Some("select") => PreviewClick::Select,
-            _ => c.preview_click,
-        };
+        c.preview_click = word(text, "preview_click").unwrap_or(c.preview_click);
         c.linked_mentions = flag(text, "linked_mentions", c.linked_mentions);
-        c.front_matter = match value(text, "front_matter").as_deref() {
-            Some("show") => FrontMatter::Show,
-            Some("hide") => FrontMatter::Hide,
-            Some("dim") => FrontMatter::Dim,
-            _ => c.front_matter,
-        };
-        c.properties = match value(text, "properties").as_deref() {
-            Some("box") => Properties::Box,
-            Some("line") => Properties::Line,
-            Some("hide") => Properties::Hide,
-            _ => c.properties,
-        };
+        c.front_matter = word(text, "front_matter").unwrap_or(c.front_matter);
+        c.properties = word(text, "properties").unwrap_or(c.properties);
         c
     }
 
@@ -560,11 +575,7 @@ impl Config {
         d.section("Appearance");
         d.row(
             "theme",
-            match self.theme {
-                Theme::Auto => "auto",
-                Theme::Light => "light",
-                Theme::Dark => "dark",
-            },
+            self.theme.name(),
             "auto · dark · light",
         );
         d.row(
@@ -578,11 +589,7 @@ impl Config {
         );
         d.row(
             "borders",
-            match self.borders {
-                BorderStyle::Rounded => "rounded",
-                BorderStyle::Square => "square",
-                BorderStyle::None => "none",
-            },
+            self.borders.name(),
             "rounded · square · none",
         );
         d.row("bold_headings", yn(self.bold_headings), "yes · no");
@@ -612,13 +619,13 @@ impl Config {
         // put every colour back. The key stays in the document so it is still
         // discoverable; only the value defers.
         let base = theme::base(self.theme.mode());
-        for (key, hint) in COLOUR_HINTS {
-            let mine = self.palette.get(key);
-            let value = match (mine, base.get(key)) {
-                (Some(c), Some(b)) if c != b => theme::color_to_string(c),
+        for c in &theme::COLORS {
+            let mine = self.palette.get(c.name);
+            let value = match (mine, base.get(c.name)) {
+                (Some(m), Some(b)) if m != b => theme::color_to_string(m),
                 _ => "theme".to_string(),
             };
-            d.row(key, value, hint);
+            d.row(c.name, value, c.hint);
         }
 
         d.section("Editing");
@@ -637,32 +644,19 @@ impl Config {
         // an editor setting: the reading view's is `properties`, under Reading
         d.row(
             "front_matter",
-            match self.front_matter {
-                FrontMatter::Dim => "dim",
-                FrontMatter::Show => "show",
-                FrontMatter::Hide => "hide",
-            },
+            self.front_matter.name(),
             "dim · show · hide",
         );
 
         d.section("Reading");
         d.row(
             "table_style",
-            match self.table_style {
-                TableStyle::Auto => "auto",
-                TableStyle::Scroll => "scroll",
-                TableStyle::Fit => "fit",
-                TableStyle::Wrap => "wrap",
-                TableStyle::Cards => "cards",
-            },
+            self.table_style.name(),
             "auto · scroll · fit · wrap · cards",
         );
         d.row(
             "preview_click",
-            match self.preview_click {
-                PreviewClick::Select => "select",
-                PreviewClick::Edit => "edit",
-            },
+            self.preview_click.name(),
             "select · edit",
         );
         d.row(
@@ -810,23 +804,6 @@ fn setting_keys(text: &str) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-/// The one-line hint beside each colour, in the order the file lists them.
-const COLOUR_HINTS: [(&str, &str); 13] = [
-    ("accent", "h1, ticked boxes, the status bar"),
-    ("bright", "h3, and the step that leads"),
-    ("grey", "structure that recedes"),
-    ("heading", "h2"),
-    ("dim", "markers, rules, quotes"),
-    ("link", "links, which also underline"),
-    ("code", "inline code, no box"),
-    ("code_bg", "behind a code block"),
-    ("code_fg", "and the code on it"),
-    ("border", "panel borders"),
-    ("danger", "the delete prompt, and a broken [[link]]"),
-    ("success", "tip and success callouts"),
-    ("ground", "under a highlight"),
-];
-
 /// Builds the settings note: one `- key: value` line per setting with its hint
 /// aligned into a column, section by section. Alignment is per section, so a
 /// long path in one does not push every hint in the file to the right.
@@ -891,9 +868,8 @@ impl Doc {
 /// `key: value`, `- key: value` or `key = value`, first match wins. `#` starts
 /// a comment except inside quotes — a path may legitimately contain one.
 ///
-/// Both separators are accepted so the old TOML file can be read by the same
-/// parser during the one-time migration, and so a `key = value` typed out of
-/// habit still works.
+/// Both separators are accepted so a `key = value` typed out of habit still
+/// works.
 fn value(text: &str, key: &str) -> Option<String> {
     for line in text.lines() {
         let line = strip_comment(line);
@@ -943,6 +919,11 @@ fn flag(text: &str, key: &str, default: bool) -> bool {
     }
 }
 
+/// A word-valued setting, or `None` when unset or not one of its words.
+fn word<T: Words>(text: &str, key: &str) -> Option<T> {
+    value(text, key).and_then(|v| T::parse(&v))
+}
+
 /// Drop a trailing `# comment`. A `#` only opens one when a space follows it,
 /// which is how a comment is actually written — and is what keeps `#00ff88`
 /// readable as a colour and `/a/c#1/notes` as a path.
@@ -979,24 +960,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn word_settings_parse_in_any_case_and_write_back_their_word() {
+        let c = Config::from_file_text("- theme: LIGHT\n- borders: Square\n- table_style: cards\n");
+        assert_eq!(c.theme, Theme::Light);
+        assert_eq!(c.borders, BorderStyle::Square);
+        assert_eq!(c.table_style, TableStyle::Cards);
+        assert_eq!(TableStyle::parse("nope"), None);
+        assert_eq!(c.table_style.name(), "cards");
+        for c in theme::COLORS {
+            assert!(theme::COLOR_KEYS.contains(&c.name));
+        }
+    }
+
+    #[test]
     fn reads_markdown_list_settings() {
         let text = "## Folders\n\n- notes_dir: /a/b\n- theme: light\n";
         assert_eq!(value(text, "notes_dir").as_deref(), Some("/a/b"));
         assert_eq!(value(text, "theme").as_deref(), Some("light"));
         assert_eq!(value(text, "attachments_dir"), None);
-    }
-
-    #[test]
-    fn the_old_toml_spelling_still_parses_for_the_migration() {
-        let text = "# catcher configuration.\nnotes_dir = \"/a/b\"  # trailing\n";
-        assert_eq!(value(text, "notes_dir").as_deref(), Some("/a/b"));
-        // a commented-out key is not a value
-        assert_eq!(value("# notes_dir = \"/x\"\n", "notes_dir"), None);
-        // …but a colour is not a comment
-        assert_eq!(
-            value("- accent: #00ff88\n", "accent").as_deref(),
-            Some("#00ff88")
-        );
     }
 
     #[test]
