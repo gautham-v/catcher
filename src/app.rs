@@ -1491,6 +1491,12 @@ impl App {
     /// and the styling only ever reads it.
     fn refresh_links(&mut self) {
         crate::md::links::set_known(self.open_index.iter().flat_map(index::link_keys).collect());
+        // an embedded note is found the way a followed link is: by the same
+        // index, ranked the same way
+        let entries = self.open_index.clone();
+        crate::md::embeds::set_resolver(Box::new(move |target| {
+            index::resolve(&entries, target).map(|e| e.path.clone())
+        }));
     }
 
     /// Follow a `[[wikilink]]`, or offer to make the note it names.
@@ -2826,6 +2832,20 @@ impl App {
     /// drawn under it?
     pub fn callout_closes(&self, blocks: &[md::Block], row: usize) -> bool {
         md::block_at(blocks, row).is_some_and(|b| b.kind == md::BlockKind::Callout && b.end == row)
+    }
+
+    /// The rows hung under `row` when it is a `![[note]]` embed drawn as a
+    /// card: the first lines of the embedded note. None while the cursor is
+    /// on it, which is when the line shows its syntax instead.
+    pub fn embed_rows(&self, blocks: &[md::Block], row: usize, width: usize) -> Vec<md::RLine> {
+        let Some(block) = md::block_at(blocks, row) else {
+            return Vec::new();
+        };
+        if block.kind != md::BlockKind::Embed || self.revealed(block) {
+            return Vec::new();
+        }
+        let src = self.editor.lines().get(row).map(String::as_str).unwrap_or("");
+        md::embed_rows(src, width, &self.config.keys.label(Action::FollowLink))
     }
 
     /// Does a rule sit under `row` in the editor: a table row with another

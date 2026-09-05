@@ -862,6 +862,17 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
         }
     }
 
+    // ![[note]] in a sentence — an embedded note, drawn as the link it also
+    // is: the `!` goes with the brackets, and a `#heading` reads as ` › `
+    if c == '!' && b.src.get(i + 1) == Some(&'[') && b.src.get(i + 2) == Some(&'[') && links::enabled() {
+        if let Some(w) = wikilink_at(b.src, i + 1) {
+            let style = wiki_style(base, &w.target);
+            b.sub("", style, i);
+            embed_label(b, &w, style);
+            return Some(w.end);
+        }
+    }
+
     // [[wikilink]] — checked before `[text](url)`, which falls straight
     // through on a double bracket and would leave it as literal text
     if c == '[' && b.src.get(i + 1) == Some(&'[') && links::enabled() {
@@ -1193,6 +1204,28 @@ pub fn strip_comments(markdown: &str) -> (String, Vec<(usize, usize)>) {
     (out, map)
 }
 
+/// The label of an embedded note link, brackets hidden. A label typed after
+/// a pipe is kept as typed; a bare `Note#Heading` shows as `Note › Heading`,
+/// the `#` standing for the three characters so every column still maps.
+fn embed_label(b: &mut Builder, w: &Wikilink, style: Style) {
+    for k in w.start..w.label_start {
+        b.sub("", style, k);
+    }
+    let aliased = w.label_start != w.start + 2;
+    let mut seen_hash = false;
+    for k in w.label_start..w.label_end {
+        if !aliased && !seen_hash && b.src[k] == '#' {
+            seen_hash = true;
+            b.sub(" › ", style, k);
+        } else {
+            b.keep(k, style);
+        }
+    }
+    for k in w.label_end..w.end {
+        b.sub("", style, k);
+    }
+}
+
 /// Hide `open..body_start` and `body_end..close_end`, style the body between.
 fn delimited(
     b: &mut Builder,
@@ -1237,7 +1270,9 @@ pub fn link_at(line: &str, col: usize) -> Option<LinkTarget> {
         // one, and would walk into the middle of it looking for a `(`
         if src[i] == '[' && src.get(i + 1) == Some(&'[') && links::enabled() {
             if let Some(w) = wikilink_at(&src, i) {
-                if (w.start..w.end).contains(&col) {
+                // an embedded note's `!` is part of the span too
+                let start = if i > 0 && src[i - 1] == '!' { i - 1 } else { w.start };
+                if (start..w.end).contains(&col) {
                     return Some(LinkTarget::Wiki(w.target));
                 }
                 i = w.end;
@@ -1472,12 +1507,14 @@ pub fn wikilink_at(src: &[char], i: usize) -> Option<Wikilink> {
     if src.get(i) != Some(&'[') || src.get(i + 1) != Some(&'[') {
         return None;
     }
-    // `\[[x]]` is someone showing the syntax rather than using it, and
-    // `![[x.png]]` is an Obsidian embed — a picture, not somewhere to go — so
-    // neither of them becomes a link
-    if i > 0 && matches!(src[i - 1], '\\' | '!') {
+    // `\[[x]]` is someone showing the syntax rather than using it, so it
+    // never becomes a link; `![[x]]` is an Obsidian embed, and is judged
+    // below once the target is known — a picture is not somewhere to go, but
+    // an embedded note is still the note it names
+    if i > 0 && src[i - 1] == '\\' {
         return None;
     }
+    let embedded = i > 0 && src[i - 1] == '!';
     // a wikilink never spans a line, and a stray bracket inside one means the
     // pair was never a pair: `[[a] b]]` and `[[unclosed` stay literal text
     let body_start = i + 2;
@@ -1509,6 +1546,11 @@ pub fn wikilink_at(src: &[char], i: usize) -> Option<Wikilink> {
     let raw: String = src[body_start..target_end].iter().collect();
     let target = raw.split('#').next().unwrap_or("").trim().to_string();
     if target.is_empty() {
+        return None;
+    }
+    // `![[picture.png]]` is a picture, drawn by the image path; only an
+    // embedded *note* is a link
+    if embedded && is_image_path(&target) {
         return None;
     }
     Some(Wikilink {
@@ -1777,6 +1819,10 @@ pub enum BlockKind {
     /// A `%%` … `%%` block comment, fences included: drawn quiet and as
     /// typed, and nothing inside it is markdown. An unclosed `%%` is not one.
     Comment,
+    /// A line holding nothing but `![[note]]` — an embedded note, drawn as a
+    /// card: its title on the source line, and the first lines of its body on
+    /// rows hung under it the way a callout hangs its bottom edge.
+    Embed,
 }
 
 /// One block, as an inclusive range of source lines.
@@ -2364,6 +2410,44 @@ pub fn embed_line(line: &str) -> Option<(String, String)> {
     Some((alt.to_string(), url.to_string()))
 }
 
+/// An Obsidian note embed: what `![[Note#Heading|label]]` names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoteEmbed {
+    /// The note, trimmed, without its `#heading`.
+    pub target: String,
+    /// The heading inside it, when one was named.
+    pub heading: Option<String>,
+    /// The text after the pipe, when there was one.
+    pub label: Option<String>,
+}
+
+/// `![[Note]]`, `![[Note#Heading]]` or `![[Note|label]]` alone on a line,
+/// where the target is a note rather than a picture — the picture case is
+/// [`embed_line`]'s. Brackets inside the body mean the pair was never a pair.
+pub fn note_embed_line(line: &str) -> Option<NoteEmbed> {
+    let t = line.trim();
+    let body = t.strip_prefix("![[")?.strip_suffix("]]")?;
+    if body.contains('[') || body.contains(']') || body.contains('\n') {
+        return None;
+    }
+    let (target, label) = match body.split_once('|') {
+        Some((u, l)) => (u.trim(), Some(l.trim()).filter(|l| !l.is_empty())),
+        None => (body.trim(), None),
+    };
+    let (note, heading) = match target.split_once('#') {
+        Some((n, h)) => (n.trim(), Some(h.trim()).filter(|h| !h.is_empty())),
+        None => (target, None),
+    };
+    if note.is_empty() || is_image_path(note) {
+        return None;
+    }
+    Some(NoteEmbed {
+        target: note.to_string(),
+        heading: heading.map(str::to_string),
+        label: label.map(str::to_string),
+    })
+}
+
 /// Whether a path names a picture the preview could draw, by extension.
 pub fn is_image_path(path: &str) -> bool {
     let ext = std::path::Path::new(path)
@@ -2475,6 +2559,12 @@ pub fn blocks_from(lines: &[String], from: usize) -> Vec<Block> {
                 start: i,
                 end: i,
             });
+        } else if links::enabled() && note_embed_line(&lines[i]).is_some() {
+            out.push(Block {
+                kind: BlockKind::Embed,
+                start: i,
+                end: i,
+            });
         }
         i += 1;
     }
@@ -2502,6 +2592,7 @@ pub fn style_block_line(lines: &[String], block: &Block, row: usize, width: usiz
         BlockKind::Math => math_line(src, row == block.start, row == block.end, width),
         BlockKind::Callout => callout_line(lines, block, row, width, false),
         BlockKind::Table => table_line(&lines[block.start..=block.end], row - block.start, width),
+        BlockKind::Embed => embed_title_line(src, width),
     }
 }
 
@@ -2720,6 +2811,313 @@ fn image_fallback_line(src: &str) -> RLine {
         })
         .collect();
     done(cells, src)
+}
+
+// ---------------------------------------------------------------------------
+// Note embeds
+//
+// `![[note]]` on a line of its own pulls another note into this one. Both
+// views draw it as a card: the note's title, then the first few lines of its
+// body. The file behind it is found the way a wikilink is followed — through
+// the vault index — and read from disk, so the card is always what the note
+// says now rather than what it said when it was linked.
+// ---------------------------------------------------------------------------
+
+/// Which file a `![[note]]` embed reads, and whether the vault has been walked
+/// at all yet.
+///
+/// Process-wide, the sibling of [`links`] and for the same reason: the card is
+/// drawn deep inside line styling, where no vault index is to hand. The app
+/// installs a resolver after every index walk, so an embed resolves exactly
+/// the way following the same link would.
+pub mod embeds {
+    use std::path::PathBuf;
+    use std::sync::RwLock;
+
+    /// A link target → the file it names, by the index's own rules.
+    pub type Resolver = Box<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
+
+    static RESOLVER: RwLock<Option<Resolver>> = RwLock::new(None);
+
+    /// What resolving a target came to.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Found {
+        /// The note, by path.
+        Note(PathBuf),
+        /// The vault has no such note.
+        Missing,
+        /// Nothing has been walked yet, so nobody can say.
+        Unknown,
+    }
+
+    /// Install the resolver. Called after each index walk, never per frame.
+    pub fn set_resolver(r: Resolver) {
+        if let Ok(mut w) = RESOLVER.write() {
+            *w = Some(r);
+        }
+    }
+
+    /// The file `target` names.
+    pub fn resolve(target: &str) -> Found {
+        match RESOLVER.read() {
+            Ok(r) => match &*r {
+                Some(f) => f(target).map_or(Found::Missing, Found::Note),
+                None => Found::Unknown,
+            },
+            Err(_) => Found::Unknown,
+        }
+    }
+
+    /// Back to "nothing walked yet". Only the tests want this.
+    #[cfg(test)]
+    pub fn forget() {
+        if let Ok(mut w) = RESOLVER.write() {
+            *w = None;
+        }
+    }
+
+    /// The resolver is process-wide and `cargo test` runs in parallel, so the
+    /// tests that install one — in this module and in the renderer's — take
+    /// turns here.
+    #[cfg(test)]
+    pub fn turn() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A resolver over one folder: `name` is `<dir>/<name>.md` when that file
+    /// exists. Enough of the index's rules for a test vault.
+    #[cfg(test)]
+    pub fn install_dir(dir: &std::path::Path) {
+        let dir = dir.to_path_buf();
+        set_resolver(Box::new(move |target| {
+            let path = dir.join(format!("{}.md", super::link_key(target)));
+            path.exists().then_some(path)
+        }));
+    }
+}
+
+/// How many lines of the embedded note the card shows.
+pub const EMBED_LINES: usize = 3;
+/// The most of an embedded note that is read: a card wants its first lines,
+/// not a megabyte of someone's log.
+const EMBED_READ_CAP: u64 = 64 * 1024;
+
+/// What a `![[note]]` card shows, worked out once and drawn by either view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbedCard {
+    /// The note's title — or the target as typed, when there is no note.
+    pub title: String,
+    /// The heading the embed points into, when it names one.
+    pub heading: Option<String>,
+    /// The first lines of the body (or of the section), blanks skipped.
+    pub lines: Vec<String>,
+    /// How many more lines the section has past the ones shown.
+    pub more: usize,
+    /// Whether the note was found at all.
+    pub found: embeds::Found,
+}
+
+impl EmbedCard {
+    /// The title row's text: `Title`, or `Title › Heading`.
+    pub fn head(&self) -> String {
+        match &self.heading {
+            Some(h) => format!("{} › {h}", self.title),
+            None => self.title.clone(),
+        }
+    }
+}
+
+/// The card for `embed`: the target resolved, the file read, the section
+/// under the heading (or the body) cut to its first lines.
+pub fn embed_card(embed: &NoteEmbed) -> EmbedCard {
+    let found = embeds::resolve(&embed.target);
+    let mut card = EmbedCard {
+        title: embed.target.clone(),
+        heading: embed.heading.clone(),
+        lines: Vec::new(),
+        more: 0,
+        found: found.clone(),
+    };
+    let embeds::Found::Note(path) = found else {
+        return card;
+    };
+    let Some(content) = read_embed(&path) else {
+        card.found = embeds::Found::Missing;
+        return card;
+    };
+    card.title = crate::notes::title_of(&content);
+    let body = crate::notes::body_after_front_matter(&content);
+    let lines: Vec<&str> = body.lines().collect();
+    let section: Vec<&str> = match &embed.heading {
+        Some(h) => match section_under(&lines, h) {
+            Some(s) => s,
+            None => {
+                card.lines.push("(no such heading)".to_string());
+                return card;
+            }
+        },
+        None => {
+            // the title line is already the card's first row
+            let first = lines.iter().position(|l| !l.trim().is_empty());
+            match first {
+                Some(i) if heading_text(lines[i]).is_some_and(|t| t == card.title) => {
+                    lines[i + 1..].to_vec()
+                }
+                _ => lines,
+            }
+        }
+    };
+    let prose: Vec<&str> = section
+        .into_iter()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    card.lines = prose
+        .iter()
+        .take(EMBED_LINES)
+        .map(|l| l.trim().to_string())
+        .collect();
+    card.more = prose.len().saturating_sub(EMBED_LINES);
+    card
+}
+
+/// The text of an ATX heading line, hashes and blanks stripped.
+fn heading_text(line: &str) -> Option<String> {
+    crate::fold::heading_level(line)?;
+    Some(line.trim().trim_start_matches('#').trim().to_string())
+}
+
+/// The lines under the heading called `name` (matched without case), up to
+/// the next heading of the same or a higher level. `None` when no heading
+/// of that name exists.
+fn section_under<'a>(lines: &[&'a str], name: &str) -> Option<Vec<&'a str>> {
+    let want = name.trim().to_lowercase();
+    let at = lines
+        .iter()
+        .position(|l| heading_text(l).is_some_and(|t| t.to_lowercase() == want))?;
+    let level = crate::fold::heading_level(lines[at]).unwrap_or(usize::MAX);
+    let end = (at + 1..lines.len())
+        .find(|&i| crate::fold::heading_level(lines[i]).is_some_and(|l| l <= level))
+        .unwrap_or(lines.len());
+    Some(lines[at + 1..end].to_vec())
+}
+
+/// A remembered read: the file's stamp and size, and what it held.
+type EmbedMemo = (Option<std::time::SystemTime>, u64, std::rc::Rc<String>);
+
+thread_local! {
+    /// The embedded notes read so far, by path.
+    static EMBED_MEMO: std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, EmbedMemo>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The first [`EMBED_READ_CAP`] bytes of `path`, re-read only when the file's
+/// stamp or size has changed since — the card is asked for several times a
+/// frame, and a stat is the most that should cost.
+fn read_embed(path: &std::path::Path) -> Option<std::rc::Rc<String>> {
+    let meta = std::fs::metadata(path).ok()?;
+    let stamp = (meta.modified().ok(), meta.len());
+    EMBED_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if let Some((m, len, text)) = memo.get(path) {
+            if (*m, *len) == stamp {
+                return Some(text.clone());
+            }
+        }
+        use std::io::Read;
+        let mut buf = Vec::new();
+        std::fs::File::open(path)
+            .ok()?
+            .take(EMBED_READ_CAP)
+            .read_to_end(&mut buf)
+            .ok()?;
+        let text = std::rc::Rc::new(String::from_utf8_lossy(&buf).into_owned());
+        memo.insert(path.to_path_buf(), (stamp.0, stamp.1, text.clone()));
+        Some(text)
+    })
+}
+
+/// The colour an embed card's rail and title are drawn in.
+pub fn embed_style() -> Style {
+    theme::callout("note")
+}
+
+/// The card's rail: a quote bar and a space.
+fn embed_rail(style: Style, src: usize) -> Vec<Cell> {
+    let mut cells = at(theme::QUOTE_BAR, style, src);
+    cells.extend(at(" ", style, src));
+    cells
+}
+
+/// The source line of a `![[note]]` embed in the editor: the card's title
+/// row. Columns walk along the source so a click anywhere on it lands on the
+/// line, which reveals the syntax.
+fn embed_title_line(src: &str, width: usize) -> RLine {
+    let len = src.chars().count();
+    let Some(embed) = note_embed_line(src) else {
+        return RLine::raw(src);
+    };
+    let card = embed_card(&embed);
+    let style = embed_style();
+    let mut cells = embed_rail(style, 0);
+    let (text, text_style) = match card.found {
+        embeds::Found::Missing => (
+            format!("{} (no such note)", card.head()),
+            theme::grey(),
+        ),
+        _ => (card.head(), style.add_modifier(Modifier::BOLD)),
+    };
+    let room = if width == usize::MAX { usize::MAX } else { width.saturating_sub(2).max(1) };
+    let text = if room == usize::MAX { text } else { truncate(&text, room) };
+    cells.extend(text.chars().enumerate().map(|(i, ch)| Cell {
+        ch,
+        style: text_style,
+        src: (i + 2).min(len),
+    }));
+    done(cells, src)
+}
+
+/// The rows hung under a `![[note]]` line in the editor: the first lines of
+/// the embedded note, dimmed, and a last row saying how to open it and how
+/// much was left out. Nothing at all while the vault is still being walked or
+/// the note does not exist — the title row has already said so.
+pub fn embed_rows(src: &str, width: usize, open_key: &str) -> Vec<RLine> {
+    let Some(embed) = note_embed_line(src) else {
+        return Vec::new();
+    };
+    let card = embed_card(&embed);
+    if !matches!(card.found, embeds::Found::Note(_)) {
+        return Vec::new();
+    }
+    let style = embed_style();
+    let room = if width == usize::MAX { usize::MAX } else { width.saturating_sub(2).max(1) };
+    let row = |text: &str, text_style: Style| {
+        let mut cells = embed_rail(style, 0);
+        let text = if room == usize::MAX { text.to_string() } else { truncate(text, room) };
+        cells.extend(at(&text, text_style, 0));
+        RLine { cells, src_len: 0 }
+    };
+    let mut out: Vec<RLine> = card
+        .lines
+        .iter()
+        .map(|l| row(l, theme::marker()))
+        .collect();
+    if card.more > 0 {
+        out.push(row(
+            &format!("{open_key} opens · {}", more_lines(card.more)),
+            theme::marker(),
+        ));
+    }
+    out
+}
+
+/// `1 more line` / `N more lines`.
+pub fn more_lines(n: usize) -> String {
+    if n == 1 {
+        "1 more line".to_string()
+    } else {
+        format!("{n} more lines")
+    }
 }
 
 /// One source cell of a table row: its trimmed text and where that text starts.
@@ -3577,6 +3975,165 @@ mod tests {
         assert!(blocks(&["![[a.png]]".to_string()])
             .iter()
             .any(|b| b.kind == BlockKind::Image));
+    }
+
+    #[test]
+    fn a_note_embed_alone_on_a_line_is_an_embed_block() {
+        assert_eq!(
+            note_embed_line("  ![[Plan#Goals|the goals]]  "),
+            Some(NoteEmbed {
+                target: "Plan".into(),
+                heading: Some("Goals".into()),
+                label: Some("the goals".into()),
+            })
+        );
+        assert_eq!(
+            note_embed_line("![[plan]]"),
+            Some(NoteEmbed {
+                target: "plan".into(),
+                heading: None,
+                label: None,
+            })
+        );
+        // a picture is a picture, and anything malformed is text
+        assert_eq!(note_embed_line("![[a.png]]"), None);
+        assert_eq!(note_embed_line("![[plan]] tail"), None);
+        assert_eq!(note_embed_line("![[#Goals]]"), None);
+        assert_eq!(note_embed_line("![[a]b]]"), None);
+        assert_eq!(note_embed_line("[[plan]]"), None);
+        let bs = blocks(&buf("![[plan]]\ntext\n![[a.png]]"));
+        assert_eq!(bs[0].kind, BlockKind::Embed);
+        assert_eq!((bs[0].start, bs[0].end), (0, 0));
+        assert_eq!(bs[1].kind, BlockKind::Image);
+    }
+
+    #[test]
+    fn an_embedded_note_in_a_sentence_is_drawn_as_a_link() {
+        let _turn = colours();
+        links::forget();
+        // the `!` goes with the brackets, and the heading reads as ` › `
+        let l = style_line("see ![[plan#Goals]] now");
+        assert_eq!(text(&l), "see plan › Goals now");
+        assert_eq!(l.cells[4].style.fg, theme::link().fg);
+        // every drawn character still knows its column: the "p" of plan
+        assert_eq!(l.one_row().display_to_source(4), 7);
+        // a typed label is kept as typed
+        assert_eq!(text(&style_line("![[plan#Goals|here]]")), "here");
+        // ⌥⏎ on the `!` follows it, like anywhere else on the span
+        let wiki = Some(LinkTarget::Wiki("plan".to_string()));
+        assert_eq!(link_at("see ![[plan#Goals]] now", 4), wiki);
+        assert_eq!(link_at("see ![[plan#Goals]] now", 18), wiki);
+        assert_eq!(link_at("see ![[plan#Goals]] now", 3), None);
+        // and the mentions scan counts an embed as the link it is
+        assert_eq!(wikilinks("![[plan]]")[0].target, "plan");
+        // a picture is still not a link
+        assert_eq!(text(&style_line("see ![[pic.png]] now")), "see ![[pic.png]] now");
+        assert_eq!(link_at("see ![[pic.png]] now", 6), None);
+    }
+
+    /// A vault of one note, `plan.md`, for the embed cards to read.
+    fn embed_vault(name: &str) -> std::path::PathBuf {
+        let dir = crate::testutil::tmpdir("md", name);
+        crate::testutil::write(
+            &dir,
+            "plan.md",
+            "---\ntags: x\n---\n# Plan\n\nFirst line.\nSecond **line**.\n\n## Goals\n- ship it\n- test it\n\n- doc it\n- more\n- and more\n\n## Later\nNothing.\n",
+        );
+        dir
+    }
+
+    #[test]
+    fn an_embed_card_reads_the_note_it_names() {
+        let _turn = embeds::turn();
+        let dir = embed_vault("card");
+        embeds::install_dir(&dir);
+
+        let whole = embed_card(&note_embed_line("![[Plan]]").unwrap());
+        assert_eq!(whole.title, "Plan");
+        assert_eq!(whole.head(), "Plan");
+        // the front matter and the title line are not the body
+        assert_eq!(whole.lines, vec!["First line.", "Second **line**.", "## Goals"]);
+        assert_eq!(whole.more, 7);
+        assert!(matches!(whole.found, embeds::Found::Note(_)));
+
+        // a heading picks its section, whatever its case
+        let goals = embed_card(&note_embed_line("![[plan#goals]]").unwrap());
+        assert_eq!(goals.head(), "Plan › goals");
+        assert_eq!(goals.lines, vec!["- ship it", "- test it", "- doc it"]);
+        assert_eq!(goals.more, 2);
+        let later = embed_card(&note_embed_line("![[plan#Later]]").unwrap());
+        assert_eq!(later.lines, vec!["Nothing."]);
+        assert_eq!(later.more, 0);
+        let nope = embed_card(&note_embed_line("![[plan#Nope]]").unwrap());
+        assert_eq!(nope.lines, vec!["(no such heading)"]);
+
+        // no such note: the target as typed, and nothing to show
+        let gone = embed_card(&note_embed_line("![[gone]]").unwrap());
+        assert_eq!(gone.found, embeds::Found::Missing);
+        assert_eq!(gone.title, "gone");
+        assert!(gone.lines.is_empty());
+
+        // an edit on disk is seen on the next read
+        crate::testutil::write(&dir, "plan.md", "# Plan\n\nRewritten.\n");
+        let again = embed_card(&note_embed_line("![[plan]]").unwrap());
+        assert_eq!(again.lines, vec!["Rewritten."]);
+
+        embeds::forget();
+        assert_eq!(
+            embed_card(&note_embed_line("![[plan]]").unwrap()).found,
+            embeds::Found::Unknown
+        );
+    }
+
+    #[test]
+    fn an_embed_is_a_card_in_the_editor() {
+        let _turn = embeds::turn();
+        let dir = embed_vault("editor");
+        embeds::install_dir(&dir);
+        let lines = buf("![[plan#Goals]]\nafter");
+        let bs = blocks(&lines);
+        assert_eq!(bs[0].kind, BlockKind::Embed);
+
+        // the source line is the title row, in the callout colour
+        let title = style_block_line(&lines, &bs[0], 0, 40);
+        assert_eq!(text(&title), "▌ Plan › Goals");
+        assert_eq!(title.cells[0].style.fg, theme::callout("note").fg);
+        assert!(title.cells[2].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(title.src_len, "![[plan#Goals]]".chars().count());
+        // a click on the title lands on the line
+        let row = title.one_row();
+        assert_eq!(row.display_to_source(0), 0);
+        assert!(row.display_to_source(12) <= title.src_len);
+
+        // the rows hung under it: the section, dimmed, and how to open it
+        let rows = embed_rows("![[plan#Goals]]", 40, "⌥⏎");
+        let texts: Vec<String> = rows.iter().map(text).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "▌ - ship it",
+                "▌ - test it",
+                "▌ - doc it",
+                "▌ ⌥⏎ opens · 2 more lines",
+            ]
+        );
+        assert_eq!(rows[0].cells[2].style.fg, theme::marker().fg);
+        // nothing left out, nothing said about it
+        assert_eq!(embed_rows("![[plan#Later]]", 40, "⌥⏎").len(), 1);
+        // a narrow page cuts the rows rather than overrunning it
+        let narrow = embed_rows("![[plan#Goals]]", 8, "⌥⏎");
+        assert!(narrow.iter().all(|r| str_width(&text(r)) <= 8), "{narrow:?}");
+
+        // a note that is not there says so, in grey, and hangs nothing
+        let gone = style_block_line(&buf("![[gone]]"), &bs[0], 0, 40);
+        assert_eq!(text(&gone), "▌ gone (no such note)");
+        assert_eq!(gone.cells[2].style.fg, theme::grey().fg);
+        assert!(embed_rows("![[gone]]", 40, "⌥⏎").is_empty());
+
+        // an un-walked vault: the title alone, nothing declared missing
+        embeds::forget();
+        assert_eq!(text(&style_block_line(&lines, &bs[0], 0, 40)), "▌ plan › Goals");
+        assert!(embed_rows("![[plan#Goals]]", 40, "⌥⏎").is_empty());
     }
 
     #[test]

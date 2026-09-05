@@ -260,6 +260,10 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                     let line = crate::md::callout_close(&kind, width).to_line(None);
                     extra(app, line, None);
                 }
+                // the first lines of an embedded note, under its title row
+                for rline in app.embed_rows(&blocks, *row, width) {
+                    extra(app, rline.to_line(None), None);
+                }
                 if app.table_rule_under(&blocks, *row) {
                     let block = *crate::md::block_at(&blocks, *row).expect("a table row");
                     let inner = width.saturating_sub(crate::app::TABLE_GUTTER);
@@ -443,7 +447,8 @@ fn row_height(
     let extra = usize::from(app.table_rule_under(blocks, row))
         + usize::from(app.hovered_table_end(blocks, row))
         + usize::from(app.hovered_table_top(blocks, row))
-        + usize::from(app.callout_closes(blocks, row));
+        + usize::from(app.callout_closes(blocks, row))
+        + app.embed_rows(blocks, row, width.max(1) as usize).len();
     ((rows.max(1) + extra) as u16, None)
 }
 
