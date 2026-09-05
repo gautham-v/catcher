@@ -334,7 +334,11 @@ fn hanging_indent(cells: &[Cell]) -> usize {
         space(&mut i, &mut w);
     }
     // one list marker: a bullet/checkbox we drew, a raw -/*/+, or "12."
-    let mut markers = vec![first_char(theme::BULLET)];
+    let mut markers = vec![
+        first_char(theme::BULLET),
+        first_char(theme::BULLET_2),
+        first_char(theme::BULLET_3),
+    ];
     markers.extend(theme::TASK_GLYPHS.iter().map(|g| first_char(g)));
     // a drawn box has a colour; a `?` that opens a plain sentence has none
     let drawn = |k: usize| {
@@ -553,10 +557,12 @@ pub fn style_line_from(src: &str, note: usize) -> RLine {
     }
 
     // indentation before a list marker or heading
+    let indent_start = i;
     while i < chars.len() && (chars[i] == ' ' || chars[i] == '\t') {
         b.keep(i, base);
         i += 1;
     }
+    let depth = list_depth(&chars[indent_start..i]);
 
     // a callout's title line: `[!type] Title` becomes the glyph, the type
     // and the title, all in the accent
@@ -631,7 +637,7 @@ pub fn style_line_from(src: &str, note: usize) -> RLine {
     }
 
     // task list / bullet
-    if let Some((marker, style, width)) = list_marker(&chars, i) {
+    if let Some((marker, style, width)) = list_marker(&chars, i, depth) {
         b.sub(marker, style, i);
         b.sub(" ", style, i + 1);
         for k in i..i + width {
@@ -709,7 +715,7 @@ pub fn task_prefix(src: &str) -> Option<(usize, usize)> {
 /// The glyph, style and end column of the task box at the list marker at
 /// `i`, bullet or numbered, with the column the glyph stands at.
 fn task_at(chars: &[char], i: usize) -> Option<(usize, &'static str, Style, usize)> {
-    match list_marker(chars, i) {
+    match list_marker(chars, i, 1) {
         Some((marker, style, 6)) => Some((i, marker, style, i + 6)),
         Some(_) => None,
         None => ordered_task(chars, i),
@@ -791,9 +797,20 @@ pub fn raw_with_task(src: &str, cursor_col: usize) -> RLine {
     }
 }
 
-/// Recognise `- [ ] `, `- [x] `, `- `, `* `, `+ ` at `i`.
+/// How deeply a list item with this leading whitespace is nested, 1 being
+/// top level. Obsidian's rule, simplified: every tab is one level and every
+/// two spaces are one level, so `- a` is depth 1, `  - b` and `\t- b` are
+/// depth 2, `    - c` is depth 3. An odd space is ignored.
+fn list_depth(indent: &[char]) -> usize {
+    let tabs = indent.iter().filter(|c| **c == '\t').count();
+    let spaces = indent.len() - tabs;
+    1 + tabs + spaces / 2
+}
+
+/// Recognise `- [ ] `, `- [x] `, `- `, `* `, `+ ` at `i`; a plain bullet's
+/// glyph follows the item's nesting `depth` (see `theme::bullet`).
 /// Returns (display marker, style, consumed source width).
-fn list_marker(chars: &[char], i: usize) -> Option<(&'static str, Style, usize)> {
+fn list_marker(chars: &[char], i: usize, depth: usize) -> Option<(&'static str, Style, usize)> {
     let at = |k: usize| chars.get(k).copied();
     let bullet = matches!(at(i), Some('-') | Some('*') | Some('+'));
     if !bullet || at(i + 1) != Some(' ') {
@@ -802,16 +819,16 @@ fn list_marker(chars: &[char], i: usize) -> Option<(&'static str, Style, usize)>
     if at(i + 2) == Some('[') && at(i + 4) == Some(']') && at(i + 5) == Some(' ') {
         return match at(i + 3).and_then(task_state) {
             Some((glyph, style)) => Some((glyph, style, 6)),
-            None => Some((theme::BULLET, theme::marker(), 2)),
+            None => Some((theme::bullet(depth), theme::marker(), 2)),
         };
     }
-    Some((theme::BULLET, theme::marker(), 2))
+    Some((theme::bullet(depth), theme::marker(), 2))
 }
 
 /// The glyph and style of the box whose `[` — or whose bullet — sits at
 /// column `at`, as `task_prefix` reports it.
 fn task_glyph_at(chars: &[char], at: usize) -> Option<(&'static str, Style)> {
-    match list_marker(chars, at) {
+    match list_marker(chars, at, 1) {
         Some((glyph, style, 6)) => Some((glyph, style)),
         _ if chars.get(at) == Some(&'[') => task_state(*chars.get(at + 1)?),
         _ => None,
@@ -3044,6 +3061,37 @@ mod tests {
         let bullet = style_line("- plain");
         assert_eq!(text(&bullet), "• plain");
         assert_eq!(bullet.one_row().display_to_source(2), 2);
+    }
+
+    #[test]
+    fn bullet_glyph_follows_nesting_depth() {
+        assert_eq!(text(&style_line("- one")), "• one");
+        assert_eq!(text(&style_line("  - two")), "  ◦ two");
+        assert_eq!(text(&style_line("    * three")), "    ▪ three");
+        // the cycle starts over at the fourth level
+        assert_eq!(text(&style_line("      + four")), "      • four");
+        // a tab is one level, and mixes with spaces
+        assert_eq!(text(&style_line("\t- two")), "\t◦ two");
+        assert_eq!(text(&style_line("\t  - three")), "\t  ▪ three");
+        // an odd space does not count
+        assert_eq!(text(&style_line("   - two")), "   ◦ two");
+        // the cursor still maps through the substituted glyph
+        let deep = style_line("  - two");
+        assert_eq!(deep.one_row().display_to_source(4), 4);
+    }
+
+    #[test]
+    fn nested_checkboxes_keep_their_boxes() {
+        assert_eq!(text(&style_line("  - [ ] later")), "  ☐ later");
+        assert_eq!(text(&style_line("    - [x] done")), "    ✓ done");
+        assert_eq!(task_prefix("  - [ ] later"), Some((2, 8)));
+    }
+
+    #[test]
+    fn nested_bullets_in_a_quote_count_only_their_own_indent() {
+        // the quote bar's own space is not list indentation
+        assert_eq!(text(&style_line("> - one")), "▌ • one");
+        assert_eq!(text(&style_line(">   - two")), "▌   ◦ two");
     }
 
     #[test]
