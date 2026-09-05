@@ -307,7 +307,7 @@ impl Command {
             Command::InsertMath => ("Insert math block", "$$ … $$ on lines of their own"),
             Command::InsertFootnote => ("Insert footnote", "[^n] here, its text at the end of the note"),
             Command::Outline => ("Outline", "every heading in this note; ⏎ goes there, ⌥⏎ folds"),
-            Command::ToggleProperties => ("Toggle properties", "the front matter: box or line on the page, dim or hidden in the editor"),
+            Command::ToggleProperties => ("Hide / show properties", "the front matter: box or line on the page, dim or hidden in the editor"),
             Command::TableSource => ("Table: Edit source", "the pipes, until the cursor leaves"),
             Command::Table(op) => {
                 use crate::table::Op;
@@ -5536,7 +5536,7 @@ mod tests {
     fn toggle_properties_is_a_palette_command_with_a_rebindable_key() {
         assert!(COMMANDS.contains(&Command::ToggleProperties));
         assert_eq!(Command::ToggleProperties.action(), Some(Action::ToggleProperties));
-        assert_eq!(Command::ToggleProperties.label().0, "Toggle properties");
+        assert_eq!(Command::ToggleProperties.label().0, "Hide / show properties");
         let map = crate::keys::Keymap::default();
         assert_eq!(map.label(Action::ToggleProperties), "");
         assert!(map

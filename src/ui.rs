@@ -464,6 +464,8 @@ fn preview_key(app: &mut App, area: Rect) -> u64 {
     area.width.hash(&mut h);
     area.height.hash(&mut h);
     app.config_gen.hash(&mut h);
+    // flipped from inside the app, so the generation alone would miss it
+    app.properties_mode().hash(&mut h);
     app.folded_lines().hash(&mut h);
     // the footer's rows rather than a scan counter: a scan still running
     // answers with no rows, and the rows it lands with are what changes

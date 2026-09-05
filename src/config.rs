@@ -67,7 +67,7 @@ pub enum FrontMatter {
 /// box or the *Toggle properties* command flips between the first two and
 /// writes the choice here, so every note follows; `hide` is only ever set by
 /// hand, and the command then shows the box for the session without touching it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Properties {
     #[default]
     Box,
