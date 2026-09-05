@@ -390,13 +390,21 @@ fn draw_complete(f: &mut Frame, app: &mut App) {
         return;
     };
     let screen = f.area();
-    let inner_w = c
+    let label_w = c
         .items
         .iter()
         .map(|i| i.label.chars().count())
         .max()
         .unwrap_or(0)
-        .clamp(12, 48)
+        .clamp(12, 48);
+    let detail_w = c
+        .items
+        .iter()
+        .map(|i| i.detail.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(24);
+    let inner_w = (label_w + if detail_w > 0 { 2 + detail_w } else { 0 })
         .min(screen.width.saturating_sub(2) as usize);
     let width = inner_w as u16 + 2;
     let height = (c.items.len().min(crate::complete::MAX_ROWS) as u16 + 2).min(screen.height);
@@ -417,14 +425,21 @@ fn draw_complete(f: &mut Frame, app: &mut App) {
         .enumerate()
         .take(crate::complete::MAX_ROWS)
         .map(|(i, item)| {
-            let text = format!("{:<inner_w$}", truncate(&item.label, inner_w));
-            if i == c.selected {
-                Line::from(Span::styled(
-                    text,
-                    theme::row().add_modifier(Modifier::BOLD),
-                ))
+            let label_room = inner_w.saturating_sub(if detail_w > 0 { 2 + detail_w } else { 0 });
+            let label = format!("{:<label_room$}", truncate(&item.label, label_room));
+            let style = if i == c.selected {
+                theme::row().add_modifier(Modifier::BOLD)
             } else {
-                Line::from(Span::raw(text))
+                Style::default()
+            };
+            if detail_w > 0 {
+                let detail = format!("  {:<detail_w$}", truncate_left(&item.detail, detail_w));
+                Line::from(vec![
+                    Span::styled(label, style),
+                    Span::styled(detail, style.patch(dim())),
+                ])
+            } else {
+                Line::from(Span::styled(label, style))
             }
         })
         .collect();

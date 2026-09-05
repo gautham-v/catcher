@@ -4,6 +4,7 @@
 //! token and the text an accepted row inserts are testable without an app;
 //! the app supplies the candidates and keeps the popup's state.
 
+use std::collections::HashMap;
 use crate::index::Entry;
 use crate::search;
 
@@ -32,6 +33,9 @@ pub struct Token {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
     pub label: String,
+    /// A dim note beside the label: the folder, only when two candidates
+    /// share a name and it is what tells them apart. Empty otherwise.
+    pub detail: String,
     pub insert: String,
 }
 
@@ -131,15 +135,11 @@ pub fn link_candidates(query: &str, entries: &[Entry]) -> Vec<Candidate> {
     for e in entries {
         let name = e.name();
         if let Some(s) = search::score_entry(query, &name, &e.title, &e.rel) {
-            let label = if e.folder.is_empty() {
-                name.clone()
-            } else {
-                format!("{name}  {}", e.folder)
-            };
             scored.push((
                 s,
                 Candidate {
-                    label,
+                    label: name.clone(),
+                    detail: e.folder.clone(),
                     insert: name.clone(),
                 },
             ));
@@ -149,7 +149,8 @@ pub fn link_candidates(query: &str, entries: &[Entry]) -> Vec<Candidate> {
                 scored.push((
                     s * 10 + 90,
                     Candidate {
-                        label: format!("{a}  → {name}"),
+                        label: a.clone(),
+                        detail: format!("→ {name}"),
                         insert: a.clone(),
                     },
                 ));
@@ -157,7 +158,19 @@ pub fn link_candidates(query: &str, entries: &[Entry]) -> Vec<Candidate> {
         }
     }
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.insert.cmp(&b.1.insert)));
-    scored.into_iter().map(|(_, c)| c).take(MAX_ROWS).collect()
+    let mut out: Vec<Candidate> = scored.into_iter().map(|(_, c)| c).take(MAX_ROWS).collect();
+    // the folder earns its place only when it tells two same-named notes apart
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    for c in &out {
+        *seen.entry(c.label.as_str()).or_default() += 1;
+    }
+    let dupes: Vec<bool> = out.iter().map(|c| seen[c.label.as_str()] > 1).collect();
+    for (c, dupe) in out.iter_mut().zip(dupes) {
+        if !dupe && !c.detail.starts_with('→') {
+            c.detail.clear();
+        }
+    }
+    out
 }
 
 /// The headings and `^block` ids of a note that answer `query`, in document
@@ -169,6 +182,7 @@ pub fn anchor_candidates(query: &str, lines: &[String]) -> Vec<Candidate> {
         .filter(|h| search::fuzzy(query, &h.text).is_some())
         .map(|h| Candidate {
             label: format!("{}{}", "  ".repeat(h.level.saturating_sub(1)), h.text),
+            detail: String::new(),
             insert: h.text,
         })
         .collect();
@@ -178,6 +192,7 @@ pub fn anchor_candidates(query: &str, lines: &[String]) -> Vec<Candidate> {
             if search::fuzzy(query, &insert).is_some() {
                 out.push(Candidate {
                     label: insert.clone(),
+                    detail: String::new(),
                     insert,
                 });
             }
@@ -198,6 +213,7 @@ pub fn tag_candidates(query: &str, tags: &[String]) -> Vec<Candidate> {
         .into_iter()
         .map(|(_, t)| Candidate {
             label: format!("#{t}"),
+            detail: String::new(),
             insert: t.clone(),
         })
         .take(MAX_ROWS)
@@ -336,6 +352,25 @@ mod tests {
             accept("about #wo now", 9, &t, "work"),
             ("about #work now".into(), 11)
         );
+    }
+
+    #[test]
+    fn the_folder_shows_only_when_two_notes_share_a_name() {
+        let entry = |rel: &str, folder: &str| Entry {
+            path: std::path::PathBuf::from(format!("/v/{rel}.md")),
+            title: "Plan".into(),
+            rel: rel.into(),
+            folder: folder.into(),
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            aliases: Vec::new(),
+            name: "plan".into(),
+        };
+        let one = [entry("work/plan", "work")];
+        assert_eq!(link_candidates("pl", &one)[0].detail, "");
+        let two = [entry("work/plan", "work"), entry("home/plan", "home")];
+        let got = link_candidates("pl", &two);
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|c| !c.detail.is_empty()));
     }
 
     #[test]
