@@ -40,6 +40,10 @@ pub struct Mention {
     /// How many times that note links here. Several mentions collapse to one
     /// row — the row names a note, and a note is named once.
     pub count: usize,
+    /// `true` for a `[[link]]` to this note; `false` for an unlinked mention —
+    /// the note's title or one of its aliases written as plain words. The
+    /// footer draws the two under separate headings.
+    pub linked: bool,
 }
 
 /// One `[[link]]` found pointing this way, before it has been confirmed.
@@ -63,6 +67,9 @@ const MAX_BODY_BYTES: u64 = 256 * 1024;
 /// The footer is a footer, not a search results page. Past this many notes the
 /// answer to "what links here" is "lots", and the list stops being readable.
 const MAX_MENTIONS: usize = 50;
+/// Unlinked mentions are noisier than links — a note called `Notes` is named
+/// everywhere — so fewer rows are drawn before the footer says `N more`.
+pub const MAX_UNLINKED_ROWS: usize = 20;
 /// Chars kept either side of the link. The link is the reason the row exists,
 /// so the excerpt is cut around it rather than from the start; the real cut to
 /// the page width happens at render time, which is the only place that knows
@@ -125,6 +132,143 @@ pub fn mentions_in(body: &str, names: &[String]) -> Vec<Hit> {
         }
     }
     out
+}
+
+/// Every place `body` says one of `words` — the note's title or an alias — as
+/// a whole word, whatever its case, outside any `[[wikilink]]`. A link is
+/// already counted by [`mentions_in`]; this finds the mentions that could have
+/// been links and are not.
+///
+/// Whole word means the match is not flanked by a letter, digit or `_`, so
+/// `spec` is not found inside `specific` or `respect`. Fenced code and front
+/// matter are stepped over as they are for links. The `link` span of each hit
+/// is the matched words, so the renderer can keep them on screen and undim
+/// them.
+pub fn unlinked_in(body: &str, words: &[String]) -> Vec<Hit> {
+    let wants: Vec<Vec<char>> = words
+        .iter()
+        .map(|w| fold_case(w.trim()))
+        .filter(|w| !w.is_empty())
+        .collect();
+    if wants.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (line_no, line) in notes::prose_lines(body) {
+        let chars: Vec<char> = line.chars().collect();
+        // `fold_case` keeps the char count, so the two index the same columns
+        let lowered = fold_case(line);
+        let links: Vec<(usize, usize)> = crate::md::wikilinks(line)
+            .into_iter()
+            .map(|w| (w.start, w.end))
+            .collect();
+        let inside_link = |a: usize, b: usize| links.iter().any(|(s, e)| b > *s && a < *e);
+        let mut i = 0;
+        while i < lowered.len() {
+            // the longest word that starts here, so an alias that extends the
+            // title (`spec`, `spec sheet`) is matched whole
+            let len = wants
+                .iter()
+                .filter(|w| lowered[i..].starts_with(w))
+                .map(Vec::len)
+                .max();
+            let Some(len) = len else {
+                i += 1;
+                continue;
+            };
+            let end = i + len;
+            let whole = (i == 0 || !is_word_char(lowered[i - 1]))
+                && (end >= lowered.len() || !is_word_char(lowered[end]));
+            if !whole || inside_link(i, end) {
+                i += 1;
+                continue;
+            }
+            let (excerpt, link) = excerpt(line, i, end);
+            out.push(Hit {
+                line: line_no,
+                target: chars[i..end].iter().collect(),
+                excerpt,
+                link,
+            });
+            i = end;
+        }
+    }
+    out
+}
+
+/// A letter, digit or underscore: what a word is made of, and what on either
+/// side of a match says it is part of a longer word.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Lowercased one char at a time, so the result has as many chars as the input
+/// and the columns line up. A char whose lowercase is several chars (`İ`) is
+/// kept as it is rather than shifting every column after it.
+fn fold_case(s: &str) -> Vec<char> {
+    s.chars()
+        .map(|c| {
+            let mut lower = c.to_lowercase();
+            match (lower.next(), lower.next()) {
+                (Some(l), None) => l,
+                _ => c,
+            }
+        })
+        .collect()
+}
+
+/// The `aliases:` a note's front matter declares, inline (`aliases: a, b`,
+/// with or without brackets) or as a YAML list under the key — the other
+/// names the note answers to, so a note that says one of them is mentioning
+/// this one. Only a top-level key counts, the way `tags:` is read.
+pub fn aliases_of(content: &str) -> Vec<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let Some(end) = notes::front_matter_end(lines.iter().copied()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut i = 1;
+    while i < end {
+        let Some(rest) = lines[i]
+            .strip_prefix("aliases:")
+            .or_else(|| lines[i].strip_prefix("alias:"))
+        else {
+            i += 1;
+            continue;
+        };
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            for a in rest
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+            {
+                push_alias(&mut out, a);
+            }
+            i += 1;
+            continue;
+        }
+        // a list: `- a` rows, indented or not, until the next key
+        i += 1;
+        while i < end {
+            let line = lines[i];
+            match line.trim_start().strip_prefix('-') {
+                Some(item) => push_alias(&mut out, item),
+                None if line.starts_with([' ', '\t']) => {}
+                None => break,
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// One alias, shed of the quotes people write around one with a colon in it.
+fn push_alias(out: &mut Vec<String>, text: &str) {
+    let a = text.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+    if !a.is_empty() {
+        out.push(a.to_string());
+    }
 }
 
 /// The text around a mention, as one line of markdown centred on the link.
@@ -241,8 +385,19 @@ fn strip_markers(s: &str) -> String {
 /// about which files exist; `cancel` is watched per directory entry there.
 pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Mention> {
     let names = index::link_keys(target);
+    // the words an unlinked mention is made of: the title, and the aliases the
+    // note's front matter declares. Read from disk once, before the walk,
+    // because the walk may meet the notes that say them before it meets this
+    // one — and the note may live outside every root
+    let mut words: Vec<String> = vec![target.title.clone()];
+    if let Ok(body) = fs::read_to_string(&target.path) {
+        words.extend(aliases_of(&body));
+    }
+    // a note with no title is not named by every other empty note
+    words.retain(|w| !w.trim().is_empty() && w != "Untitled");
     let mut entries: Vec<Entry> = Vec::new();
     let mut found: Vec<(PathBuf, SystemTime, Vec<Hit>)> = Vec::new();
+    let mut unlinked: Vec<(SystemTime, Mention)> = Vec::new();
     let walked = index::walk_notes(roots, Some(cancel), |root, path, entry| {
         let meta = entry.metadata().ok();
         let modified = meta
@@ -290,6 +445,33 @@ pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Menti
             return;
         }
         let hits = mentions_in(&body, &names);
+        // unlinked mentions need no resolver: the words either are there or
+        // are not, so the row is made on the spot
+        // a namesake — another note with this one's title — is not a note
+        // that mentions it; the title alone would put every `spec.md` in the
+        // vault in each other's footer
+        let title = entries.last().map(|e| fold_case(e.title.trim()));
+        let namesake = words
+            .iter()
+            .any(|w| title.as_ref().is_some_and(|t| *t == fold_case(w.trim())));
+        let plain = if namesake {
+            Vec::new()
+        } else {
+            unlinked_in(&body, &words)
+        };
+        if let Some(first) = plain.first() {
+            unlinked.push((
+                modified,
+                Mention {
+                    name: stem_of(&path),
+                    path: path.clone(),
+                    excerpt: first.excerpt.clone(),
+                    link: first.link,
+                    count: plain.len(),
+                    linked: false,
+                },
+            ));
+        }
         if !hits.is_empty() {
             found.push((path, modified, hits));
         }
@@ -326,29 +508,40 @@ pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Menti
             continue;
         };
         let count = 1 + kept.count();
-        // the stem, not the title: every other list in the app names a note
-        // by its file, and the footer should read the same way
-        let name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
         out.push((
             modified,
             Mention {
+                name: stem_of(&path),
                 path,
-                name,
                 excerpt: first.excerpt.clone(),
                 link: first.link,
                 count,
+                linked: true,
             },
         ));
     }
     // most recently touched first, because that is the note the reader most
     // likely wrote the link from. The path breaks ties, so two notes saved in
     // the same second do not swap places between one scan and the next.
-    out.sort_by(|(ma, a), (mb, b)| mb.cmp(ma).then_with(|| a.path.cmp(&b.path)));
+    let order = |(ma, a): &(SystemTime, Mention), (mb, b): &(SystemTime, Mention)| {
+        mb.cmp(ma).then_with(|| a.path.cmp(&b.path))
+    };
+    out.sort_by(order);
     out.truncate(MAX_MENTIONS);
+    // the linked rows first, then the unlinked, each group capped on its own;
+    // the renderer tells them apart by `linked`
+    unlinked.sort_by(order);
+    unlinked.truncate(MAX_MENTIONS);
+    out.extend(unlinked);
     out.into_iter().map(|(_, m)| m).collect()
+}
+
+/// The stem, not the title: every other list in the app names a note by its
+/// file, and the footer should read the same way.
+fn stem_of(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// A scan running on a thread: the end of the channel it will answer on, and
@@ -701,6 +894,98 @@ mod tests {
             std::slice::from_ref(&dir),
         );
         assert!(far.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn words(of: &[&str]) -> Vec<String> {
+        of.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn an_unlinked_mention_is_the_title_as_a_whole_word_in_any_case() {
+        let hits = unlinked_in(
+            "The SPEC says so.\nA specific respect for spec_v2.\nsee spec\n",
+            &words(&["spec"]),
+        );
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].line, 0);
+        assert_eq!(hits[0].target, "SPEC");
+        assert_eq!(hits[0].excerpt, "The SPEC says so.");
+        assert_eq!(spanned(&hits[0].excerpt, hits[0].link), "SPEC");
+        assert_eq!(hits[1].line, 2);
+        // a multi-word title matches across its spaces
+        let hits = unlinked_in("about the story matrix here\n", &words(&["Story Matrix"]));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(spanned(&hits[0].excerpt, hits[0].link), "story matrix");
+    }
+
+    #[test]
+    fn a_word_inside_a_wikilink_is_a_link_not_an_unlinked_mention() {
+        let body = "see [[spec]] and [[spec|the spec]] and [[other#spec]]\n";
+        assert!(unlinked_in(body, &words(&["spec"])).is_empty());
+        // but one beside the link still is
+        let hits = unlinked_in("see [[spec]], the spec\n", &words(&["spec"]));
+        assert_eq!(hits.len(), 1);
+        // fenced code and front matter are source, not prose
+        let body = "---\ntitle: spec\n---\n```\nspec\n```\nspec\n";
+        assert_eq!(unlinked_in(body, &words(&["spec"])).len(), 1);
+    }
+
+    #[test]
+    fn aliases_are_read_from_the_front_matter_inline_or_as_a_list() {
+        assert_eq!(
+            aliases_of("---\naliases: [The Spec, \"spec sheet\"]\n---\n"),
+            vec!["The Spec", "spec sheet"]
+        );
+        assert_eq!(
+            aliases_of("---\naliases:\n  - one\n  - 'two'\ntags: x\n---\n"),
+            vec!["one", "two"]
+        );
+        assert!(aliases_of("# no front matter\naliases: no\n").is_empty());
+    }
+
+    #[test]
+    fn a_note_that_says_the_title_or_an_alias_without_linking_is_mentioned_in() {
+        let dir = tmpdir("unlinked");
+        write(
+            &dir,
+            "spec.md",
+            "---\naliases: [the plan]\n---\n# Spec\nthe spec itself\n",
+        );
+        write(
+            &dir,
+            "meta.md",
+            "# Meta\nsee [[spec]] and the spec twice: spec\n",
+        );
+        write(&dir, "plan.md", "# Plan\nfollowing The Plan here\n");
+        write(&dir, "other.md", "# Other\nspecific\n");
+        let rows = scan(&target(&dir, "spec.md", "Spec"), std::slice::from_ref(&dir));
+        let linked: Vec<&str> = rows
+            .iter()
+            .filter(|m| m.linked)
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(linked, vec!["meta"]);
+        let mut unlinked: Vec<&Mention> = rows.iter().filter(|m| !m.linked).collect();
+        unlinked.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<&str> = unlinked.iter().map(|m| m.name.as_str()).collect();
+        // the note itself does not mention itself; `specific` is another word
+        assert_eq!(names, vec!["meta", "plan"]);
+        assert_eq!(unlinked[0].count, 2);
+        assert_eq!(unlinked[0].excerpt, "see [[spec]] and the spec twice: spec");
+        assert_eq!(spanned(&unlinked[0].excerpt, unlinked[0].link), "spec");
+        assert_eq!(spanned(&unlinked[1].excerpt, unlinked[1].link), "The Plan");
+        // the linked rows come first
+        assert!(rows[0].linked);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_namesake_note_is_not_an_unlinked_mention_of_this_one() {
+        let dir = tmpdir("namesake");
+        write(&dir, "spec.md", "# Spec\n");
+        write(&dir, "deep/spec.md", "# Spec\nthe other spec\n");
+        assert!(scan(&target(&dir, "spec.md", "Spec"), std::slice::from_ref(&dir)).is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -336,18 +336,12 @@ pub fn append_mentions(r: &mut Rendered, mentions: &[crate::mentions::Mention], 
     r.lines.push(PLine {
         // the same rule the document itself draws for `---`, so the footer is
         // separated the way a section of the note would be
-        cells: str_cells(&"─".repeat(if width == usize::MAX { 40 } else { width }), dim),
+        cells: str_cells(
+            &"─".repeat(if width == usize::MAX { 40 } else { width }),
+            dim,
+        ),
         ..Default::default()
     });
-    let count = match mentions.len() {
-        1 => "1 note links here".to_string(),
-        n => format!("{n} notes link here"),
-    };
-    r.lines.push(PLine {
-        cells: str_cells(&count, dim),
-        ..Default::default()
-    });
-
     // one name column for the whole footer, so the excerpts line up and read
     // as a column rather than as ragged sentences
     let namew = mentions
@@ -357,7 +351,52 @@ pub fn append_mentions(r: &mut Rendered, mentions: &[crate::mentions::Mention], 
         .unwrap_or(0)
         .min(MAX_NAME_COLS)
         .min(width.saturating_sub(2));
-    for m in mentions {
+    // two sections under one rule: the notes that link here, then the notes
+    // that only say this note's name. Each is left out when it is empty.
+    let linked: Vec<&crate::mentions::Mention> = mentions.iter().filter(|m| m.linked).collect();
+    let unlinked: Vec<&crate::mentions::Mention> = mentions.iter().filter(|m| !m.linked).collect();
+    if !linked.is_empty() {
+        let count = match linked.len() {
+            1 => "1 note links here".to_string(),
+            n => format!("{n} notes link here"),
+        };
+        r.lines.push(PLine {
+            cells: str_cells(&count, dim),
+            ..Default::default()
+        });
+        for m in &linked {
+            append_mention_row(r, m, namew, width);
+        }
+    }
+    if !unlinked.is_empty() {
+        if !linked.is_empty() {
+            r.lines.push(PLine::default());
+        }
+        let count = match unlinked.len() {
+            1 => "mentioned in 1 note".to_string(),
+            n => format!("mentioned in {n} notes"),
+        };
+        r.lines.push(PLine {
+            cells: str_cells(&count, dim),
+            ..Default::default()
+        });
+        let shown = unlinked.len().min(crate::mentions::MAX_UNLINKED_ROWS);
+        for m in &unlinked[..shown] {
+            append_mention_row(r, m, namew, width);
+        }
+        if unlinked.len() > shown {
+            r.lines.push(PLine {
+                cells: str_cells(&format!("  {} more", unlinked.len() - shown), dim),
+                ..Default::default()
+            });
+        }
+    }
+}
+
+/// One footer row: the note's name as a link, then its excerpt.
+fn append_mention_row(r: &mut Rendered, m: &crate::mentions::Mention, namew: usize, width: usize) {
+    let dim = theme::marker();
+    {
         let idx = r.urls.len();
         // an exact file, not a name to resolve again: two notes called `spec`
         // must not send the click to whichever one the resolver prefers
@@ -385,7 +424,9 @@ pub fn append_mentions(r: &mut Rendered, mentions: &[crate::mentions::Mention], 
         // excerpt with a dozen columns to live in says nothing worth the space
         if room >= 12 && !m.excerpt.is_empty() {
             cells.extend(str_cells("  ", dim));
-            cells.extend(excerpt_cells(&m.excerpt, m.link, dim, room));
+            // the words that made an unlinked row are shown in normal text
+            // against the dim excerpt, which is what says why the row is here
+            cells.extend(excerpt_cells(&m.excerpt, m.link, dim, room, !m.linked));
         }
         cells.extend(str_cells(&tail, dim));
         r.lines.push(PLine {
@@ -656,12 +697,25 @@ fn mark_folded(line: &mut PLine, src: usize, hidden: usize, width: usize) {
 
 /// The cells carry no link and no source position: the footer is not the
 /// note, and a click on an excerpt has nowhere in the note to go.
-fn excerpt_cells(excerpt: &str, link: (usize, usize), base: Style, room: usize) -> Vec<PCell> {
+///
+/// With `plain_span`, the chars inside `link` are drawn without `base` — the
+/// matched words of an unlinked mention stand out of the dim excerpt.
+fn excerpt_cells(
+    excerpt: &str,
+    link: (usize, usize),
+    base: Style,
+    room: usize,
+    plain_span: bool,
+) -> Vec<PCell> {
     let cells: Vec<PCell> = crate::md::style_inline(excerpt)
         .into_iter()
         .map(|c| PCell {
             ch: c.ch,
-            style: base.patch(c.style),
+            style: if plain_span && c.src >= link.0 && c.src < link.1 {
+                c.style
+            } else {
+                base.patch(c.style)
+            },
             link: None,
             src: Some((0, c.src)),
         })
@@ -3607,7 +3661,69 @@ mod tests {
             excerpt: excerpt.to_string(),
             link,
             count,
+            linked: true,
         }
+    }
+
+    /// An unlinked mention: `word` is where the title was said in `excerpt`.
+    fn unlinked(name: &str, excerpt: &str, word: &str) -> crate::mentions::Mention {
+        let at = excerpt
+            .find(word)
+            .map(|b| excerpt[..b].chars().count())
+            .unwrap_or(0);
+        let mut m = mention(name, excerpt, 1);
+        m.link = (at, at + word.chars().count());
+        m.linked = false;
+        m
+    }
+
+    #[test]
+    fn unlinked_mentions_are_a_second_section_with_the_matched_words_undimmed() {
+        let mut r = render("# Spec\n");
+        append_mentions(
+            &mut r,
+            &[
+                mention("meta", "about [[spec]]", 1),
+                unlinked("plan", "the spec says so", "spec"),
+            ],
+            60,
+        );
+        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(text.iter().any(|t| t == "1 note links here"));
+        assert!(text.iter().any(|t| t == "mentioned in 1 note"), "{text:?}");
+        let row = footer_row(&r, "plan");
+        // the name is a link to the exact file, as in the linked section
+        let p = row.cells.iter().find(|c| c.ch == 'p').unwrap();
+        assert_eq!(r.url(p.link.unwrap()), Some("note:/vault/plan.md"));
+        // "the " is dim, "spec" is not
+        let t = row.cells.iter().find(|c| c.ch == 't').unwrap();
+        assert_eq!(t.style, theme::marker());
+        let s = row
+            .cells
+            .iter()
+            .find(|c| c.ch == 's' && c.link.is_none())
+            .unwrap();
+        assert_eq!(s.style, theme::PLAIN);
+        // with nothing linking here, only the second section is drawn
+        let mut r = render("# Spec\n");
+        append_mentions(&mut r, &[unlinked("plan", "the spec says so", "spec")], 60);
+        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(!text.iter().any(|t| t.contains("link here")));
+        assert!(text.iter().any(|t| t == "mentioned in 1 note"));
+    }
+
+    #[test]
+    fn the_unlinked_section_stops_at_twenty_rows_and_counts_the_rest() {
+        let mut r = render("# Spec\n");
+        let rows: Vec<_> = (0..25)
+            .map(|i| unlinked(&format!("n{i:02}"), "the spec", "spec"))
+            .collect();
+        append_mentions(&mut r, &rows, 60);
+        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(text.iter().any(|t| t == "mentioned in 25 notes"));
+        assert!(text.iter().any(|t| t.starts_with("  n19")));
+        assert!(!text.iter().any(|t| t.starts_with("  n20")));
+        assert_eq!(text.last().unwrap(), "  5 more");
     }
 
     fn footer_row<'a>(r: &'a Rendered, name: &str) -> &'a PLine {
