@@ -1,7 +1,9 @@
 //! Copying out of the terminal: OSC 52 first (works over ssh, in Ghostty and
-//! inside tmux), with `pbcopy` as a local fallback.
+//! inside tmux), with the native clipboard (arboard) as a local fallback and
+//! `pbcopy`/`pbpaste` behind that on macOS.
 
 use std::io::Write;
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 
 /// What the system clipboard is currently holding, as far as we care.
@@ -45,6 +47,7 @@ fn png_bytes(img: &arboard::ImageData) -> Option<Vec<u8>> {
 }
 
 /// Text-only fallback for when arboard can't open the pasteboard.
+#[cfg(target_os = "macos")]
 fn pbpaste() -> Paste {
     match Command::new("pbpaste").output() {
         Ok(o) if o.status.success() => match String::from_utf8(o.stdout) {
@@ -55,12 +58,43 @@ fn pbpaste() -> Paste {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+fn pbpaste() -> Paste {
+    Paste::Empty
+}
+
 /// Put `text` on the system clipboard. Best effort — returns false only if
 /// every route failed.
 pub fn copy(text: &str) -> bool {
     let osc = osc52(text).is_ok();
-    let native = pbcopy(text);
+    let native = native_copy(text) || pbcopy(text);
     osc || native
+}
+
+/// The native clipboard through arboard. On Linux the selection lives in the
+/// process that set it, so the setter waits on a detached thread until
+/// another clipboard owner takes over.
+#[cfg(target_os = "linux")]
+fn native_copy(text: &str) -> bool {
+    use arboard::SetExtLinux;
+    let text = text.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok(mut cb) = arboard::Clipboard::new() else {
+            let _ = tx.send(false);
+            return;
+        };
+        let _ = tx.send(true);
+        let _ = cb.set().wait().text(text);
+    });
+    rx.recv().unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn native_copy(text: &str) -> bool {
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text))
+        .is_ok()
 }
 
 fn osc52(text: &str) -> std::io::Result<()> {
@@ -76,6 +110,7 @@ fn osc52(text: &str) -> std::io::Result<()> {
     out.flush()
 }
 
+#[cfg(target_os = "macos")]
 fn pbcopy(text: &str) -> bool {
     let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() else {
         return false;
@@ -86,6 +121,11 @@ fn pbcopy(text: &str) -> bool {
         }
     }
     child.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pbcopy(_text: &str) -> bool {
+    false
 }
 
 fn base64(bytes: &[u8]) -> String {

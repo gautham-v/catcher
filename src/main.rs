@@ -22,9 +22,9 @@ mod render;
 mod search;
 mod table;
 mod terminal;
-mod theme;
 #[cfg(test)]
 mod testutil;
+mod theme;
 mod tree;
 mod ui;
 
@@ -193,12 +193,14 @@ fn pop_title() {
 ///
 /// OSC 11 (`]11;?`) answers with the background colour on every terminal
 /// that matters — Ghostty, iTerm2, kitty, WezTerm, Terminal.app, foot,
-/// Alacritty — and a Device Status Report (`[5n`) is sent right behind it
-/// so a terminal that ignores the colour query still ends the read. When
-/// neither arrives in time, `COLORFGBG` (rxvt, Konsole and a few others set
-/// it) is the fallback, and dark is the fallback for that.
+/// Alacritty. The reply is read back through crossterm's event queue (the
+/// same one the TUI uses, so nothing else is left holding stdin): crossterm
+/// has no idea what an OSC reply is and hands it over as a run of key
+/// events, which are turned back into bytes here. When no reply arrives in
+/// time, `COLORFGBG` (rxvt, Konsole and a few others set it) is the
+/// fallback, and dark is the fallback for that.
 fn detect_background() -> theme::Mode {
-    use std::io::{IsTerminal, Read, Write};
+    use std::io::{IsTerminal, Write};
     if !std::io::stdin().is_terminal() || std::env::var_os("TMUX").is_some() {
         return from_colorfgbg().unwrap_or_default();
     }
@@ -206,30 +208,57 @@ fn detect_background() -> theme::Mode {
         return from_colorfgbg().unwrap_or_default();
     }
     let mut out = std::io::stdout();
-    let _ = out.write_all(b"\x1b]11;?\x1b\\\x1b[5n");
+    let _ = out.write_all(b"\x1b]11;?\x1b\\");
     let _ = out.flush();
 
-    // a blocking read on a thread, so a terminal that never answers costs a
-    // short wait rather than a hang; the DSR makes that the rare case
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let mut byte = [0u8; 1];
-        while std::io::stdin().read(&mut byte).is_ok_and(|n| n == 1) {
-            buf.push(byte[0]);
-            if buf.ends_with(b"\x1b[0n") || buf.len() > 256 {
-                break;
-            }
+    // read through crossterm's event queue with a deadline, so nothing keeps
+    // reading stdin after we leave and a silent terminal costs only the wait;
+    // the DSR makes that the rare case
+    let deadline = std::time::Instant::now() + Duration::from_millis(250);
+    let mut reply = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() || !crossterm::event::poll(left).unwrap_or(false) {
+            break;
         }
-        let _ = tx.send(buf);
-    });
-    let reply = rx
-        .recv_timeout(Duration::from_millis(250))
-        .unwrap_or_default();
+        match crossterm::event::read() {
+            Ok(Event::Key(k)) => push_key_bytes(&mut reply, &k),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let done = reply.windows(4).any(|w| w == b"]11;")
+            && (reply.ends_with(b"\x1b\\") || reply.ends_with(b"\x07"));
+        if done || reply.len() > 256 {
+            break;
+        }
+    }
     let _ = crossterm::terminal::disable_raw_mode();
     parse_osc11(&reply)
         .or_else(from_colorfgbg)
         .unwrap_or_default()
+}
+
+/// The bytes a key event stands for, undoing crossterm's reading of an OSC
+/// reply: `ESC x` comes back as Alt+x, a control byte as Ctrl+letter, and
+/// the rest as plain characters.
+fn push_key_bytes(buf: &mut Vec<u8>, k: &event::KeyEvent) {
+    use event::{KeyCode, KeyModifiers};
+    if k.modifiers.contains(KeyModifiers::ALT) {
+        buf.push(0x1b);
+    }
+    match k.code {
+        KeyCode::Char(c)
+            if k.modifiers.contains(KeyModifiers::CONTROL) && c.is_ascii_lowercase() =>
+        {
+            buf.push(c as u8 - b'a' + 1);
+        }
+        KeyCode::Char(c) => {
+            let mut tmp = [0u8; 4];
+            buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
+        }
+        KeyCode::Esc => buf.push(0x1b),
+        _ => {}
+    }
 }
 
 /// The polarity in an OSC 11 reply: `]11;rgb:RRRR/GGGG/BBBB` with 1–4 hex
@@ -377,5 +406,35 @@ mod tests {
         // no colour reply, only the status report
         assert_eq!(parse_osc11(b"\x1b[0n"), None);
         assert_eq!(parse_osc11(b""), None);
+    }
+
+    #[test]
+    fn key_events_turn_back_into_the_osc_reply_bytes() {
+        use event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut buf = Vec::new();
+        push_key_bytes(
+            &mut buf,
+            &KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT),
+        );
+        for c in "11;rgb:ff/ff/ff".chars() {
+            push_key_bytes(
+                &mut buf,
+                &KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        push_key_bytes(
+            &mut buf,
+            &KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::ALT),
+        );
+        assert_eq!(buf, b"\x1b]11;rgb:ff/ff/ff\x1b\\");
+        assert_eq!(parse_osc11(&buf), Some(Mode::Light));
+
+        let mut bel = Vec::new();
+        push_key_bytes(
+            &mut bel,
+            &KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        );
+        push_key_bytes(&mut bel, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(bel, b"\x07\x1b");
     }
 }

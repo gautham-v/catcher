@@ -5,7 +5,9 @@
 //! differs is how it is told. tmux and WezTerm have a CLI, kitty a remote
 //! control socket, and Ghostty on macOS an AppleScript dictionary. Each is
 //! one command line away; this module picks the right one from the
-//! environment and spawns it, and never waits for it.
+//! environment and runs it. The CLIs return as soon as the terminal has the
+//! request, so they are waited for inline; osascript is waited for on a
+//! detached thread so no child is ever left unreaped.
 
 use std::process::{Command, Stdio};
 
@@ -44,7 +46,7 @@ fn detect(env: impl Fn(&str) -> Option<String>) -> Option<Backend> {
         return Some(Backend::Tmux);
     }
     let program = env("TERM_PROGRAM").unwrap_or_default();
-    if program.eq_ignore_ascii_case("ghostty") {
+    if cfg!(target_os = "macos") && program.eq_ignore_ascii_case("ghostty") {
         return Some(Backend::Ghostty);
     }
     if env("KITTY_WINDOW_ID").is_some() || env("TERM").as_deref() == Some("xterm-kitty") {
@@ -73,10 +75,23 @@ pub fn open_beside(place: Place, argv: &[String]) -> Result<(), String> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    match cmd.spawn() {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("{} failed: {e}", backend.name())),
-    }
+    let spawned = if backend == Backend::Ghostty {
+        // osascript can block on the app for a while; reap it off-thread
+        cmd.spawn().map(|mut child| {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        })
+    } else {
+        cmd.status().and_then(|s| {
+            if s.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!("exit {s}")))
+            }
+        })
+    };
+    spawned.map_err(|e| format!("{} failed: {e}", backend.name()))
 }
 
 /// The command line that asks `backend` for the surface.
@@ -189,10 +204,12 @@ mod tests {
 
     #[test]
     fn each_terminal_is_recognised() {
-        assert_eq!(
-            detect(env(&[("TERM_PROGRAM", "ghostty")])),
+        let ghostty = if cfg!(target_os = "macos") {
             Some(Backend::Ghostty)
-        );
+        } else {
+            None
+        };
+        assert_eq!(detect(env(&[("TERM_PROGRAM", "ghostty")])), ghostty);
         assert_eq!(
             detect(env(&[("KITTY_WINDOW_ID", "1")])),
             Some(Backend::Kitty)
