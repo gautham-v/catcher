@@ -177,6 +177,7 @@ pub enum Command {
     InsertFootnote,
     Outline,
     ToggleProperties,
+    HideProperties,
 }
 
 /// The palette's row and column commands, in the order they are listed.
@@ -199,13 +200,14 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 31] = [
+const COMMANDS: [Command; 32] = [
     Command::NewNote,
     Command::DailyNote,
     Command::QuickOpen,
     Command::SearchAll,
     Command::Outline,
     Command::ToggleProperties,
+    Command::HideProperties,
     Command::DeleteNote,
     Command::RenameFile,
     Command::MoveFile,
@@ -272,6 +274,7 @@ impl Command {
             Command::NewTab => Action::OpenTab,
             Command::Outline => Action::Outline,
             Command::ToggleProperties => Action::ToggleProperties,
+            Command::HideProperties => Action::HideProperties,
         })
     }
 
@@ -308,6 +311,7 @@ impl Command {
             Command::InsertFootnote => ("Insert footnote", "[^n] here, its text at the end of the note"),
             Command::Outline => ("Outline", "every heading in this note; ⏎ goes there, ⌥⏎ folds"),
             Command::ToggleProperties => ("Toggle properties (hide / show)", "the front matter: box, line or hidden on the page; dim or hidden in the editor"),
+            Command::HideProperties => ("Hide properties", "the front matter off the page entirely; Toggle properties brings it back"),
             Command::TableSource => ("Table: Edit source", "the pipes, until the cursor leaves"),
             Command::Table(op) => {
                 use crate::table::Op;
@@ -1438,6 +1442,31 @@ impl App {
         self.config.properties
     }
 
+    /// *Hide properties*: straight to nothing on the page, or to a hidden
+    /// block in the editor, without cycling through the line.
+    fn hide_properties(&mut self) {
+        use crate::config::{FrontMatter, Properties};
+        let (key, value) = match self.view {
+            View::Preview => {
+                self.config.properties = Properties::Hide;
+                ("properties", "hide")
+            }
+            View::Edit => {
+                self.config.front_matter = FrontMatter::Hide;
+                ("front_matter", "hide")
+            }
+        };
+        self.save_setting(key, value);
+    }
+
+    /// Write one flipped setting to the settings note and say so.
+    fn save_setting(&mut self, key: &str, value: &str) {
+        match crate::config::set_value(key, value) {
+            Ok(()) => self.flash(format!("{key}: {value}")),
+            Err(e) => self.flash(format!("{key}: {value} (not saved: {e})")),
+        }
+    }
+
     /// *Toggle properties* on the page cycles box → line → hide → box; a
     /// click on the box's edge folds it to the line and a click on the line
     /// opens the box (`click` — a click never hides the lot, since there
@@ -1472,10 +1501,7 @@ impl App {
                 )
             }
         };
-        match crate::config::set_value(key, value) {
-            Ok(()) => self.flash(format!("{key}: {value}")),
-            Err(e) => self.flash(format!("{key}: {value} (not saved: {e})")),
-        }
+        self.save_setting(key, value);
     }
 
     /// ^,: the settings, opened as a note. Regenerated first when it is
@@ -3480,6 +3506,10 @@ impl App {
             Action::ToggleProperties => {
                 self.overlay = Overlay::None;
                 self.toggle_properties(false);
+            }
+            Action::HideProperties => {
+                self.overlay = Overlay::None;
+                self.hide_properties();
             }
             Action::NewNote => {
                 self.overlay = Overlay::None;
@@ -5524,7 +5554,14 @@ mod tests {
         for q in ["toggle", "hide", "show", "prop"] {
             assert!(crate::search::fuzzy(q, Command::ToggleProperties.label().0).is_some(), "{q}");
         }
+        assert!(COMMANDS.contains(&Command::HideProperties));
+        assert_eq!(Command::HideProperties.action(), Some(Action::HideProperties));
+        assert_eq!(Command::HideProperties.label().0, "Hide properties");
         let map = crate::keys::Keymap::default();
+        assert!(map
+            .settings_rows()
+            .iter()
+            .any(|(k, v, _)| *k == "key_hide_properties" && v == "none"));
         assert_eq!(map.label(Action::ToggleProperties), "");
         assert!(map
             .settings_rows()

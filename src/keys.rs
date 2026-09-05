@@ -51,6 +51,7 @@ pub enum Action {
     UnfoldAll,
     Outline,
     ToggleProperties,
+    HideProperties,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -266,7 +267,13 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         Action::ToggleProperties,
         "key_properties",
         None,
-        "properties — fold the front matter box to a line and back",
+        "properties — box, line, hidden, and round again",
+    ),
+    (
+        Action::HideProperties,
+        "key_hide_properties",
+        None,
+        "properties — off the page entirely",
     ),
 ];
 
