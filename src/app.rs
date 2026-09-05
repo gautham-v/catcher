@@ -721,7 +721,7 @@ impl App {
     /// Build the app for one of the CLI's launch shapes.
     pub fn launch(launch: crate::cli::Launch) -> Result<Self> {
         use crate::cli::Launch;
-        let config = Config::load()?;
+        let (config, config_warning) = Config::load_reporting()?;
         config.ensure_dirs()?;
         // before anything is rendered: every style resolves against this
         config.apply();
@@ -881,6 +881,9 @@ impl App {
         // until it lands, which is exactly what an un-walked session does.
         if app.config.wikilinks {
             app.start_index_scan();
+        }
+        if let Some(w) = config_warning {
+            app.flash(w);
         }
         Ok(app)
     }

@@ -60,6 +60,14 @@ pub struct Editor {
     pub tab_width: usize,
 }
 
+/// Whether CRLF is the file's line ending: decided by majority, so a single
+/// stray `\r\n` in an LF file does not get the whole file rewritten to CRLF.
+fn mostly_crlf(content: &str) -> bool {
+    let crlf = content.matches("\r\n").count();
+    let lf = content.matches('\n').count() - crlf;
+    crlf > lf
+}
+
 impl Editor {
     pub fn new(content: &str) -> Editor {
         let mut lines: Vec<String> = content.lines().map(String::from).collect();
@@ -70,7 +78,7 @@ impl Editor {
             lines,
             follow_cursor: true,
             trailing_newline: content.ends_with('\n'),
-            crlf: content.contains("\r\n"),
+            crlf: mostly_crlf(content),
             tab_width: 2,
             ..Default::default()
         }
@@ -918,6 +926,12 @@ mod tests {
         assert_eq!(Editor::new("a\nb\n").text(), "a\nb\n");
         assert_eq!(Editor::new("a\nb").text(), "a\nb");
         assert_eq!(Editor::new("a\r\nb\r\n").text(), "a\r\nb\r\n");
+    }
+
+    #[test]
+    fn mixed_line_endings_follow_the_majority() {
+        assert_eq!(Editor::new("a\nb\r\nc\nd\n").text(), "a\nb\nc\nd\n");
+        assert_eq!(Editor::new("a\r\nb\nc\r\nd\r\n").text(), "a\r\nb\r\nc\r\nd\r\n");
     }
 
     #[test]

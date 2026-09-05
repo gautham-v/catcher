@@ -20,20 +20,30 @@ pub struct Report {
     pub links: usize,
     /// The notes written back, so a copy held in memory can be refreshed.
     pub notes: Vec<PathBuf>,
+    /// Notes that could not be read or written, so their links still point
+    /// at the old name.
+    pub skipped: Vec<PathBuf>,
 }
 
 impl Report {
     /// `3 links updated in 2 notes`, or nothing when there was nothing to do
     /// — a rename that touched no other note has nothing worth saying.
     pub fn describe(&self) -> Option<String> {
-        if self.links == 0 {
+        if self.links == 0 && self.skipped.is_empty() {
             return None;
         }
-        Some(format!(
+        let mut out = format!(
             "{} updated in {}",
             plural(self.links, "link"),
             plural(self.notes.len(), "note")
-        ))
+        );
+        if !self.skipped.is_empty() {
+            out.push_str(&format!(
+                " · {} could not be updated",
+                plural(self.skipped.len(), "note")
+            ));
+        }
+        Some(out)
     }
 }
 
@@ -236,6 +246,7 @@ pub fn retarget(old: &Path, new: &Path, roots: &[PathBuf]) -> Report {
             continue;
         }
         let Ok(body) = fs::read_to_string(&path) else {
+            report.skipped.push(path);
             continue;
         };
         let Some((rewritten, n)) = rename.rewrite(&body) else {
@@ -244,6 +255,8 @@ pub fn retarget(old: &Path, new: &Path, roots: &[PathBuf]) -> Report {
         if write_atomic(&path, &rewritten).is_ok() {
             report.links += n;
             report.notes.push(path);
+        } else {
+            report.skipped.push(path);
         }
     }
     report
@@ -407,8 +420,18 @@ mod tests {
         let r = Report {
             links: 1,
             notes: vec![PathBuf::from("a.md")],
+            skipped: vec![],
         };
         assert_eq!(r.describe().as_deref(), Some("1 link updated in 1 note"));
+        let r = Report {
+            links: 2,
+            notes: vec![PathBuf::from("a.md")],
+            skipped: vec![PathBuf::from("b.md"), PathBuf::from("c.md")],
+        };
+        assert_eq!(
+            r.describe().as_deref(),
+            Some("2 links updated in 1 note · 2 notes could not be updated")
+        );
     }
 
     #[test]

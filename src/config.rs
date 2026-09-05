@@ -297,6 +297,19 @@ impl Config {
     /// `config.toml` are carried across once, so an upgrade keeps its notes
     /// dir and theme without the user doing anything.
     pub fn load() -> Result<Config> {
+        let (config, warning) = Config::load_reporting()?;
+        if let Some(w) = warning {
+            // the app flashes this itself; only a plain terminal gets stderr
+            if !crossterm::terminal::is_raw_mode_enabled().unwrap_or(false) {
+                eprintln!("catcher: {w}");
+            }
+        }
+        Ok(config)
+    }
+
+    /// `load`, also returning a warning when the settings note was parsed
+    /// fine but could not be rewritten with the settings it was missing.
+    pub fn load_reporting() -> Result<(Config, Option<String>)> {
         let path = settings_path()?;
         if !path.exists() {
             let seed = legacy_config_path()
@@ -305,7 +318,7 @@ impl Config {
                 .unwrap_or_default();
             let migrated = Config::from_str(&seed);
             write_settings(&path, &migrated)?;
-            return Ok(migrated);
+            return Ok((migrated, None));
         }
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -316,10 +329,14 @@ impl Config {
         // parsed *without* the environment, or a `CATCHER_DIR=/tmp/x` run
         // would write /tmp/x into the file as the notes folder for good.
         let on_disk = Config::from_file_text(&text);
-        if !covers_every_setting(&text, &on_disk) {
-            let _ = write_settings(&path, &on_disk);
-        }
-        Ok(Config::from_str(&text))
+        let warning = if covers_every_setting(&text, &on_disk) {
+            None
+        } else {
+            write_settings(&path, &on_disk)
+                .err()
+                .map(|e| format!("settings not updated: {e:#}"))
+        };
+        Ok((Config::from_str(&text), warning))
     }
 
     /// Push everything this config decides into the places that read it
@@ -716,7 +733,11 @@ impl Config {
 /// overrides into it for good.
 pub fn set_value(key: &str, new: &str) -> Result<()> {
     let path = settings_path()?;
-    let text = fs::read_to_string(&path).unwrap_or_default();
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
     let out = with_value(&text, key, new);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
