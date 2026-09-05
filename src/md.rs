@@ -623,10 +623,37 @@ pub fn style_line(src: &str) -> RLine {
     }
 
     inline(&mut b, i, base);
+
+    // a hard line break — two trailing spaces or a trailing backslash — shows
+    // as ↵ in place of its last column; the other trailing spaces stay blank
+    if let Some(col) = hard_break_col(&chars) {
+        if col >= i {
+            while b.cells.last().is_some_and(|c| c.src == col) {
+                b.cells.pop();
+            }
+            b.sub(theme::HARD_BREAK, theme::marker(), col);
+        }
+    }
     RLine {
         cells: b.cells,
         src_len,
     }
+}
+
+/// The column of the hard line break ending `chars`: the last of two or more
+/// trailing spaces, or a trailing backslash that is not itself escaped.
+/// `None` when the line is blank or ends in neither.
+fn hard_break_col(chars: &[char]) -> Option<usize> {
+    let last = chars.len().checked_sub(1)?;
+    if chars[last] == ' ' {
+        let spaces = chars.iter().rev().take_while(|c| **c == ' ').count();
+        return (spaces >= 2 && spaces < chars.len()).then_some(last);
+    }
+    if chars[last] == '\\' {
+        let slashes = chars.iter().rev().take_while(|c| **c == '\\').count();
+        return (slashes % 2 == 1).then_some(last);
+    }
+    None
 }
 
 /// The source columns `start..end` of the `- [ ] ` prefix of a task line,
@@ -708,6 +735,19 @@ fn inline(b: &mut Builder, mut i: usize, base: Style) {
 /// Try to consume one inline construct at `i`; returns the next source column.
 fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
     let c = b.src[i];
+
+    // \* — a backslash escape: the backslash dimmed, the punctuation after it
+    // literal, so `\*not\*` is not italic and `\#2026` is not a tag. First,
+    // ahead of every construct the escaped character could otherwise open.
+    if c == '\\' {
+        if let Some(next) = b.src.get(i + 1) {
+            if next.is_ascii_punctuation() {
+                b.keep(i, theme::marker());
+                b.keep(i + 1, base);
+                return Some(i + 2);
+            }
+        }
+    }
 
     // [[wikilink]] — checked before `[text](url)`, which falls straight
     // through on a double bracket and would leave it as literal text
@@ -3226,5 +3266,87 @@ mod tests {
             link_key("stories/story-matrix")
         );
         assert_eq!(link_key(" A\\B "), "a/b");
+    }
+
+    #[test]
+    fn escaped_markers_are_literal_with_the_backslash_dimmed() {
+        let l = style_line(r"\*not\* here");
+        assert_eq!(text(&l), r"\*not\* here");
+        assert_eq!(l.cells[0].style, theme::marker());
+        assert_eq!(l.cells[1].style, theme::PLAIN);
+        assert!(!l.cells[2].style.add_modifier.contains(Modifier::ITALIC));
+        // every source column still yields exactly one cell, in order
+        assert_eq!(l.cells.len(), l.src_len);
+        for (k, c) in l.cells.iter().enumerate() {
+            assert_eq!(c.src, k);
+        }
+        assert_eq!(l.one_row().display_to_source(3), 3);
+        assert_eq!(l.one_row().display_to_source(6), 6);
+    }
+
+    #[test]
+    fn an_escape_disarms_tags_wikilinks_and_bold() {
+        let tag = style_line(r"\#2026 and #real");
+        assert_eq!(text(&tag), r"\#2026 and #real");
+        assert_eq!(tag.cells[1].style.fg, None);
+        assert_eq!(tag.cells[2].style.fg, None);
+        assert_eq!(tag.cells[11].style.fg, theme::tag().fg);
+        let wiki = style_line(r"\[[x]]");
+        assert_eq!(text(&wiki), r"\[[x]]");
+        let bold = style_line(r"\*\*a**");
+        assert_eq!(text(&bold), r"\*\*a**");
+        assert!(bold
+            .cells
+            .iter()
+            .all(|c| !c.style.add_modifier.contains(Modifier::BOLD)));
+    }
+
+    #[test]
+    fn a_backslash_before_a_letter_or_at_the_end_is_ordinary_text() {
+        let l = style_line(r"a\b *c*");
+        assert_eq!(text(&l), r"a\b c");
+        assert_eq!(l.cells[1].style, theme::PLAIN);
+        assert!(l.cells[4].style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn two_trailing_spaces_show_a_hard_break_glyph() {
+        let l = style_line("end  ");
+        assert_eq!(text(&l), "end \u{21b5}");
+        assert_eq!(l.cells[4].style, theme::marker());
+        assert_eq!(l.cells[4].src, 4);
+        assert_eq!(l.cells.len(), l.src_len);
+        assert_eq!(l.one_row().display_to_source(4), 4);
+        // three spaces: only the last one is the glyph
+        assert_eq!(text(&style_line("end   ")), "end  \u{21b5}");
+        // one trailing space, or a blank line, is no break
+        assert_eq!(text(&style_line("end ")), "end ");
+        assert_eq!(text(&style_line("   ")), "   ");
+        // a blockquote or list item can end in one too
+        assert_eq!(text(&style_line("> q  ")), "\u{258c} q \u{21b5}");
+        assert_eq!(text(&style_line("- item  ")), "\u{2022} item \u{21b5}");
+    }
+
+    #[test]
+    fn a_trailing_backslash_is_a_hard_break_unless_escaped() {
+        let l = style_line(r"end\");
+        assert_eq!(text(&l), "end\u{21b5}");
+        assert_eq!(l.cells[3].style, theme::marker());
+        assert_eq!(l.one_row().display_to_source(3), 3);
+        // `\\` is an escaped backslash, not a break
+        let l = style_line(r"end\\");
+        assert_eq!(text(&l), r"end\\");
+        assert_eq!(l.cells[3].style, theme::marker());
+        assert_eq!(l.cells[4].style, theme::PLAIN);
+        // and a third one is
+        assert_eq!(text(&style_line(r"end\\\")), "end\\\\\u{21b5}");
+    }
+
+    #[test]
+    fn hard_breaks_leave_fences_rules_tables_and_headings_alone() {
+        assert_eq!(text(&style_line("```  ")), "```  ");
+        assert_eq!(text(&style_line("| a |  ")), "| a |  ");
+        assert_eq!(text(&style_line("# Title  ")), "Title  ");
+        assert_eq!(text(&style_line("---  ")), "─────");
     }
 }

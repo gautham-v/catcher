@@ -419,6 +419,8 @@ pub const BULLET: &str = "\u{2022}";
 /// In front of a folded heading.
 pub const FOLDED: &str = "\u{25b8} ";
 pub const QUOTE_BAR: &str = "\u{258c}";
+/// A hard line break, in place of its trailing space or backslash.
+pub const HARD_BREAK: &str = "\u{21b5}";
 
 #[cfg(test)]
 mod tests {
