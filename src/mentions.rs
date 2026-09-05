@@ -91,6 +91,7 @@ pub fn target_entry(path: &Path, title: &str, roots: &[PathBuf]) -> Entry {
         modified: SystemTime::UNIX_EPOCH,
         // its aliases too, so a `[[launch]]` elsewhere counts as a link here
         aliases: index::head_at(path).1,
+        name: Entry::name_of(path),
         path: path.to_path_buf(),
     }
 }
@@ -435,6 +436,7 @@ pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Menti
             folder: String::new(),
             modified,
             aliases,
+            name: Entry::name_of(&path),
         });
         let Some(body) = body else {
             return;

@@ -349,6 +349,7 @@ mod tests {
             folder,
             modified: SystemTime::UNIX_EPOCH,
             aliases: Vec::new(),
+            name: Entry::name_of(&PathBuf::from(rel)),
         }
     }
 
@@ -362,6 +363,7 @@ mod tests {
             folder: folder.to_string(),
             modified: SystemTime::UNIX_EPOCH,
             aliases: Vec::new(),
+            name: Entry::name_of(&PathBuf::from(rel)),
         }
     }
 

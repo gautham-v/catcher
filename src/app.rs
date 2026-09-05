@@ -498,6 +498,9 @@ pub struct App {
     pub preview_hmax: u16,
     /// When the terminal's polarity was last checked against the system's.
     theme_checked: Instant,
+    /// The system-appearance check in flight, if one is; see
+    /// [`App::follow_system_theme`].
+    theme_rx: Option<std::sync::mpsc::Receiver<Option<crate::theme::Mode>>>,
     pub status: Option<(String, Instant)>,
     pub quit: bool,
     dirty: bool,
@@ -837,6 +840,7 @@ impl App {
             preview_hscroll: 0,
             preview_hmax: 0,
             theme_checked: Instant::now(),
+            theme_rx: None,
             status: None,
             quit: false,
             last_title: None,
@@ -1383,9 +1387,30 @@ impl App {
         {
             return false;
         }
-        self.theme_checked = Instant::now();
-        let Some(mode) = crate::theme::system_mode() else {
-            return false;
+        // one `defaults read` at a time, off the draw loop: the answer is
+        // taken on a later tick, the way an index walk is
+        let mode = match self.theme_rx.as_ref().map(|rx| rx.try_recv()) {
+            None => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::theme::system_mode());
+                });
+                self.theme_rx = Some(rx);
+                return false;
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return false,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                self.theme_rx = None;
+                return false;
+            }
+            Some(Ok(mode)) => {
+                self.theme_rx = None;
+                self.theme_checked = Instant::now();
+                let Some(mode) = mode else {
+                    return false;
+                };
+                mode
+            }
         };
         if mode != crate::theme::detected() {
             crate::theme::set_detected(mode);
@@ -1748,9 +1773,9 @@ impl App {
         crate::md::links::set_known(self.open_index.iter().flat_map(index::link_keys).collect());
         // an embedded note is found the way a followed link is: by the same
         // index, ranked the same way
-        let entries = self.open_index.clone();
+        let resolver = index::Resolver::new(self.open_index.clone());
         crate::md::embeds::set_resolver(Box::new(move |target| {
-            index::resolve(&entries, target).map(|e| e.path.clone())
+            resolver.resolve(target).map(|e| e.path.clone())
         }));
     }
 
@@ -2390,6 +2415,7 @@ impl App {
             folder: index::folder_of(&path, &home_root),
             modified: std::time::SystemTime::now(),
             aliases: Vec::new(),
+            name: index::Entry::name_of(&path),
             path,
         };
         self.open_index.insert(0, entry);

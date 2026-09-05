@@ -31,14 +31,21 @@ pub struct Entry {
     /// each already put through [`crate::md::link_key`] — so `[[launch]]`
     /// reaches a note filed under some longer name.
     pub aliases: Vec<String>,
+    /// The file's own name, without the `.md`: what the open picker and the
+    /// tree show, so a note is found under the name it has on disk. Computed
+    /// once at scan time; see [`Entry::name_of`].
+    pub name: String,
 }
 
 impl Entry {
-    /// The file's own name, without the `.md`: what the open picker and the
-    /// tree show, so a note is found under the name it has on disk.
+    /// The file's own name, without the `.md`.
     pub fn name(&self) -> String {
-        self.path
-            .file_stem()
+        self.name.clone()
+    }
+
+    /// The name an entry at `path` carries: its file stem.
+    pub fn name_of(path: &Path) -> String {
+        path.file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()
     }
@@ -214,6 +221,7 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
         let (title, aliases) = head_into(&path, &mut buf);
         entries.push(Entry {
             title,
+            name: Entry::name_of(&path),
             path,
             rel,
             folder,
@@ -243,6 +251,7 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
             // match against, and the folder is what is worth showing
             rel: short(&path),
             folder: folder_of(&path, &home_root),
+            name: Entry::name_of(&path),
             path,
             modified,
             aliases,
@@ -278,10 +287,10 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
 /// path in `rel`, so its suffixes still work as names and its stem still
 /// matches — a note in another vault is linkable by name like any other.
 pub fn link_keys(entry: &Entry) -> Vec<String> {
-    let mut keys = vec![crate::md::link_key(&entry.title)];
-    if let Some(stem) = entry.path.file_stem().and_then(|s| s.to_str()) {
-        keys.push(crate::md::link_key(stem));
-    }
+    let mut keys = vec![
+        crate::md::link_key(&entry.title),
+        crate::md::link_key(&entry.name),
+    ];
     let rel = crate::md::link_key(&entry.rel);
     keys.push(rel.clone());
     // "interviews/stories/story-matrix" also answers to "stories/story-matrix"
@@ -314,11 +323,54 @@ fn resolve_with<'a>(entries: &'a [Entry], target: &str, aliases: bool) -> Option
     if want.is_empty() {
         return None;
     }
-    entries
-        .iter()
+    best(entries.iter(), &want, aliases)
+}
+
+/// [`resolve`] over a prebuilt lookup table, for the caller that answers many
+/// targets against one index — the embed resolver runs once per rendered
+/// embed. Every [`link_keys`] name of every entry maps to the entries that
+/// carry it, so a target is a hash lookup and ranking runs over the few hits
+/// rather than the whole vault. The ranking and tie-break are [`resolve`]'s.
+pub struct Resolver {
+    entries: Vec<Entry>,
+    by_key: HashMap<String, Vec<usize>>,
+}
+
+impl Resolver {
+    pub fn new(entries: Vec<Entry>) -> Self {
+        let mut by_key: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, e) in entries.iter().enumerate() {
+            for k in link_keys(e) {
+                let hits = by_key.entry(k).or_default();
+                if hits.last() != Some(&i) {
+                    hits.push(i);
+                }
+            }
+        }
+        Self { entries, by_key }
+    }
+
+    pub fn resolve(&self, target: &str) -> Option<&Entry> {
+        let want = crate::md::link_key(target);
+        if want.is_empty() {
+            return None;
+        }
+        let hits = self.by_key.get(&want)?;
+        best(hits.iter().map(|&i| &self.entries[i]), &want, true)
+    }
+}
+
+/// The best of `candidates` for `want`, by [`rank`] then shortest path — the
+/// one ordering both [`resolve`] and [`Resolver`] use.
+fn best<'a>(
+    candidates: impl Iterator<Item = &'a Entry>,
+    want: &str,
+    aliases: bool,
+) -> Option<&'a Entry> {
+    candidates
         .filter_map(|e| {
-            rank(e, &want)
-                .or_else(|| (aliases && e.aliases.contains(&want)).then_some(3))
+            rank(e, want)
+                .or_else(|| (aliases && e.aliases.iter().any(|a| a == want)).then_some(3))
                 .map(|r| (r, e))
         })
         // `scan` returns entries in filesystem order, which is not stable
@@ -333,12 +385,7 @@ fn resolve_with<'a>(entries: &'a [Entry], target: &str, aliases: bool) -> Option
 /// tested against hand-built entries with no filesystem behind them.
 fn rank(entry: &Entry, want: &str) -> Option<u8> {
     // the filename is what an Obsidian link names first and foremost
-    if entry
-        .path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .is_some_and(|s| crate::md::link_key(s) == want)
-    {
+    if crate::md::link_key(&entry.name) == want {
         return Some(0);
     }
     if crate::md::link_key(&entry.title) == want {
@@ -570,6 +617,36 @@ mod tests {
             folder: String::new(),
             modified: SystemTime::UNIX_EPOCH,
             aliases: Vec::new(),
+            name: Entry::name_of(&PathBuf::from(rel)),
+        }
+    }
+
+    #[test]
+    fn the_resolver_ranks_hits_the_way_resolve_does() {
+        let entries = vec![
+            entry("notes/launch.md", "Something Else"),
+            entry("plan.md", "Launch"),
+            aliased("deep/other.md", "Other", &["launch"]),
+            entry("stories/story-matrix.md", "Story Matrix"),
+        ];
+        let r = Resolver::new(entries.clone());
+        // a stem hit beats a title hit beats an alias
+        assert_eq!(r.resolve("launch").unwrap().rel, "notes/launch.md");
+        assert_eq!(r.resolve("Launch").unwrap().rel, "notes/launch.md");
+        assert_eq!(
+            r.resolve("stories/story-matrix").unwrap().rel,
+            "stories/story-matrix.md"
+        );
+        assert_eq!(r.resolve("Something Else").unwrap().rel, "notes/launch.md");
+        // a path suffix only counts at a folder boundary
+        assert!(r.resolve("matrix").is_none());
+        assert!(r.resolve("").is_none());
+        for t in ["launch", "plan", "Other", "story-matrix", "nowhere"] {
+            assert_eq!(
+                r.resolve(t).map(|e| &e.rel),
+                resolve(&entries, t).map(|e| &e.rel),
+                "{t}"
+            );
         }
     }
 

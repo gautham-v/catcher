@@ -188,10 +188,12 @@ fn views(found: &[(PathBuf, String)], old: &Path, new: &Path) -> (Vec<Entry>, Ve
             folder: String::new(),
             modified: std::time::SystemTime::UNIX_EPOCH,
             aliases,
+            name: Entry::name_of(path),
         };
         if path == new {
             let mut moved = entry.clone();
             moved.path = old.to_path_buf();
+            moved.name = Entry::name_of(old);
             moved.rel = sibling_rel(rel, old);
             before.push(moved);
         } else {

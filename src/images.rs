@@ -165,10 +165,16 @@ impl Images {
             .as_ref()
             .is_some_and(|z| z.path == path && z.area == area);
         if !fresh {
-            let img = image::ImageReader::open(&path)
-                .ok()
-                .and_then(|r| r.with_guessed_format().ok())
-                .and_then(|r| r.decode().ok())?;
+            // the band cache already holds the decoded file when the page has
+            // drawn it; only a picture never shown inline is read from disk
+            let cached = self.cache.get(&path).and_then(|c| c.as_ref());
+            let img = match cached {
+                Some(c) => c.source.clone(),
+                None => image::ImageReader::open(&path)
+                    .ok()
+                    .and_then(|r| r.with_guessed_format().ok())
+                    .and_then(|r| r.decode().ok())?,
+            };
             let natural = img.dimensions();
             let (font_w, font_h) = picker.font_size();
             let (px, size) = fill_px(natural.0, natural.1, font_w, font_h, area);

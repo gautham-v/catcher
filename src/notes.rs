@@ -277,19 +277,28 @@ pub fn load_all(dir: &Path) -> Result<Vec<Note>> {
     let mut notes = Vec::new();
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") || !path.is_file() {
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        // one stat serves the file check, the sort key and the stamp
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
             continue;
         }
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
             Err(_) => continue, // not UTF-8 markdown; leave it alone
         };
-        let modified = fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let stamp = meta.modified().ok().map(|modified| Stamp {
+            modified,
+            len: meta.len(),
+        });
         notes.push(Note {
             disk_title: title_of(&content),
-            stamp: stamp_of(&path),
+            stamp,
             saved: content.clone(),
             path,
             content,
