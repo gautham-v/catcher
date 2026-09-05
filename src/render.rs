@@ -161,6 +161,10 @@ pub fn render_page_at(
     width: usize,
     tables: TableStyle,
 ) -> Rendered {
+    // block ids are addresses for links, not words for the page: blanked
+    // rather than cut, so every byte offset pulldown reports still points at
+    // the same place in the file the reader is looking at
+    let markdown = &blank_block_ids(markdown);
     let mut r = Ren::new(markdown, first_line, width, tables);
     // `%% comments %%` are not part of the page: pulldown-cmark never sees
     // them, and every offset it reports is mapped back through the cuts
@@ -175,6 +179,29 @@ pub fn render_page_at(
     r.inline_notes = notes;
     r.run(&rewritten);
     r.finish()
+}
+
+/// `markdown` with every trailing ` ^blockid` replaced by spaces of the same
+/// byte length. Fenced code is left alone: a caret there is code.
+pub fn blank_block_ids(markdown: &str) -> String {
+    let mut out = String::with_capacity(markdown.len());
+    let mut fenced = false;
+    for raw in markdown.split_inclusive('\n') {
+        let line = raw.trim_end_matches('\n').trim_end_matches('\r');
+        if crate::md::is_fence(line) {
+            fenced = !fenced;
+        }
+        match (fenced, crate::md::block_id_at(line)) {
+            (false, Some((col, _))) => {
+                let byte = line.char_indices().nth(col).map_or(line.len(), |(b, _)| b);
+                out.push_str(&line[..byte]);
+                out.extend(std::iter::repeat_n(' ', line.len() - byte));
+                out.push_str(&raw[line.len()..]);
+            }
+            _ => out.push_str(raw),
+        }
+    }
+    out
 }
 
 /// An Obsidian inline footnote `^[text]`, rewritten for pulldown as a
@@ -1001,7 +1028,7 @@ impl Ren {
         let byte_at = byte_offsets(&chars, off);
         Some((
             byte_at[w.end],
-            w.target,
+            w.full_target(),
             byte_at[w.label_start],
             byte_at[w.label_end],
         ))
@@ -1728,7 +1755,22 @@ impl Ren {
                         .urls
                         .push(crate::md::LinkTarget::Wiki(target.clone()).href());
                     let style = crate::md::wiki_style(self.style(), &target);
-                    self.push_at(&label, style, Some(idx), Some(ls));
+                    // an unaliased `[[note#Heading]]` reads `note › Heading`,
+                    // as it does in the editor; the chevron is ours and maps
+                    // to no source column, the words either side keep theirs
+                    let shown_hash = (crate::md::split_fragment(&target).1.is_some()
+                        && ls == range.start + 2)
+                        .then(|| label.find('#'))
+                        .flatten();
+                    match shown_hash {
+                        Some(h) => {
+                            self.push_at(&label[..h], style, Some(idx), Some(ls));
+                            let sep = if h == 0 { "› " } else { " › " };
+                            self.push(sep, style, Some(idx));
+                            self.push_at(&label[h + 1..], style, Some(idx), Some(ls + h + 1));
+                        }
+                        None => self.push_at(&label, style, Some(idx), Some(ls)),
+                    }
                     self.wiki_until = end;
                 } else {
                     self.emit_text(&text, Some(range.start));
@@ -2967,10 +3009,60 @@ mod tests {
         assert_eq!(flat(&r).trim(), "see note now");
         let cell = r.lines[0].cells.iter().find(|c| c.link.is_some()).unwrap();
         assert_eq!(r.url(cell.link.unwrap()), Some("wikilink:note"));
-        // a piped one shows only its label, and the target loses the heading
+        // a piped one shows only its label; the heading travels with the
+        // target so the follower can land on it
         let r = render("[[stories/story-matrix#Method|the matrix]]\n");
         assert_eq!(flat(&r).trim(), "the matrix");
-        assert_eq!(r.url(0), Some("wikilink:stories/story-matrix"));
+        assert_eq!(r.url(0), Some("wikilink:stories/story-matrix#Method"));
+    }
+
+    #[test]
+    fn a_heading_link_reads_note_chevron_heading_and_keeps_its_source_columns() {
+        let r = render("see [[note#Method]] now\n");
+        assert_eq!(flat(&r).trim(), "see note › Method now");
+        assert_eq!(r.url(0), Some("wikilink:note#Method"));
+        let cells = &r.lines[0].cells;
+        // the chevron is the page's, mapping to no source; the words either
+        // side keep their true columns, so a click lands inside the link
+        let n = cells
+            .iter()
+            .position(|c| c.ch == 'n' && c.link.is_some())
+            .unwrap();
+        assert_eq!(cells[n].src, Some((0, 6)));
+        let chevron = cells.iter().find(|c| c.ch == '›').unwrap();
+        assert_eq!(chevron.src, None);
+        assert!(chevron.link.is_some());
+        let m = cells.iter().position(|c| c.ch == 'M').unwrap();
+        assert_eq!(cells[m].src, Some((0, 11)));
+        // a block reference, and a link to a heading in this note
+        assert_eq!(flat(&render("[[note#^abc]]\n")).trim(), "note › ^abc");
+        let r = render("[[#Method]]\n");
+        assert_eq!(flat(&r).trim(), "› Method");
+        assert_eq!(r.url(0), Some("wikilink:#Method"));
+    }
+
+    #[test]
+    fn a_trailing_block_id_is_not_drawn_on_the_page() {
+        let r = render("a paragraph ^abc\n\n- item ^def-1\n\n# Title ^h1\n");
+        let text = flat(&r);
+        assert!(!text.contains('^'), "{text}");
+        assert!(text.contains("a paragraph"));
+        assert!(text.contains("Title"));
+        // blanked, not cut: what follows keeps its line
+        assert_eq!(blank_block_ids("x ^abc\ny\n"), "x     \ny\n");
+        assert_eq!(blank_block_ids("^abc\n"), "    \n");
+        // a caret inside a fence is code and stays
+        assert_eq!(blank_block_ids("```\nx ^abc\n```\n"), "```\nx ^abc\n```\n");
+        let r = render("```\ncode ^abc\n```\n");
+        assert!(flat(&r).contains("code ^abc"));
+        // and a paragraph carrying one still maps its cells to its own line
+        let r = render("first\n\nsecond ^abc\n");
+        let line = r
+            .lines
+            .iter()
+            .find(|l| l.text().contains("second"))
+            .unwrap();
+        assert_eq!(line.src_line, Some(2));
     }
 
     #[test]

@@ -481,6 +481,18 @@ pub fn style_line(src: &str) -> RLine {
 /// the note: an inline `^[text]` is drawn as that ordinal. `style_line`
 /// starts every line at 1; `style_line_in` counts the lines above.
 pub fn style_line_from(src: &str, note: usize) -> RLine {
+    let mut line = style_line_inner(src, note);
+    // a trailing ` ^blockid` is an address, not prose: kept, but dimmed to
+    // the weight of a marker, whatever the line around it was styled as
+    if let Some((col, _)) = block_id_at(src) {
+        for cell in line.cells.iter_mut().filter(|c| c.src >= col) {
+            cell.style = theme::marker();
+        }
+    }
+    line
+}
+
+fn style_line_inner(src: &str, note: usize) -> RLine {
     let chars: Vec<char> = src.chars().collect();
     let src_len = chars.len();
     let mut b = Builder {
@@ -878,6 +890,14 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
     if c == '[' && b.src.get(i + 1) == Some(&'[') && links::enabled() {
         if let Some(w) = wikilink_at(b.src, i) {
             let style = wiki_style(base, &w.target);
+            // `[[note#Heading]]` reads as `note › Heading`: the `#` cell is
+            // drawn as the chevron, so every column still has its one cell
+            if let Some(h) = w.shown_hash(b.src) {
+                delimited(b, w.start, w.label_start, h, h, style);
+                let sep = if h == w.label_start { "› " } else { " › " };
+                b.sub(sep, style, h);
+                return Some(delimited(b, h + 1, h + 1, w.label_end, w.end, style));
+            }
             return Some(delimited(
                 b,
                 w.start,
@@ -1273,7 +1293,7 @@ pub fn link_at(line: &str, col: usize) -> Option<LinkTarget> {
                 // an embedded note's `!` is part of the span too
                 let start = if i > 0 && src[i - 1] == '!' { i - 1 } else { w.start };
                 if (start..w.end).contains(&col) {
-                    return Some(LinkTarget::Wiki(w.target));
+                    return Some(LinkTarget::Wiki(w.full_target()));
                 }
                 i = w.end;
                 continue;
@@ -1496,8 +1516,71 @@ pub struct Wikilink {
     /// heading is a place *inside* a note and the note is what opens, so it is
     /// shown but never resolved against.
     pub target: String,
+    /// The place inside the note, if the link named one: the `Heading` of
+    /// `[[note#Heading]]` or the `^id` of `[[note#^id]]`, trimmed. Empty
+    /// `target` with a fragment is `[[#Heading]]`, a place in this note.
+    pub fragment: Option<String>,
     pub label_start: usize,
     pub label_end: usize,
+}
+
+impl Wikilink {
+    /// The target with its fragment put back — `note#Heading` — which is how
+    /// a link travels to the follower, so it can open the note and then find
+    /// the place. `link_key` and the resolver drop the fragment themselves.
+    pub fn full_target(&self) -> String {
+        match &self.fragment {
+            Some(f) => format!("{}#{f}", self.target),
+            None => self.target.clone(),
+        }
+    }
+
+    /// The source column of the `#` shown in the label, when the label is the
+    /// target itself rather than an alias: that is the column drawn as ` › `.
+    pub fn shown_hash(&self, src: &[char]) -> Option<usize> {
+        if self.fragment.is_none() || self.label_start != self.start + 2 {
+            return None;
+        }
+        (self.label_start..self.label_end).find(|&k| src[k] == '#')
+    }
+}
+
+/// A link target split at its first `#`: the note's name and the place inside
+/// it, both trimmed, the fragment `None` when there is none or it is blank.
+/// `[[#Heading]]` gives an empty name: a place in the note you are reading.
+pub fn split_fragment(target: &str) -> (&str, Option<&str>) {
+    match target.split_once('#') {
+        Some((name, frag)) => {
+            let frag = frag.trim();
+            (name.trim(), (!frag.is_empty()).then_some(frag))
+        }
+        None => (target.trim(), None),
+    }
+}
+
+/// The source column where a trailing ` ^blockid` begins — the space before
+/// the caret, or column 0 for a line that is nothing but `^blockid` — and the
+/// id itself. Obsidian's block reference: letters, digits and dashes after a
+/// caret, ending the line. Anything else, `None`.
+pub fn block_id_at(line: &str) -> Option<(usize, String)> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut end = chars.len();
+    while end > 0 && chars[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    let mut k = end;
+    while k > 0 && (chars[k - 1].is_ascii_alphanumeric() || chars[k - 1] == '-') {
+        k -= 1;
+    }
+    if k == end || k == 0 || chars[k - 1] != '^' {
+        return None;
+    }
+    let caret = k - 1;
+    let id: String = chars[k..end].iter().collect();
+    if caret == 0 {
+        return Some((0, id));
+    }
+    (chars[caret - 1] == ' ').then(|| (caret - 1, id))
 }
 
 /// The one rule set for what counts as a wikilink at source column `i`, called
@@ -1529,11 +1612,6 @@ pub fn wikilink_at(src: &[char], i: usize) -> Option<Wikilink> {
     if src[body_start..close].iter().all(|c| c.is_whitespace()) {
         return None;
     }
-    // `[[#heading]]` names a place in the note you are already reading: there
-    // is nothing to resolve and nothing to create, so leave it as it was typed
-    if src[body_start] == '#' {
-        return None;
-    }
     // the FIRST pipe splits target from label, so a label may contain one
     let pipe = (body_start..close).find(|&k| src[k] == '|');
     let (target_end, label) = match pipe {
@@ -1544,8 +1622,10 @@ pub fn wikilink_at(src: &[char], i: usize) -> Option<Wikilink> {
         None => (close, (body_start, close)),
     };
     let raw: String = src[body_start..target_end].iter().collect();
-    let target = raw.split('#').next().unwrap_or("").trim().to_string();
-    if target.is_empty() {
+    let (target, fragment) = split_fragment(&raw);
+    // `[[#heading]]` names a place in the note you are already reading — a
+    // link with nothing to resolve, but a link; `[[#]]` names nothing at all
+    if target.is_empty() && fragment.is_none() {
         return None;
     }
     // `![[picture.png]]` is a picture, drawn by the image path; only an
@@ -1556,7 +1636,8 @@ pub fn wikilink_at(src: &[char], i: usize) -> Option<Wikilink> {
     Some(Wikilink {
         start: i,
         end: close + 2,
-        target,
+        target: target.to_string(),
+        fragment: fragment.map(str::to_string),
         label_start: label.0,
         label_end: label.1,
     })
@@ -1759,7 +1840,8 @@ pub mod links {
 /// `theme::link()` carries and only its colour changes.
 pub fn wiki_style(base: Style, target: &str) -> Style {
     let base = base.patch(theme::link());
-    if links::resolves(target) {
+    // an empty name is `[[#heading]]`: the note on screen, which exists
+    if split_fragment(target).0.is_empty() || links::resolves(target) {
         base
     } else {
         base.patch(theme::grey())
@@ -4020,7 +4102,7 @@ mod tests {
         // a typed label is kept as typed
         assert_eq!(text(&style_line("![[plan#Goals|here]]")), "here");
         // ⌥⏎ on the `!` follows it, like anywhere else on the span
-        let wiki = Some(LinkTarget::Wiki("plan".to_string()));
+        let wiki = Some(LinkTarget::Wiki("plan#Goals".to_string()));
         assert_eq!(link_at("see ![[plan#Goals]] now", 4), wiki);
         assert_eq!(link_at("see ![[plan#Goals]] now", 18), wiki);
         assert_eq!(link_at("see ![[plan#Goals]] now", 3), None);
@@ -4500,10 +4582,115 @@ mod tests {
     #[test]
     fn a_heading_suffix_is_shown_but_is_not_part_of_the_target() {
         let l = style_line("[[note#Method]]");
-        // Obsidian shows the whole thing; only the target drops the heading
-        assert_eq!(text(&l), "note#Method");
+        // the heading is shown, as `note › Method`; only the target drops it
+        assert_eq!(text(&l), "note › Method");
         let chars: Vec<char> = "[[note#Method]]".chars().collect();
-        assert_eq!(wikilink_at(&chars, 0).unwrap().target, "note");
+        let w = wikilink_at(&chars, 0).unwrap();
+        assert_eq!(w.target, "note");
+        assert_eq!(w.fragment.as_deref(), Some("Method"));
+        assert_eq!(w.full_target(), "note#Method");
+    }
+
+    #[test]
+    fn a_heading_link_draws_a_chevron_for_the_hash_and_keeps_its_columns() {
+        let _turn = colours();
+        // "[[note#Method]]": the `#` at column 6 becomes ` › `, one cell of
+        // three characters, so the columns either side still map straight back
+        let l = style_line("[[note#Method]]");
+        let row = l.one_row();
+        assert_eq!(row.display_to_source(0), 2); // the "n" of note
+        assert_eq!(row.display_to_source(4), 6); // the chevron is the `#`
+        assert_eq!(row.display_to_source(7), 7); // the "M" of Method
+        assert!(l.cells.iter().all(|c| c.style.fg == theme::link().fg));
+        // a block reference is shown the same way, caret and all
+        assert_eq!(text(&style_line("[[note#^abc]]")), "note › ^abc");
+        // an alias hides both the note and the heading
+        assert_eq!(
+            text(&style_line("[[note#Method|the method]]")),
+            "the method"
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_heading_in_this_note_is_a_link_with_no_note_to_resolve() {
+        let _turn = colours();
+        // `[[#Method]]` reads `› Method`, in link colour whatever the vault
+        // knows: the note it names is the one on screen
+        links::set_known(std::collections::HashSet::new());
+        let l = style_line("[[#Method]]");
+        assert_eq!(text(&l), "› Method");
+        assert!(l.cells.iter().all(|c| c.style.fg == theme::link().fg));
+        assert_eq!(l.one_row().display_to_source(2), 3); // the "M"
+        assert_eq!(
+            link_at("[[#Method]]", 3),
+            Some(LinkTarget::Wiki("#Method".to_string()))
+        );
+        let chars: Vec<char> = "[[#Method]]".chars().collect();
+        let w = wikilink_at(&chars, 0).unwrap();
+        assert_eq!(w.target, "");
+        assert_eq!(w.fragment.as_deref(), Some("Method"));
+        // a `#` with nothing after it names nothing at all
+        assert_eq!(wikilink_at(&"[[#]]".chars().collect::<Vec<_>>(), 0), None);
+        links::set_known(std::collections::HashSet::from(["note".to_string()]));
+        assert_eq!(
+            style_line("[[note#Method]]").cells[0].style.fg,
+            theme::link().fg
+        );
+    }
+
+    #[test]
+    fn link_at_carries_the_fragment_for_the_follower() {
+        assert_eq!(
+            link_at("see [[note#Method]] now", 6),
+            Some(LinkTarget::Wiki("note#Method".to_string()))
+        );
+        assert_eq!(
+            link_at("see [[note#^abc|x]] now", 6),
+            Some(LinkTarget::Wiki("note#^abc".to_string()))
+        );
+        assert_eq!(
+            link_at("see [[note]] now", 6),
+            Some(LinkTarget::Wiki("note".to_string()))
+        );
+    }
+
+    #[test]
+    fn split_fragment_separates_the_note_from_the_place_in_it() {
+        assert_eq!(split_fragment("note#Method"), ("note", Some("Method")));
+        assert_eq!(split_fragment(" note # Method "), ("note", Some("Method")));
+        assert_eq!(split_fragment("note#^abc"), ("note", Some("^abc")));
+        assert_eq!(split_fragment("#Method"), ("", Some("Method")));
+        assert_eq!(split_fragment("note#"), ("note", None));
+        assert_eq!(split_fragment("note"), ("note", None));
+    }
+
+    #[test]
+    fn a_trailing_block_id_is_found_and_dimmed() {
+        assert_eq!(
+            block_id_at("some text ^abc-1"),
+            Some((9, "abc-1".to_string()))
+        );
+        assert_eq!(
+            block_id_at("some text ^abc-1  "),
+            Some((9, "abc-1".to_string()))
+        );
+        assert_eq!(block_id_at("^abc"), Some((0, "abc".to_string())));
+        // glued to a word, empty, or followed by anything: not an id
+        assert_eq!(block_id_at("text^abc"), None);
+        assert_eq!(block_id_at("text ^"), None);
+        assert_eq!(block_id_at("text ^abc def"), None);
+        assert_eq!(block_id_at("[[note#^abc]]"), None);
+        assert_eq!(block_id_at(""), None);
+        // drawn kept but dim, whatever the line was: a heading, a task
+        let l = style_line("# Title ^abc");
+        assert_eq!(text(&l), "Title ^abc");
+        let tail: Vec<&Cell> = l.cells.iter().filter(|c| c.src >= 7).collect();
+        assert_eq!(tail.len(), 5);
+        assert!(tail.iter().all(|c| c.style == theme::marker()));
+        assert_eq!(l.cells[0].style.fg, theme::heading(1).fg);
+        let l = style_line("- [ ] task ^id");
+        assert_eq!(text(&l), "\u{2610} task ^id");
+        assert_eq!(l.cells.last().unwrap().style, theme::marker());
     }
 
     #[test]
@@ -4514,7 +4701,7 @@ mod tests {
             "\\[[escaped]]",
             "![[embed.png]]",
             "[[ ]]",
-            "[[#heading]]",
+            "[[#]]",
             "[x]",
         ] {
             assert_eq!(text(&style_line(src)), src, "{src}");
@@ -4615,8 +4802,12 @@ mod tests {
         // styling takes the whole [[…]] before it ever looks for a tag
         assert!(tags_in("[[#heading]] [[note#part|alias]]").is_empty());
         assert_eq!(tags_in("[[note]] #tag"), vec![(9, 13)]);
-        // and neither the cursor nor the styling finds a tag there either
-        assert_eq!(link_at("[[#heading]]", 3), None);
+        // and neither the cursor nor the styling finds a tag there either:
+        // it is a link to a heading in this note
+        assert_eq!(
+            link_at("[[#heading]]", 3),
+            Some(LinkTarget::Wiki("#heading".to_string()))
+        );
         let l = style_line("[[#heading]]");
         assert!(l.cells.iter().all(|c| c.style.fg != theme::tag().fg));
     }
