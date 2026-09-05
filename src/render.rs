@@ -1061,7 +1061,7 @@ impl Ren {
                         *n += 1;
                         m
                     }
-                    _ => theme::BULLET.to_string(),
+                    _ => theme::bullet(self.list_depth).to_string(),
                 };
                 let text = format!("{}{marker} ", self.indent());
                 self.hang = crate::md::str_width(&text);
@@ -1961,8 +1961,25 @@ mod tests {
     fn ordered_lists_keep_their_numbers() {
         let r = render("3. three\n4. four\n   - sub\n5. five\n\n- plain\n");
         let f = flat(&r);
-        assert!(f.contains("3. three\n4. four\n  • sub\n5. five"), "{f}");
+        assert!(f.contains("3. three\n4. four\n  ◦ sub\n5. five"), "{f}");
         assert!(f.contains("• plain"), "{f}");
+    }
+
+    #[test]
+    fn bullet_glyph_follows_nesting_depth() {
+        let r = render("- one\n  - two\n    - three\n      - four\n  - two again\n- one again\n");
+        let f = flat(&r);
+        assert!(
+            f.contains("• one\n  ◦ two\n    ▪ three\n      • four\n  ◦ two again\n• one again"),
+            "{f}"
+        );
+    }
+
+    #[test]
+    fn nested_task_items_keep_their_boxes() {
+        let r = render("- [ ] top\n  - [x] nested\n  - plain\n");
+        let f = flat(&r);
+        assert!(f.contains("☐ top\n  ✓ nested\n  ◦ plain"), "{f}");
     }
 
     #[test]

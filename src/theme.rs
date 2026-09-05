@@ -416,6 +416,19 @@ pub fn color_to_string(c: Color) -> String {
 pub const CHECKED: &str = "\u{2713}";
 pub const UNCHECKED: &str = "\u{2610}";
 pub const BULLET: &str = "\u{2022}";
+/// Second- and third-level bullets; `bullet(depth)` cycles through the three.
+pub const BULLET_2: &str = "\u{25e6}";
+pub const BULLET_3: &str = "\u{25aa}";
+
+/// The bullet glyph for a list nested `depth` levels deep (1 is top level):
+/// `•`, `◦`, `▪`, then round again. Depth 0 is treated as 1.
+pub fn bullet(depth: usize) -> &'static str {
+    match depth.max(1) % 3 {
+        1 => BULLET,
+        2 => BULLET_2,
+        _ => BULLET_3,
+    }
+}
 /// In front of a folded heading.
 pub const FOLDED: &str = "\u{25b8} ";
 pub const QUOTE_BAR: &str = "\u{258c}";
@@ -423,6 +436,17 @@ pub const QUOTE_BAR: &str = "\u{258c}";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bullet_glyph_cycles_every_three_levels() {
+        assert_eq!(bullet(1), BULLET);
+        assert_eq!(bullet(2), BULLET_2);
+        assert_eq!(bullet(3), BULLET_3);
+        assert_eq!(bullet(4), BULLET);
+        assert_eq!(bullet(6), BULLET_3);
+        // depth 0 never happens, but reads as top level if it does
+        assert_eq!(bullet(0), BULLET);
+    }
 
     #[test]
     fn each_of_the_first_three_heading_levels_takes_its_own_colour() {
