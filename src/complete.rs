@@ -87,6 +87,16 @@ fn link_token(chars: &[char], col: usize) -> Option<Token> {
             query: inside[hash + 1..].to_string(),
         });
     }
+    // `[[^` is Obsidian's way into this note's blocks, `#` left unsaid
+    if inside.starts_with('^') {
+        return Some(Token {
+            kind: Kind::Anchor {
+                note: String::new(),
+            },
+            start: open,
+            query: inside,
+        });
+    }
     Some(Token {
         kind: Kind::Link,
         start: open,
@@ -343,6 +353,11 @@ pub fn accept(line: &str, col: usize, token: &Token, insert: &str) -> (String, u
     let head: String = chars[..token.start.min(col)].iter().collect();
     let rest: String = chars[col..].iter().collect();
     let mut out = head;
+    // a block picked from `[[^` lands as `[[#^id]]`, the link that means
+    // "this note, that block"
+    if insert.starts_with('^') && token.query.starts_with('^') && out.ends_with("[[") {
+        out.push('#');
+    }
     out.push_str(insert);
     let mut cursor = out.chars().count();
     if token.kind != Kind::Tag {
@@ -452,6 +467,22 @@ mod tests {
             accept("[[gro and [[b]]", 5, &t, "groceries"),
             ("[[groceries]] and [[b]]".into(), 13)
         );
+    }
+
+    #[test]
+    fn a_bare_caret_after_the_brackets_lists_this_notes_blocks() {
+        assert_eq!(
+            tok("see [[^la", 9),
+            Some((Kind::Anchor { note: String::new() }, 6, "^la".into()))
+        );
+        let t = token_at("see [[^la", 9).unwrap();
+        assert_eq!(
+            accept("see [[^la", 9, &t, "^ab12cd"),
+            ("see [[#^ab12cd]]".into(), 16)
+        );
+        // through `#^` the hash is already there
+        let t = token_at("[[note#^la", 10).unwrap();
+        assert_eq!(accept("[[note#^la", 10, &t, "^ab12cd"), ("[[note#^ab12cd]]".into(), 16));
     }
 
     #[test]
