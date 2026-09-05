@@ -86,7 +86,7 @@ cargo test
 cargo clippy
 ```
 
-Rust, ratatui + crossterm. `src/editor.rs` is the buffer, `src/md.rs` live-preview styling, `src/render.rs` the reading view, `src/mermaid/` the diagram renderer, `src/config.rs` the settings note. Every colour lives in the `theme` module at the top of `src/md.rs`.
+Rust, ratatui + crossterm. `src/editor.rs` is the buffer, `src/app.rs` the app state and key/mouse handling (with table editing in `src/app/table_edit.rs` and link peeks in `src/app/peek.rs`), `src/md.rs` live-preview styling, `src/render.rs` the reading view, `src/mermaid/` the diagram renderer, `src/config.rs` the settings note. Every colour lives in the `theme` module at the top of `src/md.rs`.
 
 ## License
 
