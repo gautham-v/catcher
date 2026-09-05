@@ -413,6 +413,10 @@ pub fn wrap_breaks(chars: &[char], first: usize, rest: usize) -> Vec<(usize, usi
 struct Builder<'a> {
     src: &'a [char],
     cells: Vec<Cell>,
+    /// The ordinal the next footnote reference on this line gets — an inline
+    /// `^[note]` is drawn as that number, so a line has to know how many
+    /// references came before it in the note.
+    note: usize,
 }
 
 impl<'a> Builder<'a> {
@@ -448,6 +452,7 @@ pub fn style_inline(src: &str) -> Vec<Cell> {
     let mut b = Builder {
         src: &chars,
         cells: Vec::with_capacity(chars.len()),
+        note: 1,
     };
     inline(&mut b, 0, theme::PLAIN);
     b.cells
@@ -455,11 +460,19 @@ pub fn style_inline(src: &str) -> Vec<Cell> {
 
 /// Style one markdown source line for display.
 pub fn style_line(src: &str) -> RLine {
+    style_line_from(src, 1)
+}
+
+/// The same, for a line whose first footnote reference is number `note` in
+/// the note: an inline `^[text]` is drawn as that ordinal. `style_line`
+/// starts every line at 1; `style_line_in` counts the lines above.
+pub fn style_line_from(src: &str, note: usize) -> RLine {
     let chars: Vec<char> = src.chars().collect();
     let src_len = chars.len();
     let mut b = Builder {
         src: &chars,
         cells: Vec::with_capacity(src_len),
+        note,
     };
     let mut i = 0;
 
@@ -685,6 +698,7 @@ pub fn raw_with_task(src: &str, cursor_col: usize) -> RLine {
     let mut b = Builder {
         src: &chars,
         cells: Vec::with_capacity(src_len),
+        note: 1,
     };
     for k in 0..start {
         b.keep(k, theme::PLAIN);
@@ -785,6 +799,24 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
                 for k in i + 1..=close {
                     b.sub("", theme::state(), k);
                 }
+                b.note += 1;
+                return Some(close + 1);
+            }
+        }
+    }
+
+    // ^[note] — an inline footnote: its number as a superscript, the text
+    // kept but quiet, the brackets gone
+    if c == '^' && b.src.get(i + 1) == Some(&'[') {
+        if let Some(close) = find(b.src, i + 2, ']') {
+            if close > i + 2 {
+                b.sub(&superscript(&b.note.to_string()), theme::state(), i);
+                b.sub("", theme::state(), i + 1);
+                for k in i + 2..close {
+                    b.keep(k, theme::marker());
+                }
+                b.sub("", theme::state(), close);
+                b.note += 1;
                 return Some(close + 1);
             }
         }
@@ -1789,7 +1821,7 @@ pub fn callout_line(lines: &[String], block: &Block, row: usize, width: usize, r
     let inner = if raw {
         RLine::raw(&text).cells
     } else {
-        style_line(&text).cells
+        style_line_from(&text, first_footnote(lines, row, &text)).cells
     };
     cells.extend(inner.into_iter().map(|c| Cell {
         src: body + c.src,
@@ -2024,6 +2056,107 @@ pub fn html_style(name: &str, base: Style) -> Option<Style> {
         "sub" | "sup" => base,
         _ => return None,
     })
+}
+
+/// One footnote reference on a line: `[^label]` or an inline `^[text]`, as
+/// the char columns `start..end` of the whole span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FootnoteRef {
+    pub start: usize,
+    pub end: usize,
+    /// `^[text]` rather than `[^label]`; `body` is then the text's columns.
+    pub inline: bool,
+    pub body: (usize, usize),
+}
+
+/// Every footnote reference on one line, in source order — the things that
+/// take a number. A `[^1]: definition` at the head of the line is not one,
+/// and nothing inside a code span is.
+pub fn footnote_refs(line: &str) -> Vec<FootnoteRef> {
+    let src: Vec<char> = line.chars().collect();
+    let head = src.iter().position(|c| !c.is_whitespace()).unwrap_or(0);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < src.len() {
+        let c = src[i];
+        if c == '`' {
+            if let Some(end) = find(&src, i + 1, '`') {
+                i = end + 1;
+                continue;
+            }
+        }
+        if c == '[' && src.get(i + 1) == Some(&'^') {
+            if let Some(close) = find(&src, i + 2, ']') {
+                let label = &src[i + 2..close];
+                let definition = i == head && src.get(close + 1) == Some(&':');
+                if !label.is_empty() && !label.contains(&' ') && !definition {
+                    out.push(FootnoteRef {
+                        start: i,
+                        end: close + 1,
+                        inline: false,
+                        body: (i + 2, close),
+                    });
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
+        if c == '^' && src.get(i + 1) == Some(&'[') {
+            if let Some(close) = find(&src, i + 2, ']') {
+                if close > i + 2 {
+                    out.push(FootnoteRef {
+                        start: i,
+                        end: close + 1,
+                        inline: true,
+                        body: (i + 2, close),
+                    });
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The number the first footnote reference on line `row` gets: one more than
+/// the references on the lines above it, fenced code left out.
+pub fn footnote_ordinal(lines: &[String], row: usize) -> usize {
+    let mut n = 1;
+    let mut fenced = false;
+    for line in lines.iter().take(row) {
+        if is_fence(line) {
+            fenced = !fenced;
+            continue;
+        }
+        if !fenced {
+            n += footnote_refs(line).len();
+        }
+    }
+    n
+}
+
+/// `footnote_ordinal`, but only paid for when `src` — the text about to be
+/// styled — has an inline footnote to number. A `[^1]` shows its own label,
+/// so most lines never need the count.
+fn first_footnote(lines: &[String], row: usize, src: &str) -> usize {
+    if src.contains("^[") {
+        footnote_ordinal(lines, row)
+    } else {
+        1
+    }
+}
+
+/// `style_line` for line `row` of a note, with its inline footnotes numbered
+/// in document order rather than from 1.
+pub fn style_line_in(lines: &[String], row: usize) -> RLine {
+    let src = lines.get(row).map(String::as_str).unwrap_or("");
+    if src.contains("^[") {
+        style_line_from(src, footnote_ordinal(lines, row))
+    } else {
+        style_line(src)
+    }
 }
 
 /// The glyph a callout type is drawn with in its title row.
@@ -2548,6 +2681,7 @@ fn styled_cell(text: &str, base: Style) -> Vec<Cell> {
     let mut b = Builder {
         src: &chars,
         cells: Vec::with_capacity(chars.len()),
+        note: 1,
     };
     inline(&mut b, 0, base);
     b.cells
@@ -3077,6 +3211,66 @@ mod tests {
         let tinted: Vec<bool> = l.cells.iter().map(|c| c.style.bg == Some(ratatui::style::Color::Red)).collect();
         // "a │ " untinted, then "b │ c" tinted, separator included
         assert_eq!(tinted, vec![false, false, false, false, true, true, true, true, true]);
+    }
+
+    #[test]
+    fn inline_footnotes_are_numbered_in_the_editor() {
+        let text = |l: &RLine| l.cells.iter().map(|c| c.ch).collect::<String>();
+        let l = style_line("a^[note] b");
+        assert_eq!(text(&l), "a¹note b");
+        // the number sits on the caret, the brackets are gone, the body keeps
+        // its own columns
+        let srcs: Vec<usize> = l.cells.iter().map(|c| c.src).collect();
+        assert_eq!(srcs, vec![0, 1, 3, 4, 5, 6, 8, 9]);
+        assert_eq!(l.cells[1].style, theme::state());
+        assert_eq!(l.cells[2].style, theme::marker());
+        assert_eq!(l.src_len, 10);
+        // references of both kinds share one count along the line
+        assert_eq!(
+            text(&style_line("[^1] and ^[two] and ^[three]")),
+            "¹ and ²two and ³three"
+        );
+        // a line can start its count wherever the note has got to
+        assert_eq!(text(&style_line_from("^[x]", 12)), "¹²x");
+        // not a footnote: nothing inside, or never closed
+        assert_eq!(text(&style_line("^[] and ^[open")), "^[] and ^[open");
+    }
+
+    #[test]
+    fn footnote_refs_are_counted_across_the_note() {
+        let refs = footnote_refs("see[^a] and ^[b] `^[c]`");
+        assert_eq!(refs.len(), 2);
+        assert!(!refs[0].inline && refs[0].start == 3 && refs[0].end == 7);
+        assert!(refs[1].inline && refs[1].start == 12 && refs[1].body == (14, 15));
+        // a definition at the head of the line takes no number
+        assert!(footnote_refs("[^1]: def").is_empty());
+        assert!(footnote_refs("  [^1]: def").is_empty());
+        assert_eq!(footnote_refs("x [^1]: y").len(), 1);
+        assert!(footnote_refs("[^ spaced]").is_empty());
+
+        let lines: Vec<String> = ["one[^a] two^[b]", "```", "^[in a fence]", "```", "^[c]"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(footnote_ordinal(&lines, 0), 1);
+        assert_eq!(footnote_ordinal(&lines, 1), 3);
+        assert_eq!(footnote_ordinal(&lines, 4), 3);
+        let text = |l: &RLine| l.cells.iter().map(|c| c.ch).collect::<String>();
+        assert_eq!(text(&style_line_in(&lines, 4)), "³c");
+        assert_eq!(text(&style_line_in(&lines, 0)), "one^a two²b");
+
+        // inside a callout card the count carries on too
+        let lines: Vec<String> = ["one^[x]", "> [!note] T", "> body^[y]"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let block = Block {
+            kind: BlockKind::Callout,
+            start: 1,
+            end: 2,
+        };
+        let row = callout_line(&lines, &block, 2, 40, false);
+        assert!(text(&row).contains("body²y"), "{}", text(&row));
     }
 
     #[test]
