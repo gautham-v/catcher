@@ -2128,8 +2128,8 @@ impl App {
             md::LinkTarget::Wiki(t) if md::split_fragment(&t).0.is_empty() => {
                 self.active_note().path.clone()
             }
-            md::LinkTarget::Wiki(t) => match index::resolve(&self.open_index, &t) {
-                Some(e) => e.path.clone(),
+            md::LinkTarget::Wiki(t) => match self.resolve_link(&t) {
+                Some(p) => p,
                 None => match best_title_match(&self.notes, md::split_fragment(&t).0) {
                     Some(i) => self.notes[i].path.clone(),
                     None => return Some(self.missing_peek(url, &t, anchor)),
@@ -2232,7 +2232,7 @@ impl App {
             }
             return;
         }
-        if let Some(path) = index::resolve(&self.open_index, target).map(|e| e.path.clone()) {
+        if let Some(path) = self.resolve_link(target) {
             self.open_path_at(&path, fragment);
             return;
         }
@@ -2240,13 +2240,44 @@ impl App {
         // vault walk to be sure is cheap next to telling someone their link is
         // broken when it is not
         self.refresh_index();
-        if let Some(path) = index::resolve(&self.open_index, target).map(|e| e.path.clone()) {
+        if let Some(path) = self.resolve_link(target) {
             self.open_path_at(&path, fragment);
             return;
         }
         // still nothing: the link is a note that has not been written yet,
         // and following it is how it gets written
         self.create_from_link(target);
+    }
+
+    /// The note `target` names, against the index as it stands. A target
+    /// spelled as a file — `other.md`, the shape a `[text](other.md)` in the
+    /// body arrives in — is a relative path, so it is tried beside the note on
+    /// screen first and only then anywhere in the vault; a bare `[[name]]` is
+    /// a name, and goes straight to the vault-wide resolver.
+    fn resolve_link(&self, target: &str) -> Option<PathBuf> {
+        let name = md::split_fragment(target).0;
+        if name.to_lowercase().ends_with(".md") {
+            if let Some(folder) = self.active_note_folder() {
+                let near = format!("{folder}/{name}");
+                if let Some(e) = index::resolve(&self.open_index, &near) {
+                    return Some(e.path.clone());
+                }
+            }
+        }
+        index::resolve(&self.open_index, target).map(|e| e.path.clone())
+    }
+
+    /// The folder of the note on screen, relative to the root it sits under:
+    /// `stories` for `<notes>/stories/spec.md`, `None` at a root's top level
+    /// or outside every root.
+    fn active_note_folder(&self) -> Option<String> {
+        let path = &self.active_note().path;
+        let parent = path.parent()?;
+        self.index_roots()
+            .iter()
+            .find_map(|root| parent.strip_prefix(root).ok())
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+            .filter(|rel| !rel.is_empty())
     }
 
     /// Open `path` and, when the link named a place in it, go there.

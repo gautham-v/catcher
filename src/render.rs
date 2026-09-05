@@ -1960,10 +1960,11 @@ impl Ren {
                 // through `LinkTarget`, not straight in: a href written in the
                 // note is a stranger's text, and `[x](note:/etc/passwd)` must
                 // not arrive at the other end looking like a file the app
-                // found for itself
+                // found for itself. A relative `[x](other.md)` is a note, by
+                // name, and goes to the resolver like a `[[wikilink]]`
                 self.out
                     .urls
-                    .push(crate::md::LinkTarget::Url(dest_url.into_string()).href());
+                    .push(crate::md::LinkTarget::from_href(&dest_url).href());
                 self.link = Some(idx);
                 self.styles.push(self.style().patch(theme::link()));
             }

@@ -1354,7 +1354,7 @@ pub fn link_at(line: &str, col: usize) -> Option<LinkTarget> {
                         if (i..=paren).contains(&col) {
                             let url: String = src[close + 2..paren].iter().collect();
                             return (!url.trim().is_empty())
-                                .then(|| LinkTarget::Url(url.trim().to_string()));
+                                .then(|| LinkTarget::from_href(url.trim()));
                         }
                         i = paren + 1;
                         continue;
@@ -1406,6 +1406,135 @@ pub fn url_at(src: &[char], i: usize) -> Option<usize> {
 
 fn find(src: &[char], from: usize, ch: char) -> Option<usize> {
     (from..src.len()).find(|&k| src[k] == ch)
+}
+
+/// A `[text](href)` on a source line, as char columns: the whole span, for a
+/// click or an excerpt, and the href inside the parens, for a rewrite.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MdLink {
+    pub start: usize,
+    pub end: usize,
+    pub href_start: usize,
+    pub href_end: usize,
+}
+
+impl MdLink {
+    pub fn href(&self, src: &[char]) -> String {
+        src[self.href_start..self.href_end].iter().collect()
+    }
+}
+
+/// Every `[text](href)` on one source line, left to right, by the same rule
+/// [`link_at`] follows: code spans are stepped over, a `[[wikilink]]` is not
+/// one, and an image (`![alt](src)`) is not one either.
+pub fn md_links(line: &str) -> Vec<MdLink> {
+    let src: Vec<char> = line.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < src.len() {
+        if let Some(next) = skip_inert(&src, i) {
+            i = next;
+            continue;
+        }
+        if src[i] == '[' && src.get(i + 1) == Some(&'[') {
+            if let Some(w) = wikilink_at(&src, i) {
+                i = w.end;
+                continue;
+            }
+        }
+        if src[i] == '[' && (i == 0 || src[i - 1] != '!') {
+            if let Some(close) = find(&src, i + 1, ']') {
+                if src.get(close + 1) == Some(&'(') {
+                    if let Some(paren) = find(&src, close + 2, ')') {
+                        out.push(MdLink {
+                            start: i,
+                            end: paren + 1,
+                            href_start: close + 2,
+                            href_end: paren,
+                        });
+                        i = paren + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `%20` and friends turned back into the bytes they stand for; anything that
+/// is not a well-formed escape is kept as typed.
+pub fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Spaces as `%20`, so a rewritten href stays inside its parens as far as
+/// CommonMark is concerned. Nothing else is touched: the rest of what was
+/// typed was already a working href.
+pub fn percent_encode_spaces(s: &str) -> String {
+    s.replace(' ', "%20")
+}
+
+/// Does `href` start with a URL scheme — `https:`, `mailto:`, `file:`?
+fn has_scheme(href: &str) -> bool {
+    let Some(colon) = href.find(':') else {
+        return false;
+    };
+    let scheme = &href[..colon];
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// The note a `[text](href)` names, when it names one: a href with no scheme
+/// whose path — percent-decoded, before any `#fragment` — ends in `.md`. The
+/// result is a wikilink target (`folder/name.md`, or `name.md#Heading`) for
+/// the resolver, with any leading `./` and `../` dropped: the resolver
+/// matches a path by its `/`-boundary suffixes, so the folder that is left is
+/// what places the note. Anything else — a URL, a `.pdf`, a bare word — is
+/// `None`, and stays a href for the desktop.
+pub fn note_href(href: &str) -> Option<String> {
+    let href = href.trim();
+    if href.is_empty() || has_scheme(href) || href.starts_with('/') {
+        return None;
+    }
+    let (path, fragment) = match href.find('#') {
+        Some(i) => (&href[..i], Some(&href[i + 1..])),
+        None => (href, None),
+    };
+    let mut path = percent_decode(path);
+    loop {
+        if let Some(rest) = path.strip_prefix("./") {
+            path = rest.to_string();
+        } else if let Some(rest) = path.strip_prefix("../") {
+            path = rest.to_string();
+        } else {
+            break;
+        }
+    }
+    if !path.to_lowercase().ends_with(".md") || path.len() == 3 {
+        return None;
+    }
+    Some(match fragment {
+        Some(f) => format!("{path}#{}", percent_decode(f)),
+        None => path,
+    })
 }
 
 pub(crate) fn find_pair(src: &[char], from: usize, ch: char) -> Option<usize> {
@@ -1912,6 +2041,17 @@ pub enum LinkTarget {
 }
 
 impl LinkTarget {
+    /// What a `[text](href)` written in a note body opens: a note, when the
+    /// href is a relative path to a `.md` file (see [`note_href`]), and the
+    /// desktop otherwise. Never a [`LinkTarget::Note`] — that names a file by
+    /// path with nothing left to check, and a body href gets no such trust.
+    pub fn from_href(href: &str) -> LinkTarget {
+        match note_href(href) {
+            Some(t) => LinkTarget::Wiki(t),
+            None => LinkTarget::Url(href.to_string()),
+        }
+    }
+
     pub fn href(&self) -> String {
         match self {
             // a URL that reads as one of the app's own schemes is wrapped in
@@ -5649,6 +5789,51 @@ mod tests {
         links::forget();
         // nothing scanned means nothing is broken yet
         assert_eq!(style_line("[[gone]]").cells[0].style.fg, theme::link().fg);
+    }
+
+    #[test]
+    fn a_markdown_link_to_an_md_file_is_a_note_and_a_url_is_not() {
+        assert_eq!(
+            link_at("[G](groceries.md)", 5),
+            Some(LinkTarget::Wiki("groceries.md".to_string()))
+        );
+        assert_eq!(
+            link_at("[x](https://a.md)", 5),
+            Some(LinkTarget::Url("https://a.md".to_string()))
+        );
+        assert_eq!(
+            link_at("[x](./stories/old%20name.md#Fruit)", 5),
+            Some(LinkTarget::Wiki("stories/old name.md#Fruit".to_string()))
+        );
+        assert_eq!(
+            link_at("[x](report.pdf)", 5),
+            Some(LinkTarget::Url("report.pdf".to_string()))
+        );
+        assert_eq!(note_href("mailto:a.md"), None);
+        assert_eq!(note_href("/abs/a.md"), None);
+        assert_eq!(note_href(".md"), None);
+        assert_eq!(
+            LinkTarget::from_href("a b.md"),
+            LinkTarget::Wiki("a b.md".to_string())
+        );
+    }
+
+    #[test]
+    fn md_links_skip_code_wikilinks_and_images() {
+        let line = "`[a](b.md)` [[w]] ![i](p.png) [t](x.md) [u](https://y)";
+        let l = md_links(line);
+        assert_eq!(l.len(), 2);
+        let src: Vec<char> = line.chars().collect();
+        assert_eq!(l[0].href(&src), "x.md");
+        assert_eq!(l[1].href(&src), "https://y");
+        assert_eq!(
+            &line[..]
+                .chars()
+                .skip(l[0].start)
+                .take(l[0].end - l[0].start)
+                .collect::<String>(),
+            "[t](x.md)"
+        );
     }
 
     #[test]

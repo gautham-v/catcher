@@ -94,24 +94,48 @@ impl Rename {
     }
 
     /// One line with every link to the old name rewritten, and how many were.
+    /// Both spellings of a link are covered: `[[old]]` and `[text](old.md)`.
     fn rewrite_line(&self, line: &str) -> (String, usize) {
         let src: Vec<char> = line.chars().collect();
-        let mut out = String::new();
-        let mut done = 0;
-        let mut at = 0;
+        // (from, to, replacement), in line order; the two scanners never
+        // overlap, since neither reads a link the other recognises
+        let mut edits: Vec<(usize, usize, String)> = Vec::new();
         for w in crate::md::wikilinks(line) {
             let (from, to) = target_span(&src, &w);
             let raw: String = src[from..to].iter().collect();
-            let Some(target) = self.retarget(&raw) else {
-                continue;
-            };
-            out.extend(&src[at..from]);
-            out.push_str(&target);
-            at = to;
-            done += 1;
+            if let Some(target) = self.retarget(&raw) {
+                edits.push((from, to, target));
+            }
+        }
+        for l in crate::md::md_links(line) {
+            if let Some(href) = self.retarget_href(&l.href(&src)) {
+                edits.push((l.href_start, l.href_end, href));
+            }
+        }
+        edits.sort_by_key(|e| e.0);
+        let mut out = String::new();
+        let mut at = 0;
+        for (from, to, target) in &edits {
+            out.extend(&src[at..*from]);
+            out.push_str(target);
+            at = *to;
         }
         out.extend(&src[at..]);
-        (out, done)
+        (out, edits.len())
+    }
+
+    /// The href a `[text](href)` should become, or `None` to leave it alone:
+    /// only one that names a note (see `md::note_href`) and reached the old
+    /// file. The `#fragment` survives, and spaces go back as `%20`.
+    fn retarget_href(&self, href: &str) -> Option<String> {
+        let path = crate::md::note_href(href)?;
+        let (name, fragment) = crate::md::split_fragment(&path);
+        let target = self.retarget(name)?;
+        let target = crate::md::percent_encode_spaces(&target);
+        Some(match fragment {
+            Some(f) => format!("{target}#{f}"),
+            None => target,
+        })
     }
 
     /// A whole note rewritten, or `None` when no link in it needed to be.
@@ -363,6 +387,27 @@ mod tests {
         );
         renamed(&dir, "Story-Matrix.md", "matrix.md");
         assert_eq!(read(&other), "[[matrix]] and [[matrix.md]]\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_markdown_link_to_the_file_is_rewritten_too() {
+        let dir = tmpdir("md-link");
+        write(&dir, "groceries.md", "# Groceries\n");
+        write(&dir, "stories/old name.md", "# Old\n");
+        let other = write(
+            &dir,
+            "other.md",
+            "[G](groceries.md) [G](groceries.md#Fruit) [O](stories/old%20name.md) [x](https://groceries.md) [[groceries]]\n",
+        );
+        let r = renamed(&dir, "groceries.md", "shopping.md");
+        assert_eq!(
+            read(&other),
+            "[G](shopping.md) [G](shopping.md#Fruit) [O](stories/old%20name.md) [x](https://groceries.md) [[shopping]]\n"
+        );
+        assert_eq!(r.links, 3);
+        renamed(&dir, "stories/old name.md", "stories/new name.md");
+        assert!(read(&other).contains("[O](stories/new%20name.md)"));
         let _ = fs::remove_dir_all(&dir);
     }
 

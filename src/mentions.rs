@@ -120,12 +120,25 @@ fn rel_under(path: &Path, roots: &[PathBuf]) -> String {
 pub fn mentions_in(body: &str, names: &[String]) -> Vec<Hit> {
     let mut out = Vec::new();
     for (line_no, line) in notes::prose_lines(body) {
-        for w in crate::md::wikilinks(line) {
-            if names.contains(&crate::md::link_key(&w.target)) {
-                let (excerpt, link) = excerpt(line, w.start, w.end);
+        let mut hits: Vec<(usize, usize, String)> = crate::md::wikilinks(line)
+            .into_iter()
+            .map(|w| (w.start, w.end, w.target))
+            .collect();
+        // a `[text](other.md)` is a link to a note as much as `[[other]]` is
+        let src: Vec<char> = line.chars().collect();
+        for l in crate::md::md_links(line) {
+            if let Some(path) = crate::md::note_href(&l.href(&src)) {
+                let name = crate::md::split_fragment(&path).0.to_string();
+                hits.push((l.start, l.end, name));
+            }
+        }
+        hits.sort_by_key(|h| h.0);
+        for (start, end, target) in hits {
+            if names.contains(&crate::md::link_key(&target)) {
+                let (excerpt, link) = excerpt(line, start, end);
                 out.push(Hit {
                     line: line_no,
-                    target: w.target.clone(),
+                    target,
                     excerpt,
                     link,
                 });
@@ -690,6 +703,17 @@ mod tests {
         );
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].target, "story-matrix");
+        assert_eq!(hits[0].line, 0);
+    }
+
+    #[test]
+    fn a_markdown_link_to_the_note_file_counts_as_a_link() {
+        let hits = mentions_in(
+            "see [the matrix](stories/story%20matrix.md#Rows) and [site](https://story-matrix.md)\n",
+            &names(&["stories/story matrix"]),
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].target, "stories/story matrix.md");
         assert_eq!(hits[0].line, 0);
     }
 
