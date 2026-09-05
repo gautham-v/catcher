@@ -126,6 +126,11 @@ pub enum QuickTab {
     Tree,
     Contents,
     Tags,
+    /// The bookmarked notes, in the order they were bookmarked.
+    Bookmarks,
+    /// Every `[[wikilink]]` in the vault that reaches no note. Reached from
+    /// the palette, not from tab.
+    Unresolved,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -142,6 +147,8 @@ pub enum Overlay {
     MoveFile,
     /// Every heading of the open note: ⏎ goes there, ⌥⏎ folds it.
     Outline,
+    /// Re-root the session in another folder: recent vaults, or a typed path.
+    OpenVault,
     Help,
 }
 
@@ -159,6 +166,14 @@ pub enum Command {
     /// A palette row for something a key can also do: one path, either way.
     Act(Action),
     MoveFile,
+    /// Every unresolved `[[wikilink]]` in the vault, in ^O.
+    Unresolved,
+    /// Bookmark the open note, or take its bookmark away.
+    Bookmark,
+    /// The bookmarked notes, in ^O.
+    Bookmarks,
+    /// Re-root the session in another folder.
+    OpenVault,
     InsertTable,
     Table(crate::table::Op),
     TableSource,
@@ -187,7 +202,7 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 34] = [
+const COMMANDS: [Command; 38] = [
     Command::Act(Action::NewNote),
     Command::Act(Action::DailyNote),
     Command::Act(Action::QuickOpen),
@@ -199,6 +214,10 @@ const COMMANDS: [Command; 34] = [
     Command::Act(Action::DeleteNote),
     Command::Act(Action::RenameFile),
     Command::MoveFile,
+    Command::Unresolved,
+    Command::Bookmark,
+    Command::Bookmarks,
+    Command::OpenVault,
     Command::Act(Action::Find),
     Command::Act(Action::TogglePreview),
     Command::Act(Action::Help),
@@ -271,6 +290,10 @@ impl Command {
                 _ => ("", ""),
             },
             Command::MoveFile => ("Move to folder", "another folder under this one"),
+            Command::Unresolved => ("Unresolved links", "every [[link]] to a note that is not there; ⏎ goes to it"),
+            Command::Bookmark => ("Bookmark note", "keep this note in the bookmarks list, or take it out"),
+            Command::Bookmarks => ("Bookmarks", "the bookmarked notes; ⏎ opens one"),
+            Command::OpenVault => ("Open vault…", "another folder as the notes folder for this session"),
             Command::InsertTable => ("Table: Insert table", "a 2×2 grid at the cursor"),
             Command::InsertCallout => ("Insert callout", "> [!note] with a title and a body"),
             Command::InsertMath => ("Insert math block", "$$ … $$ on lines of their own"),
@@ -395,6 +418,11 @@ pub enum Item {
     /// A tag from the tags tab, in [`md::tag_key`] form. Choosing it lists
     /// the notes carrying it, the way following a `#tag` does.
     Tag(String),
+    /// A note by path with a line in it, from the unresolved-links list.
+    /// Choosing it opens the note there.
+    At(PathBuf, usize),
+    /// A folder to re-root the session in, from the vault picker.
+    Vault(PathBuf),
     Command(Command),
 }
 
@@ -534,6 +562,12 @@ pub struct App {
     tag_rx: Option<(String, std::sync::mpsc::Receiver<TagScan>)>,
     /// The ^O tab on screen: recent, tree, contents, or tags.
     pub tab: QuickTab,
+    /// Every unresolved link the last scan found, for the unresolved tab.
+    unresolved: Vec<crate::unresolved::Broken>,
+    /// That scan in flight; `poll_unresolved_scan` takes the answer.
+    unresolved_rx: Option<crate::unresolved::Pending>,
+    /// The bookmarked notes, root-relative, read when the tab is entered.
+    bookmarks: Vec<String>,
     /// Every tag the tags tab lists, with how many notes carry each, most
     /// used first. Gathered on a thread when the tab is entered.
     tag_list: Vec<(String, usize)>,
@@ -882,6 +916,9 @@ impl App {
             file_index_rx: None,
             tag_rx: None,
             tab: QuickTab::Recent,
+            unresolved: Vec::new(),
+            unresolved_rx: None,
+            bookmarks: Vec::new(),
             tag_list: Vec::new(),
             tags_rx: None,
             tag_filter: None,
@@ -1256,9 +1293,14 @@ impl App {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| self.dir.clone());
         let was_settings = self.editing_settings();
+        // the headings as they stood on disk, so a renamed one can be told
+        let before = self.notes[self.active].saved.clone();
         match notes::save(&dir, &mut self.notes[self.active], allow_rename) {
             Ok(now) => {
                 self.dirty = false;
+                if let Some(done) = self.update_heading_links(&before, &now) {
+                    self.flash(done);
+                }
                 // a save is the only way a body under the roots changes from
                 // inside catcher, and it is what makes a mention you have
                 // just typed turn up in the footer of the note it names
@@ -1291,6 +1333,33 @@ impl App {
             return None;
         }
         let report = crate::links::retarget(old, new, &self.index_roots());
+        self.adopt_rewritten(&report);
+        report.describe()
+    }
+
+    /// The note at `path` was just saved: when exactly one of its headings
+    /// was renamed since the last save, point the `[[note#heading]]` links
+    /// under the roots at the new name. `updated K links` when any were.
+    fn update_heading_links(&mut self, before: &str, path: &Path) -> Option<String> {
+        if !self.config.update_links || before.is_empty() {
+            return None;
+        }
+        let after = self.notes[self.active].saved.clone();
+        let (old, new) = crate::links::heading_change(before, &after)?;
+        let report = crate::links::retarget_heading(path, &old, &new, &self.index_roots());
+        if report.links == 0 {
+            return None;
+        }
+        self.adopt_rewritten(&report);
+        Some(match report.links {
+            1 => "updated 1 link".to_string(),
+            n => format!("updated {n} links"),
+        })
+    }
+
+    /// Refresh any note this session holds a copy of that a rewrite wrote
+    /// back, so switching to one does not show the old text.
+    fn adopt_rewritten(&mut self, report: &crate::links::Report) {
         for path in &report.notes {
             let Some(i) = self.notes.iter().position(|n| {
                 std::fs::canonicalize(&n.path).unwrap_or_else(|_| n.path.clone()) == *path
@@ -1301,7 +1370,6 @@ impl App {
                 self.notes[i] = fresh;
             }
         }
-        report.describe()
     }
 
     pub fn maybe_autosave(&mut self) -> bool {
@@ -1384,6 +1452,7 @@ impl App {
         changed |= self.poll_tag_scan();
         changed |= self.poll_tags_scan();
         changed |= self.poll_contents_scan();
+        changed |= self.poll_unresolved_scan();
         changed |= self.maybe_peek();
         // a filename that followed its title on save; the title is the
         // terminal's, not the frame's
@@ -1737,6 +1806,8 @@ impl App {
                 QuickTab::Tree => self.browse_rows().len(),
                 QuickTab::Contents => self.contents_rows().len(),
                 QuickTab::Tags => self.tag_items().len(),
+                QuickTab::Bookmarks => self.bookmark_items().len(),
+                QuickTab::Unresolved => self.unresolved_items().len(),
                 QuickTab::Recent => self.open_items().len(),
             };
             self.selected = self.selected.min(rows.saturating_sub(1));
@@ -2756,6 +2827,206 @@ impl App {
         self.preview_goto = Some(line);
     }
 
+    /// Open the note at `path` with line `line` in view, the way a contents
+    /// hit opens — for a row that carries its path rather than an index slot.
+    fn open_path_line(&mut self, path: &Path, line: usize) {
+        self.open_path(path);
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        if canon(&self.active_note().path) != canon(path) {
+            return;
+        }
+        let line = line.min(self.editor.lines().len().saturating_sub(1));
+        self.editor.set_cursor((line, 0));
+        self.reveal_cursor();
+        self.preview_goto = Some(line);
+    }
+
+    /// The palette's Unresolved links: ^O on a tab listing every `[[link]]`
+    /// in the vault that reaches no note, gathered on a thread.
+    fn open_unresolved(&mut self) {
+        self.open_quick_open();
+        self.tag_filter = None;
+        self.tab = QuickTab::Unresolved;
+        self.selected = 0;
+        self.unresolved.clear();
+        self.unresolved_rx = Some(crate::unresolved::spawn(self.index_roots()));
+    }
+
+    /// Is the unresolved scan still running?
+    pub fn unresolved_scanning(&self) -> bool {
+        self.unresolved_rx.is_some()
+    }
+
+    fn poll_unresolved_scan(&mut self) -> bool {
+        let Some(rows) = self.unresolved_rx.as_ref().and_then(|p| p.poll()) else {
+            return false;
+        };
+        self.unresolved = rows;
+        self.unresolved_rx = None;
+        true
+    }
+
+    /// The unresolved rows for the current query: every broken link whose
+    /// note or target matches, in walk order.
+    pub fn unresolved_rows(&self) -> Vec<&crate::unresolved::Broken> {
+        self.unresolved
+            .iter()
+            .filter(|b| {
+                self.query.is_empty()
+                    || search::fuzzy(&self.query, &b.target).is_some()
+                    || search::fuzzy(&self.query, &b.name).is_some()
+            })
+            .collect()
+    }
+
+    pub fn unresolved_items(&self) -> Vec<Item> {
+        self.unresolved_rows()
+            .into_iter()
+            .map(|b| Item::At(b.path.clone(), b.line))
+            .collect()
+    }
+
+    /// The palette's Bookmarks: ^O on the bookmarks tab.
+    fn open_bookmarks(&mut self) {
+        self.open_quick_open();
+        self.tag_filter = None;
+        self.enter_bookmarks();
+    }
+
+    fn enter_bookmarks(&mut self) {
+        self.tab = QuickTab::Bookmarks;
+        self.selected = 0;
+        self.bookmarks = crate::bookmarks::load(&self.dir);
+    }
+
+    /// The bookmarks tab's rows for the current query, as paths: only the
+    /// ones still on disk, so a bookmark to a deleted note is not a row that
+    /// fails when chosen.
+    pub fn bookmark_items(&self) -> Vec<Item> {
+        self.bookmarks
+            .iter()
+            .filter(|b| self.query.is_empty() || search::fuzzy(&self.query, b).is_some())
+            .map(|b| {
+                let p = Path::new(b);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    self.dir.join(p)
+                }
+            })
+            .filter(|p| p.is_file())
+            .map(Item::Path)
+            .collect()
+    }
+
+    /// *Bookmark note*: the open note into the bookmarks, or out of them.
+    fn toggle_bookmark(&mut self) {
+        let path = self.active_note().path.clone();
+        let added = crate::bookmarks::toggle(&self.dir, &path);
+        self.flash(
+            if added {
+                "bookmarked"
+            } else {
+                "bookmark removed"
+            }
+            .to_string(),
+        );
+    }
+
+    /// *Open vault…*: the recent vaults above a line for a typed path.
+    fn open_vault_picker(&mut self) {
+        self.query.clear();
+        self.selected = 0;
+        self.overlay = Overlay::OpenVault;
+    }
+
+    /// The vault picker's rows: the recent vaults that match what is typed,
+    /// then the typed text itself as a folder, when it is one.
+    pub fn vault_items(&self) -> Vec<Item> {
+        let mut out: Vec<Item> = crate::bookmarks::vaults()
+            .into_iter()
+            .filter(|p| {
+                self.query.is_empty() || search::fuzzy(&self.query, &index::short(p)).is_some()
+            })
+            .map(Item::Vault)
+            .collect();
+        let typed = self.query.trim();
+        if !typed.is_empty() {
+            let path = crate::config::expand_home(typed);
+            if path.is_dir()
+                && !out
+                    .iter()
+                    .any(|i| matches!(i, Item::Vault(p) if *p == path))
+            {
+                out.push(Item::Vault(path));
+            }
+        }
+        out
+    }
+
+    /// Re-root the session at `root`: the settings read again with it as the
+    /// notes folder, the index rebuilt, the open notes saved and let go, and
+    /// the note last opened there — or the newest — on screen.
+    fn open_vault(&mut self, root: &Path) {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        if !root.is_dir() {
+            self.flash(format!("not a folder: {}", root.display()));
+            return;
+        }
+        self.sync_editor_to_note();
+        self.save_now();
+        let config = match Config::load_for(&root) {
+            Ok(c) => c,
+            Err(e) => {
+                self.flash(format!("open vault failed: {e}"));
+                return;
+            }
+        };
+        let mut all = match notes::load_all(&root) {
+            Ok(all) => all,
+            Err(e) => {
+                self.flash(format!("open vault failed: {e}"));
+                return;
+            }
+        };
+        if all.is_empty() {
+            match notes::create(&root) {
+                Ok(note) => all.push(note),
+                Err(e) => {
+                    self.flash(format!("open vault failed: {e}"));
+                    return;
+                }
+            }
+        }
+        let mut lookup = self.images.lookup().clone();
+        lookup.attachments = config.attachments_dir.clone();
+        lookup.subfolder = config.attachment_subfolder.clone();
+        self.images.set_lookup(lookup);
+        config.apply();
+        self.editor.tab_width = config.tab_width;
+        self.config = config;
+        self.config_gen += 1;
+        self.dir = root.clone();
+        self.notes = all;
+        self.active = 0;
+        self.dirty = false;
+        self.tag_filter = None;
+        self.tag_cache = None;
+        self.set_contents_bodies(Vec::new());
+        self.unresolved.clear();
+        self.unresolved_rx = None;
+        self.load_active_into_editor();
+        // the note last opened in this vault, wherever it sits under it
+        let last = self.recents.iter().find(|p| p.starts_with(&root)).cloned();
+        match last {
+            Some(path) if path.exists() => self.open_path(&path),
+            _ => self.remember_active(),
+        }
+        self.reindex();
+        crate::bookmarks::push_vault(&root);
+        self.flash(format!("vault: {}", index::short(&root)));
+    }
+
     /// Quick-open rows for the current query. With no query this is simply the
     /// index order — most recently opened first, then most recently modified —
     /// which is the whole point of having a second list beside the palette.
@@ -2820,7 +3091,8 @@ impl App {
         match self.tab {
             QuickTab::Tree => self.enter_contents(),
             QuickTab::Contents => self.enter_tags(),
-            QuickTab::Tags => {
+            QuickTab::Tags => self.enter_bookmarks(),
+            QuickTab::Bookmarks | QuickTab::Unresolved => {
                 self.tab = QuickTab::Recent;
                 self.selected = 0;
             }
@@ -2923,8 +3195,11 @@ impl App {
                 })
                 .collect(),
             Overlay::QuickOpen if self.tab == QuickTab::Tags => self.tag_items(),
+            Overlay::QuickOpen if self.tab == QuickTab::Bookmarks => self.bookmark_items(),
+            Overlay::QuickOpen if self.tab == QuickTab::Unresolved => self.unresolved_items(),
             Overlay::QuickOpen => self.open_items(),
             Overlay::MoveFile => self.move_items(),
+            Overlay::OpenVault => self.vault_items(),
             Overlay::Outline => self.outline_items(),
             _ => Vec::new(),
         }
@@ -3161,10 +3436,16 @@ impl App {
             Item::Line(entry, line) => self.open_at_line(entry, line),
             Item::Heading(line) => self.goto_heading(line),
             Item::Tag(tag) => self.open_tag(&tag),
+            Item::At(path, line) => self.open_path_line(&path, line),
+            Item::Vault(root) => self.open_vault(&root),
             // handled above, before the overlay was closed
             Item::Folder(_) | Item::Notice => {}
             // palette-only: the one command without a key
             Item::Command(Command::MoveFile) => self.open_move(),
+            Item::Command(Command::Unresolved) => self.open_unresolved(),
+            Item::Command(Command::Bookmark) => self.toggle_bookmark(),
+            Item::Command(Command::Bookmarks) => self.open_bookmarks(),
+            Item::Command(Command::OpenVault) => self.open_vault_picker(),
             Item::Command(Command::InsertTable) => self.insert_table(),
             Item::Command(Command::InsertCallout) => {
                 self.insert_block(vec!["> [!note] ".to_string(), "> ".to_string()], 0, 10);
@@ -3513,9 +3794,11 @@ impl App {
                     }
                 }
             }
-            Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile | Overlay::Outline => {
-                self.on_palette_key(key)
-            }
+            Overlay::Palette
+            | Overlay::QuickOpen
+            | Overlay::MoveFile
+            | Overlay::Outline
+            | Overlay::OpenVault => self.on_palette_key(key),
             Overlay::ConfirmDelete => match key.code {
                 KeyCode::Enter => {
                     self.overlay = Overlay::None;
@@ -5738,6 +6021,10 @@ mod tests {
                 "Delete note",
                 "Rename file",
                 "Move to folder",
+                "Unresolved links",
+                "Bookmark note",
+                "Bookmarks",
+                "Open vault…",
                 "Find in note",
                 "Reading view",
                 "Help",

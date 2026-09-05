@@ -250,6 +250,9 @@ pub struct Config {
     /// Whether renaming a note's file rewrites the `[[wikilinks]]` in other
     /// notes that pointed at the old name. Off leaves them to break.
     pub update_links: bool,
+    /// Whether the status bar counts the note's words and characters — or
+    /// the selection's, while there is one.
+    pub status_words: bool,
     pub table_style: TableStyle,
     pub preview_click: PreviewClick,
     /// What the editor does with a note's front matter.
@@ -311,6 +314,7 @@ impl Default for Config {
             tab_width: 2,
             rename_files: true,
             update_links: true,
+            status_words: false,
             table_style: TableStyle::Auto,
             preview_click: PreviewClick::Select,
             front_matter: FrontMatter::Dim,
@@ -417,13 +421,30 @@ impl Config {
     pub fn from_str(text: &str) -> Config {
         let mut c = Config::from_file_text(text);
         if let Some(d) = std::env::var_os("CATCHER_DIR") {
-            c.notes_dir = PathBuf::from(d);
-            if value(text, "attachments_dir").is_none() {
-                c.attachments_dir = c.notes_dir.join("attachments");
-                c.adopt_obsidian_attachments();
-            }
+            c.root_at(text, PathBuf::from(d));
         }
         c
+    }
+
+    /// The settings note read again, with `root` as the notes folder for
+    /// this session — what *Open vault…* does. The file is not written: the
+    /// vault opened is where you are, not a setting you changed.
+    pub fn load_for(root: &Path) -> Result<Config> {
+        let path = settings_path()?;
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let mut c = Config::from_file_text(&text);
+        c.root_at(&text, root.to_path_buf());
+        Ok(c)
+    }
+
+    /// Point the config at `root`. A named `attachments_dir` still stands;
+    /// otherwise the vault's own says where its attachments are.
+    fn root_at(&mut self, text: &str, root: PathBuf) {
+        self.notes_dir = root;
+        if value(text, "attachments_dir").is_none() {
+            self.attachments_dir = self.notes_dir.join("attachments");
+            self.adopt_obsidian_attachments();
+        }
     }
 
     /// When `attachments_dir` is not set (or is just the default), take the
@@ -519,6 +540,7 @@ impl Config {
         }
         c.rename_files = flag(text, "rename_files", c.rename_files);
         c.update_links = flag(text, "update_links", c.update_links);
+        c.status_words = flag(text, "status_words", c.status_words);
         c.wikilinks = flag(text, "wikilinks", c.wikilinks);
         c.tags = flag(text, "tags", c.tags);
         c.quick_open_recursive = match value(text, "quick_open").as_deref() {
@@ -657,6 +679,11 @@ impl Config {
             "window_title",
             yn(self.window_title),
             "the terminal title follows the note",
+        );
+        d.row(
+            "status_words",
+            yn(self.status_words),
+            "words and characters in the bar",
         );
         d.row(
             "status_bar_items",
@@ -1036,6 +1063,14 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
+/// A typed path with a leading `~` made absolute, for the vault picker.
+pub fn expand_home(value: &str) -> PathBuf {
+    match std::env::home_dir() {
+        Some(home) => expand(value, &home),
+        None => PathBuf::from(value),
+    }
+}
+
 fn expand(value: &str, home: &Path) -> PathBuf {
     match value.strip_prefix("~/") {
         Some(rest) => home.join(rest),
@@ -1097,6 +1132,7 @@ mod tests {
             tab_width: 4,
             rename_files: false,
             update_links: false,
+            status_words: true,
             table_style: TableStyle::Cards,
             preview_click: PreviewClick::Edit,
             front_matter: FrontMatter::Hide,
@@ -1164,6 +1200,13 @@ mod tests {
             ..Default::default()
         };
         assert!(!Config::from_str(&c.to_document()).autocomplete);
+    }
+
+    #[test]
+    fn status_words_is_off_by_default_and_can_be_turned_on() {
+        assert!(!Config::default().status_words);
+        assert!(Config::from_str("- status_words: on\n").status_words);
+        assert!(!Config::from_str("- status_words: off\n").status_words);
     }
 
     #[test]

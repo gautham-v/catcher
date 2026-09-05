@@ -88,9 +88,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     match app.overlay {
-        Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile | Overlay::Outline => {
-            draw_palette(f, app)
-        }
+        Overlay::Palette
+        | Overlay::QuickOpen
+        | Overlay::MoveFile
+        | Overlay::Outline
+        | Overlay::OpenVault => draw_palette(f, app),
         Overlay::ConfirmDelete => draw_confirm(f, app),
         Overlay::RenameFile => draw_rename(f, app),
         Overlay::Find => draw_find(f, app),
@@ -1067,6 +1069,18 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         }
         left_text.push_str(&piece);
     }
+    if app.config.status_words {
+        let counted = app
+            .editor
+            .selected_text()
+            .unwrap_or_else(|| note.content.clone());
+        let words = counted.split_whitespace().count();
+        let chars = counted.chars().count();
+        if !left_text.is_empty() {
+            left_text.push_str("  ");
+        }
+        left_text.push_str(&format!("{words} words · {chars} chars"));
+    }
     let status = status.filter(|_| shows(StatusItem::Message));
     // `key_hints` is the older, blunter switch for the same thing; off still
     // means no keys, whatever the item list says
@@ -1214,6 +1228,8 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let browse = quick && app.tab == QuickTab::Tree;
     let contents = quick && app.tab == QuickTab::Contents;
     let tags = quick && app.tab == QuickTab::Tags;
+    let bookmarks = quick && app.tab == QuickTab::Bookmarks;
+    let unresolved = quick && app.tab == QuickTab::Unresolved;
     let outline = app.overlay == Overlay::Outline;
     // the box is at most 100 wide and inset 2 from each side of the frame,
     // less the border: what a snippet has to fit in, known before the box is
@@ -1257,6 +1273,18 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             "gathering tags…"
         } else if tags {
             "every tag in the vault — ⏎ lists its notes"
+        } else if bookmarks && app.bookmark_items().is_empty() {
+            "no bookmarks yet — Bookmark note in the palette adds this one"
+        } else if bookmarks {
+            "bookmarked notes — type to narrow"
+        } else if unresolved && app.unresolved_scanning() {
+            "scanning for unresolved links…"
+        } else if unresolved && app.unresolved_rows().is_empty() {
+            "every [[link]] reaches a note"
+        } else if unresolved {
+            "links to notes that are not there — ⏎ goes to the link"
+        } else if app.overlay == Overlay::OpenVault {
+            "open a vault — pick a recent one, or type a folder path"
         } else if quick && app.tag_scanning() {
             "scanning for notes carrying this tag…"
         } else if quick && app.tag_filter.is_some() {
@@ -1411,7 +1439,13 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
         let hint = if browse {
             "←→ fold  ↵ open  ⌥↵ split  tab: contents"
         } else if contents {
-            "↵ open at the line  ⌥↵ split  tab: recent"
+            "↵ open at the line  ⌥↵ split  tab: tags"
+        } else if unresolved {
+            "↵ open at the link  ⌥↵ split  tab: recent"
+        } else if bookmarks {
+            "↵ open  ⌥↵ split  tab: recent"
+        } else if tags {
+            "↵ list its notes  tab: bookmarks"
         } else {
             "↵ open  ⌥↵ split  ⌘↵ tab  tab: tree"
         };
@@ -1444,10 +1478,22 @@ fn tab_strip(app: &App) -> Line<'static> {
     // the enum's declaration order is the strip's order
     let on = app.tab as usize;
     let mut spans = vec![Span::raw(" ")];
-    for (i, name) in ["recent", "tree", "contents", "tags"]
-        .into_iter()
-        .enumerate()
-    {
+    let names = [
+        "recent",
+        "tree",
+        "contents",
+        "tags",
+        "bookmarks",
+        "unresolved",
+    ];
+    // the unresolved list is reached from the palette, not from tab, so it is
+    // only named while it is up
+    let shown = if app.tab == QuickTab::Unresolved {
+        6
+    } else {
+        5
+    };
+    for (i, name) in names.into_iter().take(shown).enumerate() {
         if i > 0 {
             spans.push(Span::styled(" · ", dim()));
         }
@@ -1496,6 +1542,39 @@ fn contents_rows(app: &App, width: usize) -> Vec<PRow> {
                 Item::Notice,
                 Line::from(Span::styled(format!("  …and {n} more"), dim())),
             ),
+        })
+        .collect()
+}
+
+/// The unresolved tab's rows: the note, then the link target lit the way
+/// a contents match is, with the line number at the right edge.
+fn unresolved_rows(app: &App, width: usize) -> Vec<PRow> {
+    app.unresolved_rows()
+        .into_iter()
+        .map(|b| {
+            let number = format!("{}", b.line + 1);
+            let target = format!("[[{}]]", b.target);
+            let room = width.saturating_sub(2 + number.len() + 2);
+            let name = truncate(&b.name, (room / 2).max(8));
+            let namew = crate::md::str_width(&name);
+            let target = truncate(&target, room.saturating_sub(namew + 2).max(4));
+            let used = 2 + namew + 2 + crate::md::str_width(&target);
+            let gap = width.saturating_sub(used + number.len() + 1).max(1);
+            let spans = vec![
+                Span::raw("  "),
+                Span::styled(name, dim()),
+                Span::raw("  "),
+                Span::styled(target, theme::state()),
+                Span::raw(" ".repeat(gap)),
+                Span::styled(format!("{number} "), theme::marker()),
+            ];
+            PRow {
+                item: Item::At(b.path.clone(), b.line),
+                name: String::new(),
+                detail: String::new(),
+                tag: "",
+                line: Some(Line::from(spans)),
+            }
         })
         .collect()
 }
@@ -1558,6 +1637,9 @@ fn outline_row(
 fn palette_rows(app: &App, width: usize) -> Vec<PRow> {
     if app.overlay == Overlay::QuickOpen && app.tab == QuickTab::Contents {
         return contents_rows(app, width);
+    }
+    if app.overlay == Overlay::QuickOpen && app.tab == QuickTab::Unresolved {
+        return unresolved_rows(app, width);
     }
     if app.overlay == Overlay::Outline {
         return outline_rows(app, width);
@@ -1646,8 +1728,16 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
         },
         // a folder row writes its own text in `palette_rows`, where the tree
         // around it is still in hand; it never reaches here
-        Item::Folder(_) | Item::Line(..) | Item::Notice | Item::Heading(_) => {
+        Item::Folder(_) | Item::Line(..) | Item::At(..) | Item::Notice | Item::Heading(_) => {
             (String::new(), String::new(), "")
+        }
+        Item::Vault(root) => {
+            let detail = if *root == app.dir {
+                "this session's vault".to_string()
+            } else {
+                String::new()
+            };
+            (crate::index::short(root), detail, "vault")
         }
         Item::Tag(tag) => {
             let detail = match app.tag_count(tag) {

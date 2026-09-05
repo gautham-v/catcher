@@ -1,4 +1,5 @@
 mod app;
+mod bookmarks;
 mod cli;
 mod clipboard;
 mod commands;
@@ -29,6 +30,7 @@ mod testutil;
 mod theme;
 mod tree;
 mod ui;
+mod unresolved;
 
 use anyhow::Result;
 use crossterm::event::{

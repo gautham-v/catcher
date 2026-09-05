@@ -139,27 +139,149 @@ impl Rename {
     }
 
     /// A whole note rewritten, or `None` when no link in it needed to be.
-    /// Front matter and fenced code are stepped over, as the mentions scan
-    /// steps over them: a link there is not a link the reader could click.
     fn rewrite(&self, body: &str) -> Option<(String, usize)> {
-        let front = notes::front_matter_range(body).map_or(0, |r| r.end);
-        let mut out = body[..front].to_string();
-        let mut done = 0;
-        let mut fenced = false;
-        for line in body[front..].split_inclusive('\n') {
-            if crate::md::is_fence(line) {
-                fenced = !fenced;
-            }
-            if fenced {
-                out.push_str(line);
-                continue;
-            }
-            let (rewritten, n) = self.rewrite_line(line);
-            out.push_str(&rewritten);
-            done += n;
-        }
-        (done > 0).then_some((out, done))
+        rewrite_body(body, |line| self.rewrite_line(line))
     }
+}
+
+/// `body` with `line` applied to every prose line, and how many edits that
+/// made — or `None` when none. Front matter and fenced code are stepped over,
+/// as the mentions scan steps over them: a link there is not a link the
+/// reader could click.
+fn rewrite_body(
+    body: &str,
+    mut line: impl FnMut(&str) -> (String, usize),
+) -> Option<(String, usize)> {
+    let front = notes::front_matter_range(body).map_or(0, |r| r.end);
+    let mut out = body[..front].to_string();
+    let mut done = 0;
+    let mut fenced = false;
+    for src in body[front..].split_inclusive('\n') {
+        if crate::md::is_fence(src) {
+            fenced = !fenced;
+        }
+        if fenced {
+            out.push_str(src);
+            continue;
+        }
+        let (rewritten, n) = line(src);
+        out.push_str(&rewritten);
+        done += n;
+    }
+    (done > 0).then_some((out, done))
+}
+
+/// The one heading whose text changed between two versions of a note, as
+/// `(old, new)` — the case a save can follow up on by fixing the
+/// `[[note#Old]]` links to it. `None` when the headings are the same, when
+/// more than one changed, or when one was added or removed: a heading that
+/// moved cannot be told from one deleted and another written, and a guess
+/// there would rewrite links to the wrong place. Also `None` when `old` still
+/// heads a section, since the links to it still land.
+pub fn heading_change(before: &str, after: &str) -> Option<(String, String)> {
+    let headings = |body: &str| -> Vec<String> {
+        notes::prose_lines(body)
+            .filter_map(|(_, l)| crate::md::heading_text(l).map(str::to_string))
+            .collect()
+    };
+    let (a, b) = (headings(before), headings(after));
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut changed = a.iter().zip(&b).filter(|(x, y)| x != y);
+    let (old, new) = changed.next()?;
+    if changed.next().is_some() || old.is_empty() || new.is_empty() {
+        return None;
+    }
+    let same = |x: &String| x.to_lowercase() == old.to_lowercase();
+    if b.iter().any(same) {
+        return None;
+    }
+    Some((old.clone(), new.clone()))
+}
+
+/// The char span of the `#fragment` inside `[[…]]`, past the `#`: up to the
+/// `|` or the closing brackets. `None` when the link names no place.
+fn fragment_span(src: &[char], w: &crate::md::Wikilink) -> Option<(usize, usize)> {
+    let body = w.start + 2;
+    let close = w.end - 2;
+    let hash = (body..close).find(|&k| matches!(src[k], '|' | '#'))?;
+    if src[hash] != '#' {
+        return None;
+    }
+    let end = (hash + 1..close).find(|&k| src[k] == '|').unwrap_or(close);
+    Some((hash + 1, end))
+}
+
+/// One line with every `[[target#old]]` whose target `points_here` given
+/// `new` as its fragment instead, and how many were. `[[#old]]` — a place
+/// in the note being read — is left alone: the link is in another note, so
+/// it names that note's heading. Block ids are never headings.
+pub fn rewrite_fragment_line(
+    line: &str,
+    old: &str,
+    new: &str,
+    points_here: impl Fn(&str) -> bool,
+) -> (String, usize) {
+    let src: Vec<char> = line.chars().collect();
+    let want = old.trim().to_lowercase();
+    let mut edits: Vec<(usize, usize)> = Vec::new();
+    for w in crate::md::wikilinks(line) {
+        let Some(f) = w.fragment.as_deref() else {
+            continue;
+        };
+        if f.starts_with('^') || f.trim().to_lowercase() != want {
+            continue;
+        }
+        if w.target.is_empty() || !points_here(&w.target) {
+            continue;
+        }
+        if let Some(span) = fragment_span(&src, &w) {
+            edits.push(span);
+        }
+    }
+    let mut out = String::new();
+    let mut at = 0;
+    for (from, to) in &edits {
+        out.extend(&src[at..*from]);
+        out.push_str(new);
+        at = *to;
+    }
+    out.extend(&src[at..]);
+    (out, edits.len())
+}
+
+/// The heading `old` of the note at `note` is now called `new`: rewrite the
+/// `[[note#old]]` fragments under `roots` that pointed at it. The note itself
+/// is left alone, for the reason [`retarget`] leaves the renamed note alone.
+pub fn retarget_heading(note: &Path, old: &str, new: &str, roots: &[PathBuf]) -> Report {
+    let note = fs::canonicalize(note).unwrap_or_else(|_| note.to_path_buf());
+    let found = notes_under(roots);
+    let (_, entries) = views(&found, &note, &note);
+    let points_here =
+        |target: &str| index::resolve(&entries, target).is_some_and(|e| e.path == note);
+    let mut report = Report::default();
+    for (path, _) in found {
+        if path == note {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(&path) else {
+            report.skipped.push(path);
+            continue;
+        };
+        let Some((rewritten, n)) = rewrite_body(&body, |line| {
+            rewrite_fragment_line(line, old, new, points_here)
+        }) else {
+            continue;
+        };
+        if write_atomic(&path, &rewritten).is_ok() {
+            report.links += n;
+            report.notes.push(path);
+        } else {
+            report.skipped.push(path);
+        }
+    }
+    report
 }
 
 /// The char span of the target inside `[[…]]`: past the brackets, before the
@@ -579,5 +701,69 @@ mod tests {
         assert_eq!(find_anchor(&note, "^ABC-2"), Some(4));
         assert_eq!(find_anchor(&note, "^solo"), Some(6));
         assert_eq!(find_anchor(&note, "^abc-"), None);
+    }
+
+    #[test]
+    fn heading_change_finds_the_one_heading_that_was_renamed() {
+        let before = "# Title\n\n## Old\ntext\n## Other\n";
+        let after = "# Title\n\n## New\ntext\n## Other\n";
+        assert_eq!(
+            heading_change(before, after),
+            Some(("Old".to_string(), "New".to_string()))
+        );
+        // nothing changed, two changed, one added: no single rename to follow
+        assert_eq!(heading_change(before, before), None);
+        assert_eq!(
+            heading_change(before, "# T\n\n## N\ntext\n## Other\n"),
+            None
+        );
+        assert_eq!(
+            heading_change(before, "# Title\n\n## Old\n## New\n## Other\n"),
+            None
+        );
+        // a `# comment` in a fence is not a heading
+        let fenced = "# Title\n```sh\n# comment\n```\n";
+        assert_eq!(
+            heading_change(fenced, "# Title\n```sh\n# other\n```\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn heading_change_ignores_a_rename_that_leaves_the_old_heading_standing() {
+        // a case-only change: `[[note#a]]` reached the heading before and
+        // still does, since fragments match without case
+        let before = "## A\n## B\n";
+        let after = "## a\n## B\n";
+        assert_eq!(heading_change(before, after), None);
+    }
+
+    #[test]
+    fn fragments_are_rewritten_only_on_links_to_this_note() {
+        let here = |t: &str| t.eq_ignore_ascii_case("spec");
+        let line = "[[spec#Old]] ![[spec#old|see]] [[other#Old]] [[#Old]] [[spec#^abc]] [[spec]]";
+        let (out, n) = rewrite_fragment_line(line, "Old", "New", here);
+        assert_eq!(
+            out,
+            "[[spec#New]] ![[spec#New|see]] [[other#Old]] [[#Old]] [[spec#^abc]] [[spec]]"
+        );
+        assert_eq!(n, 2);
+        let (same, none) = rewrite_fragment_line("plain text [[spec#Else]]", "Old", "New", here);
+        assert_eq!(same, "plain text [[spec#Else]]");
+        assert_eq!(none, 0);
+    }
+
+    #[test]
+    fn a_renamed_heading_updates_the_fragments_across_the_vault() {
+        let dir = tmpdir("heading");
+        let spec = write(&dir, "spec.md", "# Spec\n\n## New\n");
+        let other = write(&dir, "other.md", "see [[spec#Old]] and [[Spec#old|it]]\n");
+        let unrelated = write(&dir, "third.md", "[[plan#Old]]\n");
+        let r = retarget_heading(&spec, "Old", "New", std::slice::from_ref(&dir));
+        assert_eq!(read(&other), "see [[spec#New]] and [[Spec#New|it]]\n");
+        assert_eq!(read(&unrelated), "[[plan#Old]]\n");
+        assert_eq!(r.links, 2);
+        assert_eq!(r.notes, vec![other]);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
