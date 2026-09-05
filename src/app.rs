@@ -4958,12 +4958,17 @@ mod tests {
         // hide reads the block the same way; only the drawing differs
         assert_eq!(blocks_with(&lines, FrontMatter::Hide), dim);
 
-        // show leaves it to the markdown scanner, which sees two rules
+        // show leaves it to the markdown scanner, which reads the file the
+        // way CommonMark would: a rule, then `tags: work` over its closing
+        // `---` as a setext heading, then the rule further down
         let shown = blocks_with(&lines, FrontMatter::Show);
-        assert!(shown.iter().all(|b| b.kind == md::BlockKind::Rule));
         assert_eq!(
-            shown.iter().map(|b| b.start).collect::<Vec<_>>(),
-            vec![0, 2, 6]
+            shown.iter().map(|b| (b.kind, b.start)).collect::<Vec<_>>(),
+            vec![
+                (md::BlockKind::Rule, 0),
+                (md::BlockKind::Setext, 1),
+                (md::BlockKind::Rule, 6),
+            ]
         );
     }
 
