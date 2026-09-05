@@ -1905,6 +1905,12 @@ pub enum BlockKind {
     /// card: its title on the source line, and the first lines of its body on
     /// rows hung under it the way a callout hangs its bottom edge.
     Embed,
+    /// A setext heading: a line of text with a line of `===` (H1) or `---`
+    /// (H2) under it. Two lines, so the underline is never read as a rule.
+    Setext,
+    /// A run of lines indented four spaces or a tab, set off by a blank line
+    /// above: code the way CommonMark first spelt it, before fences.
+    IndentedCode,
 }
 
 /// One block, as an inclusive range of source lines.
@@ -2677,6 +2683,106 @@ pub fn is_rule(line: &str) -> bool {
             || t.chars().all(|c| c == '_'))
 }
 
+/// The level of the setext heading whose text is on line `i`: 1 under a
+/// line of three or more `=`, 2 under one of three or more `-`. Only a line
+/// of plain text takes an underline — a `---` under a list item, a heading,
+/// a quote or a blank line is a rule, as before.
+pub fn setext_level(lines: &[String], i: usize) -> Option<usize> {
+    let text = lines.get(i)?;
+    let under = lines.get(i + 1)?.trim();
+    if !is_setext_text(text) || under.chars().count() < 3 {
+        return None;
+    }
+    if under.chars().all(|c| c == '=') {
+        Some(1)
+    } else if under.chars().all(|c| c == '-') {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// Could `line` be the text of a setext heading: a paragraph line, and not
+/// the start of some other construct?
+fn is_setext_text(line: &str) -> bool {
+    let t = line.trim_start();
+    if t.is_empty() || is_indented(line) || is_fence(line) || is_rule(line) || is_table_row(line) {
+        return false;
+    }
+    if t.starts_with(['#', '>', '$']) {
+        return false;
+    }
+    let chars: Vec<char> = t.chars().collect();
+    !is_list_item(&chars)
+}
+
+/// `- `, `* `, `+ `, `1. ` or `1) ` at the start of `chars`.
+fn is_list_item(chars: &[char]) -> bool {
+    if list_marker(chars, 0, 1).is_some() {
+        return true;
+    }
+    let digits = chars.iter().take_while(|c| c.is_ascii_digit()).count();
+    digits > 0
+        && matches!(chars.get(digits), Some('.') | Some(')'))
+        && matches!(chars.get(digits + 1), Some(' ') | None)
+}
+
+/// Four spaces or a tab at the start of the line.
+fn is_indented(line: &str) -> bool {
+    line.starts_with("    ") || line.starts_with('\t')
+}
+
+fn is_blank(line: &str) -> bool {
+    line.trim().is_empty()
+}
+
+/// Does an indented code block open on line `i`? The line is indented and
+/// not blank, and sits at the top of the scan or under a blank line — one
+/// that does not itself follow a list item or an indented continuation, so a
+/// paragraph inside a list keeps being a paragraph.
+fn opens_indented_code(lines: &[String], from: usize, i: usize) -> bool {
+    if !is_indented(&lines[i]) || is_blank(&lines[i]) {
+        return false;
+    }
+    if i == from {
+        return true;
+    }
+    if !is_blank(&lines[i - 1]) {
+        return false;
+    }
+    match i
+        .checked_sub(2)
+        .filter(|&k| k >= from)
+        .map(|k| lines[k].as_str())
+    {
+        Some(prev) => {
+            let chars: Vec<char> = prev.trim_start().chars().collect();
+            !(is_list_item(&chars) || prev.starts_with([' ', '\t']))
+        }
+        None => true,
+    }
+}
+
+/// The last line of the indented code block opening on line `i`: it runs
+/// through blank lines as long as the next non-blank line is still indented,
+/// and never ends on a blank one.
+fn indented_code_end(lines: &[String], i: usize) -> usize {
+    let mut end = i;
+    let mut j = i + 1;
+    while j < lines.len() {
+        if is_blank(&lines[j]) {
+            j += 1;
+            continue;
+        }
+        if !is_indented(&lines[j]) {
+            break;
+        }
+        end = j;
+        j += 1;
+    }
+    end
+}
+
 /// A `| --- | :-: |` table separator row.
 pub(crate) fn is_table_rule(line: &str) -> bool {
     let t = line.trim();
@@ -2797,6 +2903,18 @@ pub fn blocks_from(lines: &[String], from: usize) -> Vec<Block> {
     let mut out = Vec::new();
     let mut i = from;
     while i < lines.len() {
+        // indented code first: a fence, a rule or a table row indented four
+        // spaces under a blank line is a code sample of one, not the thing
+        if opens_indented_code(lines, from, i) {
+            let end = indented_code_end(lines, i);
+            out.push(Block {
+                kind: BlockKind::IndentedCode,
+                start: i,
+                end,
+            });
+            i = end + 1;
+            continue;
+        }
         // a fence swallows everything up to its close, so a `---` or a table
         // drawn inside a code sample is never mistaken for one
         if is_fence(&lines[i]) {
@@ -2869,6 +2987,17 @@ pub fn blocks_from(lines: &[String], from: usize) -> Vec<Block> {
             i = end + 1;
             continue;
         }
+        // a setext heading takes its underline with it, so the `---` under
+        // a line of text is never a rule
+        if setext_level(lines, i).is_some() {
+            out.push(Block {
+                kind: BlockKind::Setext,
+                start: i,
+                end: i + 1,
+            });
+            i += 2;
+            continue;
+        }
         if is_rule(&lines[i]) {
             out.push(Block {
                 kind: BlockKind::Rule,
@@ -2915,6 +3044,41 @@ pub fn style_block_line(lines: &[String], block: &Block, row: usize, width: usiz
         BlockKind::Callout => callout_line(lines, block, row, width, false),
         BlockKind::Table => table_line(&lines[block.start..=block.end], row - block.start, width),
         BlockKind::Embed => embed_title_line(src, width),
+        BlockKind::Setext => {
+            let level = setext_level(lines, block.start).unwrap_or(2);
+            setext_line(src, level, row == block.end)
+        }
+        BlockKind::IndentedCode => fence_line(src, false),
+    }
+}
+
+/// One line of a setext heading: the text in the heading's colour with its
+/// inline spans styled, the way an ATX heading is drawn; the underline kept
+/// as typed, only quiet.
+fn setext_line(src: &str, level: usize, underline: bool) -> RLine {
+    let chars: Vec<char> = src.chars().collect();
+    let src_len = chars.len();
+    let mut b = Builder {
+        src: &chars,
+        cells: Vec::with_capacity(src_len),
+        note: 1,
+    };
+    if underline {
+        for k in 0..src_len {
+            b.keep(k, theme::marker());
+        }
+    } else {
+        let base = theme::heading(level);
+        let mut i = 0;
+        while i < src_len && (chars[i] == ' ' || chars[i] == '\t') {
+            b.keep(i, base);
+            i += 1;
+        }
+        inline(&mut b, i, base);
+    }
+    RLine {
+        cells: b.cells,
+        src_len,
     }
 }
 
@@ -4619,6 +4783,133 @@ mod tests {
     }
 
     #[test]
+    fn a_line_of_text_over_equals_or_dashes_is_a_setext_heading() {
+        let lines = buf("Title\n===\n\nSub  \n----  \n");
+        assert_eq!(
+            blocks(&lines),
+            vec![
+                Block {
+                    kind: BlockKind::Setext,
+                    start: 0,
+                    end: 1,
+                },
+                Block {
+                    kind: BlockKind::Setext,
+                    start: 3,
+                    end: 4,
+                },
+            ]
+        );
+        assert_eq!(setext_level(&lines, 0), Some(1));
+        assert_eq!(setext_level(&lines, 3), Some(2));
+        // the underline is part of the heading, not a heading of its own
+        assert_eq!(setext_level(&lines, 1), None);
+        // and it takes three or more, the way a rule does
+        assert!(blocks(&buf("Title\n==\n")).is_empty());
+    }
+
+    #[test]
+    fn dashes_under_a_blank_a_list_or_a_heading_stay_a_rule() {
+        for src in [
+            "\n---\n",
+            "- item\n---\n",
+            "1. item\n---\n",
+            "# h\n---\n",
+            "> q\n---\n",
+        ] {
+            let bs = blocks(&buf(src));
+            assert_eq!(bs.len(), 1, "{src:?}");
+            assert_eq!(bs[0].kind, BlockKind::Rule, "{src:?}");
+            assert_eq!(bs[0].start, 1, "{src:?}");
+        }
+        // a rule under a rule is two rules
+        let bs = blocks(&buf("---\n---\n"));
+        assert!(bs.iter().all(|b| b.kind == BlockKind::Rule));
+        assert_eq!(bs.len(), 2);
+    }
+
+    #[test]
+    fn a_setext_heading_is_drawn_like_an_atx_one_with_a_quiet_underline() {
+        let lines = buf("Big **deal**\n===\nSmall\n---\n");
+        let bs = blocks(&lines);
+        let l = style_block_line(&lines, &bs[0], 0, 80);
+        assert_eq!(text(&l), "Big deal");
+        assert_eq!(l.cells[0].style, theme::heading(1));
+        assert!(l.cells[4].style.add_modifier.contains(Modifier::BOLD));
+        // every source column is still a cell, so the cursor maps through
+        assert_eq!(l.src_len, 12);
+        assert_eq!(l.one_row().display_to_source(4), 6);
+        let u = style_block_line(&lines, &bs[0], 1, 80);
+        assert_eq!(text(&u), "===");
+        assert!(u.cells.iter().all(|c| c.style == theme::marker()));
+        let l = style_block_line(&lines, &bs[1], 2, 80);
+        assert_eq!(text(&l), "Small");
+        assert_eq!(l.cells[0].style, theme::heading(2));
+        assert_eq!(text(&style_block_line(&lines, &bs[1], 3, 80)), "---");
+    }
+
+    #[test]
+    fn four_spaces_under_a_blank_line_open_an_indented_code_block() {
+        let lines = buf("para\n\n    let x = 1;\n\tlet y = 2;\n\n    done\n\nafter\n");
+        assert_eq!(
+            blocks(&lines),
+            vec![Block {
+                kind: BlockKind::IndentedCode,
+                start: 2,
+                end: 5,
+            }]
+        );
+        // at the top of the file too, with nothing above it
+        let bs = blocks(&buf("    code\n\ntext\n"));
+        assert_eq!(
+            (bs[0].kind, bs[0].start, bs[0].end),
+            (BlockKind::IndentedCode, 0, 0)
+        );
+        // and just under the front matter the scan started below
+        let bs = blocks_from(&buf("---\na: b\n---\n    code\n"), 3);
+        assert_eq!((bs[0].kind, bs[0].start), (BlockKind::IndentedCode, 3));
+    }
+
+    #[test]
+    fn indented_lines_inside_a_list_are_the_list_not_code() {
+        // a paragraph under an item, and a nested item, both keep the list
+        assert!(blocks(&buf("- item\n\n    more of the item\n")).is_empty());
+        assert!(blocks(&buf("- item\n  - nested\n\n    deeper\n")).is_empty());
+        assert!(blocks(&buf("1. item\n\n    more\n")).is_empty());
+        // an indented line right under text is a lazy continuation
+        assert!(blocks(&buf("text\n    more text\n")).is_empty());
+        // but a blank line after plain text is enough to set code off
+        assert_eq!(
+            blocks(&buf("text\n\n    code\n"))[0].kind,
+            BlockKind::IndentedCode
+        );
+    }
+
+    #[test]
+    fn indented_code_swallows_what_would_otherwise_be_markdown() {
+        let lines = buf("\n    ```\n    ---\n    | a |\n    # not a heading\n");
+        let bs = blocks(&lines);
+        assert_eq!(
+            bs,
+            vec![Block {
+                kind: BlockKind::IndentedCode,
+                start: 1,
+                end: 4,
+            }]
+        );
+        // drawn in the code colour with the indent kept, one cell per column
+        let l = style_block_line(&lines, &bs[0], 2, 80);
+        assert_eq!(text(&l), "    ---");
+        assert!(l.cells.iter().all(|c| c.style == theme::code()));
+        assert_eq!(l.one_row().display_to_source(5), 5);
+        // a blank line inside the block is a blank row
+        let lines = buf("\n    a\n\n    b\n");
+        let bs = blocks(&lines);
+        assert_eq!((bs[0].start, bs[0].end), (1, 3));
+        assert_eq!(text(&style_block_line(&lines, &bs[0], 2, 80)), "");
+    }
+
+    #[test]
     fn a_front_matter_fence_is_drawn_as_typed_not_as_a_horizontal_rule() {
         let lines = buf("---\ntags: work\n---\n");
         let block = Block {
@@ -5345,8 +5636,11 @@ mod tests {
             assert!(l.cells.iter().all(|c| c.style == theme::marker()), "{row}");
             assert!(l.cells.iter().enumerate().all(|(i, c)| c.src == i));
         }
-        // no partner: literal, and the rule below it is still a rule
+        // no partner: literal text (a setext underline makes it a heading),
+        // and a rule below it is still a rule
         let lines = buf("%%\n---\n");
+        assert_eq!(blocks(&lines)[0].kind, BlockKind::Setext);
+        let lines = buf("%%\n\n---\n");
         let bs = blocks(&lines);
         assert_eq!(bs.len(), 1);
         assert_eq!(bs[0].kind, BlockKind::Rule);

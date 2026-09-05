@@ -31,7 +31,12 @@ pub fn heading_level(line: &str) -> Option<usize> {
 /// The level of the heading on line `row`, unless the line sits inside a
 /// block — a `#` in a code fence or a table is not a heading.
 pub fn heading_at(lines: &[String], blocks: &[Block], row: usize) -> Option<usize> {
-    if md::block_at(blocks, row).is_some() {
+    if let Some(block) = md::block_at(blocks, row) {
+        // the text line of a setext heading is a heading; its underline is
+        // part of it, and folds under it with the rest of the section
+        if block.kind == md::BlockKind::Setext && row == block.start {
+            return md::setext_level(lines, row);
+        }
         return None;
     }
     heading_level(lines.get(row)?)
@@ -384,6 +389,23 @@ mod tests {
         assert_eq!(heading_at(&l, &b, 2), None);
         // so the fence is inside a's section, and b ends it
         assert_eq!(section_end(&l, &b, 0), 3);
+    }
+
+    #[test]
+    fn a_setext_heading_folds_its_section_underline_included() {
+        let l = lines("Title\n===\nintro\nSub\n---\na\n## Two\nb");
+        let b = md::blocks(&l);
+        assert_eq!(heading_at(&l, &b, 0), Some(1));
+        assert_eq!(heading_at(&l, &b, 1), None); // the underline
+        assert_eq!(heading_at(&l, &b, 3), Some(2));
+        assert_eq!(section_end(&l, &b, 0), 7);
+        assert_eq!(section_end(&l, &b, 3), 5); // Sub ends at the `##`
+        let mut f = Folds::default();
+        let p = Path::new("n.md");
+        assert_eq!(f.fold(p, &l, &b, 3), Some(2));
+        let v = Visible::new(&l, &b, &f.of(p));
+        assert!(v.is_hidden(4) && v.is_hidden(5));
+        assert!(!v.is_hidden(3) && !v.is_hidden(6));
     }
 
     #[test]
