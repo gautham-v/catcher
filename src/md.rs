@@ -1861,6 +1861,23 @@ pub fn table_line_editing(lines: &[String], block: &Block, row: usize, width: us
     table_row(&layout_memo(rows, width, Some(raw_row)), rows, r, r == raw_row)
 }
 
+/// The rule drawn between two body rows of a table in the editor, to the
+/// same column widths as its rows. `raw_row` is the cursor's row, as for
+/// [`table_line_editing`], so the layout is the one the rows use.
+pub fn table_rule_editing(lines: &[String], block: &Block, width: usize, raw_row: Option<usize>) -> RLine {
+    let rows = &lines[block.start..=block.end];
+    let l = layout_memo(rows, width, raw_row);
+    let cells = table_rule(&l.widths)
+        .chars()
+        .map(|ch| Cell {
+            ch,
+            style: theme::marker(),
+            src: 0,
+        })
+        .collect();
+    RLine { cells, src_len: 0 }
+}
+
 /// Row `row` of `rows`, drawn to the layout `l`. A `raw` row keeps every
 /// character of its cells rather than styling their markup.
 fn table_row(l: &TableLayout, rows: &[String], row: usize, raw: bool) -> RLine {

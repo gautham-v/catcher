@@ -42,6 +42,14 @@ pub enum TableHandle {
     AddRow,
 }
 
+/// Which edge of a table the pointer is at: just right of its last column,
+/// or just under its last row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableEdge {
+    Right,
+    Bottom,
+}
+
 /// One drawn display row of the editor: which source line it belongs to, and
 /// which of that line's soft-wrapped rows it is.
 #[derive(Clone, Copy, Debug)]
@@ -435,9 +443,9 @@ pub struct App {
     /// The table block (by its first line) showing its raw pipes while the
     /// cursor is in it, rather than the grid.
     pub table_source: Option<usize>,
-    /// The table block the pointer is over in the editor, for the add-row
-    /// and add-column handles.
-    pub table_hover: Option<usize>,
+    /// The table (by its first line) whose right or bottom edge the pointer
+    /// is at in the editor, which is when its add handle shows.
+    pub table_hover: Option<(usize, TableEdge)>,
     /// The handles the last draw put beside a hovered table.
     pub table_handles: Vec<(Rect, TableHandle)>,
     /// Every row the last draw put on screen, in order.
@@ -1427,24 +1435,7 @@ impl App {
     /// [`Self::maybe_peek`] once the pointer has rested for [`PEEK_DWELL`].
     fn on_hover(&mut self, x: u16, y: u16) {
         if self.view == View::Edit && self.overlay == Overlay::None {
-            // over a table's rows, or its handles, the handles show
-            let on_handle = self
-                .table_handles
-                .iter()
-                .any(|(r, _)| r.contains(ratatui::layout::Position { x, y }));
-            let line = self
-                .edit_rows
-                .iter()
-                .find(|r| y >= r.rect.y && y < r.rect.y + r.rect.height)
-                .map(|r| r.line);
-            let blocks = self.blocks();
-            let over = line
-                .and_then(|l| md::block_at(&blocks, l))
-                .filter(|b| b.kind == md::BlockKind::Table)
-                .map(|b| b.start);
-            if !(on_handle && over.is_none()) {
-                self.table_hover = over;
-            }
+            self.table_hover = self.table_edge_at(x, y);
             return;
         }
         if self.view != View::Preview || self.overlay != Overlay::None {
@@ -1480,6 +1471,54 @@ impl App {
                 self.peek = None;
             }
         }
+    }
+
+    /// The table edge the pointer at (x, y) is at, if any: on a handle it
+    /// already shows, a few columns right of a table row, on the first row
+    /// of the line under a table, or in the space under a table that ends
+    /// the note.
+    fn table_edge_at(&self, x: u16, y: u16) -> Option<(usize, TableEdge)> {
+        let at = ratatui::layout::Position { x, y };
+        if self.table_handles.iter().any(|(r, _)| r.contains(at)) {
+            return self.table_hover;
+        }
+        let blocks = self.blocks();
+        let table = |line: usize| {
+            md::block_at(&blocks, line)
+                .filter(|b| b.kind == md::BlockKind::Table)
+                .copied()
+        };
+        let hit = self
+            .edit_rows
+            .iter()
+            .find(|r| y >= r.rect.y && y < r.rect.y + r.rect.height);
+        let Some(hit) = hit else {
+            // under everything drawn: the bottom of a table that ends the note
+            let n = self.editor.lines().len();
+            let last_drawn = self.edit_rows.last()?;
+            if y >= last_drawn.rect.y + last_drawn.rect.height && last_drawn.line + 1 == n {
+                return table(n - 1).map(|b| (b.start, TableEdge::Bottom));
+            }
+            return None;
+        };
+        if let Some(b) = table(hit.line) {
+            let width = self.editor_area.width.max(1) as usize;
+            let segs = self.wrapped(hit.line, &blocks, width);
+            let grid: usize = segs
+                .first()
+                .map(|s| s.cells.iter().map(|c| c.ch).collect::<String>())
+                .map(|t| md::str_width(&t))
+                .unwrap_or(0);
+            let dx = x.saturating_sub(self.editor_area.x) as usize;
+            return (dx >= grid && dx < grid + 4).then_some((b.start, TableEdge::Right));
+        }
+        // the first row of the line right under a table
+        if hit.seg == 0 && hit.line > 0 {
+            if let Some(b) = table(hit.line - 1).filter(|b| b.end + 1 == hit.line) {
+                return Some((b.start, TableEdge::Bottom));
+            }
+        }
+        None
     }
 
     /// Open the peek for a hover that has lasted long enough.
@@ -2450,8 +2489,32 @@ impl App {
     pub fn hovered_table_end(&self, blocks: &[md::Block], row: usize) -> bool {
         self.view == View::Edit
             && md::block_at(blocks, row).is_some_and(|b| {
-                b.kind == md::BlockKind::Table && b.end == row && self.table_hover == Some(b.start)
+                b.kind == md::BlockKind::Table
+                    && b.end == row
+                    && self.table_hover == Some((b.start, TableEdge::Bottom))
             })
+    }
+
+    /// Is `row` a table row the pointer is right of, so it carries the
+    /// add-column handle?
+    pub fn hovered_table_right(&self, blocks: &[md::Block], row: usize) -> bool {
+        self.view == View::Edit
+            && md::block_at(blocks, row).is_some_and(|b| {
+                b.kind == md::BlockKind::Table && self.table_hover == Some((b.start, TableEdge::Right))
+            })
+    }
+
+    /// Does a rule sit under `row` in the editor: a table row with another
+    /// row of the same table beneath it, the separator aside (it is drawn as
+    /// the rule under the head already).
+    pub fn table_rule_under(&self, blocks: &[md::Block], row: usize) -> bool {
+        let lines = self.editor.lines();
+        md::block_at(blocks, row).is_some_and(|b| {
+            b.kind == md::BlockKind::Table
+                && row < b.end
+                && !md::is_table_rule(&lines[row])
+                && !md::is_table_rule(&lines[row + 1])
+        })
     }
 
     /// A table that ends the note has nothing under it to move to, so the
@@ -3703,7 +3766,7 @@ impl App {
     /// A click on one of the handles beside a hovered table: a column on the
     /// right, or a row at the bottom.
     fn table_handle(&mut self, handle: TableHandle) {
-        let Some(start) = self.table_hover else {
+        let Some((start, _)) = self.table_hover else {
             return;
         };
         let blocks = self.blocks();

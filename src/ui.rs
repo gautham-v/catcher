@@ -189,19 +189,51 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                     }
                     lines.push(line);
                 }
-                // the row under a hovered table: its add-row handle
-                if (*h as usize) > segs.len() && app.hovered_table_end(&blocks, *row) {
-                    let yy = y + segs.len() as u16;
+                // the rows a table row carries under it: its rule, and at
+                // the bottom edge the add-row handle
+                let mut used = segs.len();
+                let mut extra = |app: &mut App, line: Line<'static>, handle| {
+                    if used >= *h as usize {
+                        return;
+                    }
+                    let yy = y + used as u16;
                     app.edit_rows.push(EditRow {
                         rect: Rect::new(area.x, yy, area.width, 1),
                         line: *row,
-                        seg: segs.len(),
+                        seg: used,
                     });
-                    let label = "+ row";
-                    lines.push(Line::from(Span::styled(label, theme::state())));
-                    let rect = Rect::new(area.x, yy, label.len() as u16, 1);
-                    app.table_handles
-                        .push((rect, crate::app::TableHandle::AddRow));
+                    if let Some((w, handle)) = handle {
+                        app.table_handles
+                            .push((Rect::new(area.x, yy, w, 1), handle));
+                    }
+                    lines.push(line);
+                    used += 1;
+                };
+                if app.table_rule_under(&blocks, *row) {
+                    let block = *crate::md::block_at(&blocks, *row).expect("a table row");
+                    let rule = crate::md::table_rule_editing(
+                        app.editor.lines(),
+                        &block,
+                        width,
+                        Some(app.editor.cursor.0).filter(|c| block.contains(*c)).map(|c| c - block.start),
+                    );
+                    extra(app, rule.to_line(None), None);
+                }
+                if app.hovered_table_end(&blocks, *row) {
+                    let grid = segs
+                        .first()
+                        .map(|s| s.cells.iter().map(|c| c.ch).collect::<String>())
+                        .map(|t| crate::md::str_width(&t))
+                        .unwrap_or(1);
+                    let line = Line::from(vec![
+                        Span::raw(" ".repeat(grid / 2)),
+                        Span::styled("+", theme::state()),
+                    ]);
+                    extra(
+                        app,
+                        line,
+                        Some((grid.max(1) as u16, crate::app::TableHandle::AddRow)),
+                    );
                 }
             }
         }
@@ -228,8 +260,9 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// The `+ column` handle after a hovered table's header row, remembered for
-/// the click that follows. (`+ row` is drawn on the row under the table.)
+/// The add-column `+` after every row of a table whose right edge the
+/// pointer is at, remembered for the click that follows. (The add-row `+`
+/// is drawn on the row under the table.)
 fn table_handle(
     app: &mut App,
     blocks: &[crate::md::Block],
@@ -241,22 +274,18 @@ fn table_handle(
     let Some(block) = crate::md::block_at(blocks, row) else {
         return;
     };
-    if block.kind != crate::md::BlockKind::Table || app.table_hover != Some(block.start) {
+    if block.kind != crate::md::BlockKind::Table || !app.hovered_table_right(blocks, row) {
         return;
     }
-    if row != block.start {
-        return;
-    }
-    let (label, handle) = ("+ column", crate::app::TableHandle::AddColumn);
     let used = line.width();
-    let need = label.len() + 2;
-    if used + need > area.width as usize {
+    if used + 3 > area.width as usize {
         return;
     }
     line.spans.push(Span::raw("  "));
-    line.spans.push(Span::styled(label, theme::state()));
-    let rect = Rect::new(area.x + used as u16 + 2, y, label.len() as u16, 1);
-    app.table_handles.push((rect, handle));
+    line.spans.push(Span::styled("+", theme::state()));
+    let rect = Rect::new(area.x + used as u16, y, 3, 1);
+    app.table_handles
+        .push((rect, crate::app::TableHandle::AddColumn));
 }
 
 /// Put a folded heading's count at the right edge of its first row, when the
@@ -301,8 +330,10 @@ fn row_height(
         }
     }
     let rows = app.wrapped(row, blocks, width.max(1) as usize).len();
-    // a hovered table gets one more row under it, for its add-row handle
-    let extra = usize::from(app.hovered_table_end(blocks, row));
+    // a table row carries the rule under it, and the last row of a table
+    // whose bottom edge the pointer is at carries the add-row handle
+    let extra = usize::from(app.table_rule_under(blocks, row))
+        + usize::from(app.hovered_table_end(blocks, row));
     ((rows.max(1) + extra) as u16, None)
 }
 

@@ -1322,9 +1322,6 @@ impl Ren {
     /// that does not fit run onto further lines instead of being cut.
     fn emit_grid(&mut self, t: &Table, cols: usize, widths: &[usize], wrap: bool, wide: bool) {
         let src_line = self.src_line;
-        // a rule between body rows only earns its keep once rows are taller
-        // than one line, where without it the eye loses which row it is on
-        let mut ruled = false;
         for (ri, row) in t.rows.iter().enumerate() {
             let empty: Vec<PCell> = Vec::new();
             // every cell, already broken into the lines it will occupy
@@ -1340,9 +1337,6 @@ impl Ren {
                 })
                 .collect();
             let height = parts.iter().map(|p| p.len()).max().unwrap_or(1);
-            if height > 1 {
-                ruled = true;
-            }
             for line in 0..height {
                 let mut cells: Vec<PCell> = Vec::new();
                 for (ci, w) in widths.iter().enumerate().take(cols) {
@@ -1366,9 +1360,9 @@ impl Ren {
                     hang: 0,
                 });
             }
-            // under the head always; between wrapped body rows as well
+            // under the head, and between every pair of body rows
             let last = ri + 1 == t.rows.len();
-            if ri == 0 || (ruled && !last) {
+            if ri == 0 || !last {
                 let rule = crate::md::table_rule(widths);
                 self.emit_line(PLine {
                     cells: str_cells(&rule, theme::marker()),
