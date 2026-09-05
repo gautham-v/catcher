@@ -17,6 +17,10 @@ pub struct Note {
     /// change made by another program shows up as a stamp that no longer
     /// matches. `None` when the file is not on disk at all.
     pub stamp: Option<Stamp>,
+    /// The bytes as catcher last read or wrote them. A sync tool that rewrites
+    /// the file with identical content moves the stamp but not this, and that
+    /// rewrite must not throw away what is being typed.
+    pub saved: String,
 }
 
 /// A file's mtime and length together: the length catches an edit that
@@ -55,12 +59,30 @@ pub fn check_disk(note: &Note) -> Disk {
     }
 }
 
+/// [`check_disk`], but a file whose stamp moved while its bytes stayed what
+/// catcher last saved is taken as unchanged: the stamp is refreshed and the
+/// buffer left alone. Sync tools rewrite files this way all the time.
+pub fn sync_disk(note: &mut Note) -> Disk {
+    let state = check_disk(note);
+    if state != Disk::Changed {
+        return state;
+    }
+    match fs::read(&note.path) {
+        Ok(bytes) if bytes == note.saved.as_bytes() => {
+            note.stamp = stamp_of(&note.path);
+            Disk::Unchanged
+        }
+        _ => Disk::Changed,
+    }
+}
+
 /// Take what is on disk: re-read the content and the stamp. The disk title
 /// follows too, since the file now tracks whatever its writer called it.
 pub fn reload(note: &mut Note) -> Result<()> {
     let content = fs::read_to_string(&note.path)
         .with_context(|| format!("reading {}", note.path.display()))?;
     note.disk_title = title_of(&content);
+    note.saved = content.clone();
     note.content = content;
     note.stamp = stamp_of(&note.path);
     Ok(())
@@ -268,6 +290,7 @@ pub fn load_all(dir: &Path) -> Result<Vec<Note>> {
         notes.push(Note {
             disk_title: title_of(&content),
             stamp: stamp_of(&path),
+            saved: content.clone(),
             path,
             content,
             modified,
@@ -289,6 +312,7 @@ pub fn load_one(path: &Path) -> Result<Note> {
     Ok(Note {
         disk_title: title_of(&content),
         stamp: stamp_of(path),
+        saved: content.clone(),
         path: path.to_path_buf(),
         content,
         modified,
@@ -331,6 +355,7 @@ pub fn save(dir: &Path, note: &mut Note, allow_rename: bool) -> Result<PathBuf> 
         .and_then(|s| s.to_str())
         .is_some_and(|stem| tracks(stem, &note.disk_title));
     note.disk_title = note.title();
+    note.saved = note.content.clone();
     note.modified = SystemTime::now();
     if allow_rename && tracking {
         let target = unique_path(dir, &note.title(), Some(&note.path));
@@ -405,6 +430,7 @@ pub fn create_named(dir: &Path, stem: &str, content: String) -> Result<Note> {
     Ok(Note {
         disk_title: title_of(&content),
         stamp: stamp_of(&path),
+        saved: content.clone(),
         path,
         content,
         modified: SystemTime::now(),
@@ -418,6 +444,7 @@ pub fn create_with(dir: &Path, content: String) -> Result<Note> {
     write_atomic(&path, &content).with_context(|| format!("writing {}", path.display()))?;
     Ok(Note {
         stamp: stamp_of(&path),
+        saved: content.clone(),
         path,
         content,
         modified: SystemTime::now(),
@@ -553,6 +580,7 @@ mod tests {
         fs::write(&path, content).unwrap();
         Note {
             stamp: stamp_of(&path),
+            saved: content.to_string(),
             path,
             content: content.to_string(),
             modified: SystemTime::now(),
@@ -651,6 +679,7 @@ mod tests {
             modified: SystemTime::now(),
             disk_title: "Groceries".into(),
             stamp: None,
+            saved: String::new(),
         };
         assert_eq!(n.detached_name(), None);
         // the collision suffix is still tracking
@@ -671,6 +700,7 @@ mod tests {
             modified: SystemTime::now(),
             disk_title: "Groceries".into(),
             stamp: None,
+            saved: String::new(),
         };
         assert_eq!(n.detached_name(), None);
     }
@@ -719,6 +749,31 @@ mod tests {
         assert_eq!(n.content, "# A\nmore\n");
         assert_eq!(n.disk_title, "A");
         assert_eq!(check_disk(&n), Disk::Unchanged);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stamp_changed_same_bytes_keeps_the_buffer() {
+        let dir = tmpdir("disk-same-bytes");
+        let mut n = note_at(&dir, "a.md", "# A\n");
+        n.content = "# A\ntyping…\n".into();
+        // a sync tool puts the very same bytes back with a new mtime
+        fs::write(&n.path, "# A\n").unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(5);
+        fs::File::options()
+            .write(true)
+            .open(&n.path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(check_disk(&n), Disk::Changed);
+        assert_eq!(sync_disk(&mut n), Disk::Unchanged);
+        assert_eq!(n.content, "# A\ntyping…\n");
+        assert_eq!(n.stamp, stamp_of(&n.path));
+        assert_eq!(check_disk(&n), Disk::Unchanged);
+        // different bytes still read as a change
+        fs::write(&n.path, "# B\n").unwrap();
+        assert_eq!(sync_disk(&mut n), Disk::Changed);
         let _ = fs::remove_dir_all(&dir);
     }
 

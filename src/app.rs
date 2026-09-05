@@ -1198,7 +1198,7 @@ impl App {
         }
         // never write over what another program put there since we last
         // looked: disk wins, and the buffer catches up instead
-        if notes::check_disk(&self.notes[self.active]) == notes::Disk::Changed {
+        if notes::sync_disk(&mut self.notes[self.active]) == notes::Disk::Changed {
             self.reload_from_disk();
             return;
         }
@@ -1279,7 +1279,7 @@ impl App {
             return;
         }
         self.disk_checked = Instant::now();
-        match notes::check_disk(&self.notes[self.active]) {
+        match notes::sync_disk(&mut self.notes[self.active]) {
             notes::Disk::Unchanged => {}
             notes::Disk::Changed => self.reload_from_disk(),
             notes::Disk::Gone => {
