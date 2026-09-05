@@ -2,7 +2,9 @@ use crate::app::{App, EditRow, Item, Overlay, PageRow, PreviewPage, QuickTab, Vi
 use crate::config::BorderStyle;
 use crate::md::truncate;
 use crate::theme;
-use crate::render::{wrap_pcells as wrap_cells, PCell};
+use crate::render::PCell;
+#[cfg(test)]
+use crate::render::wrap_pcells as wrap_cells;
 use crate::tree::RowKind;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -345,7 +347,7 @@ fn layout_preview(app: &mut App, area: Rect) -> PreviewPage {
             });
             continue;
         }
-        for (i, cells) in wrap_cells(&pline.cells, width).into_iter().enumerate() {
+        for (i, cells) in crate::render::wrap_pline(pline, width).into_iter().enumerate() {
             rows.push(PageRow {
                 cells,
                 checkbox: if i == 0 { pline.checkbox } else { None },

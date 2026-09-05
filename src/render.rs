@@ -48,6 +48,32 @@ pub struct PLine {
     /// soft-wrapped: it is one row of a scrolling table, and the page pans
     /// sideways across it instead.
     pub wide: bool,
+    /// Columns the rows this line wraps into after the first are indented
+    /// by, so a list item's continuation sits under its text, not its marker.
+    pub hang: usize,
+}
+
+/// Wrap a page line to `width`, honouring its hanging indent: every row after
+/// the first is pushed in under the text the first row began with.
+pub fn wrap_pline(line: &PLine, width: usize) -> Vec<Vec<PCell>> {
+    let width = width.max(1);
+    if line.hang == 0 {
+        return wrap_pcells(&line.cells, width);
+    }
+    let rest = width.saturating_sub(line.hang).max(4);
+    wrap_hang(&line.cells, width, rest)
+        .into_iter()
+        .enumerate()
+        .map(|(i, row)| {
+            if i == 0 {
+                row
+            } else {
+                let mut cells = str_cells(&" ".repeat(line.hang), theme::PLAIN);
+                cells.extend(row);
+                cells
+            }
+        })
+        .collect()
 }
 
 /// Merge equal-styled cells into a ratatui line.
@@ -158,7 +184,7 @@ pub fn append_mentions(r: &mut Rendered, mentions: &[crate::mentions::Mention], 
     r.lines.push(PLine {
         // the same rule the document itself draws for `---`, so the footer is
         // separated the way a section of the note would be
-        cells: str_cells(&"─".repeat(width.min(40)), dim),
+        cells: str_cells(&"─".repeat(if width == usize::MAX { 40 } else { width }), dim),
         ..Default::default()
     });
     let count = match mentions.len() {
@@ -401,6 +427,9 @@ struct Ren {
     /// its marker — a list item wraps under its text, not under its bullet.
     hang: usize,
     list_depth: usize,
+    /// One entry per open list: the next number an ordered list will give its
+    /// item, or `None` for a bulleted one.
+    list_numbers: Vec<Option<u64>>,
     in_code_block: bool,
     /// Inside a ```mermaid fence: the body accumulated so far, and the source
     /// byte offset it started at. The whole body is held back until the
@@ -452,6 +481,7 @@ impl Ren {
             quote_blank: false,
             hang: 0,
             list_depth: 0,
+            list_numbers: Vec::new(),
             in_code_block: false,
             mermaid: None,
             table: None,
@@ -542,6 +572,15 @@ impl Ren {
         }
     }
 
+    /// Width a `---` rule is drawn at: the full width of the page, inside any
+    /// quote decoration. A width no page has means the caller did not care.
+    fn rule_width(&self) -> usize {
+        match self.inner_width() {
+            usize::MAX => 40,
+            w => w,
+        }
+    }
+
     /// Width a callout box is drawn at. A width no page has means the caller
     /// did not care, so the box takes a comfortable default.
     fn box_width(&self) -> usize {
@@ -571,6 +610,7 @@ impl Ren {
                 image,
                 src_line,
                 wide: false,
+                hang,
             });
             return;
         }
@@ -589,6 +629,7 @@ impl Ren {
                 image: if i == 0 { image } else { None },
                 src_line,
                 wide: false,
+                hang: 0,
             });
         }
     }
@@ -677,6 +718,7 @@ impl Ren {
             image: None,
             src_line: self.src_line,
             wide: false,
+            hang: 0,
         });
     }
 
@@ -689,6 +731,7 @@ impl Ren {
             image: None,
             src_line: self.src_line,
             wide: false,
+            hang: 0,
         });
     }
 
@@ -874,6 +917,7 @@ impl Ren {
                 image: None,
                 src_line: self.src_line,
                 wide,
+                hang: 0,
             });
         }
     }
@@ -982,20 +1026,31 @@ impl Ren {
                 self.quote_fresh = false;
                 self.quote_blank = false;
             }
-            Event::Start(Tag::List(_)) => {
+            Event::Start(Tag::List(start)) => {
                 if self.list_depth == 0 {
                     self.blank();
                 }
                 self.list_depth += 1;
+                self.list_numbers.push(start);
             }
             Event::End(TagEnd::List(_)) => {
                 self.list_depth = self.list_depth.saturating_sub(1);
+                self.list_numbers.pop();
                 self.flush();
             }
             Event::Start(Tag::Item) => {
                 self.flush();
                 self.src_line = Some(src_line);
-                let text = format!("{}{} ", self.indent(), theme::BULLET);
+                // an ordered list keeps its numbers, as the file wrote them
+                let marker = match self.list_numbers.last_mut() {
+                    Some(Some(n)) => {
+                        let m = format!("{n}.");
+                        *n += 1;
+                        m
+                    }
+                    _ => theme::BULLET.to_string(),
+                };
+                let text = format!("{}{marker} ", self.indent());
                 self.hang = crate::md::str_width(&text);
                 self.push(&text, theme::marker(), None);
             }
@@ -1185,7 +1240,7 @@ impl Ren {
             Event::HardBreak => self.flush(),
             Event::Rule => {
                 self.blank();
-                self.push(&"─".repeat(40), theme::marker(), None);
+                self.push(&"─".repeat(self.rule_width()), theme::marker(), None);
                 self.flush();
             }
             _ => {}
@@ -1308,6 +1363,7 @@ impl Ren {
                     image: None,
                     src_line,
                     wide,
+                    hang: 0,
                 });
             }
             // under the head always; between wrapped body rows as well
@@ -1320,6 +1376,7 @@ impl Ren {
                     image: None,
                     src_line,
                     wide,
+                    hang: 0,
                 });
             }
         }
@@ -1402,6 +1459,7 @@ impl Ren {
                 image: None,
                 src_line,
                 wide: false,
+                hang: 0,
             });
         }
     }
@@ -1876,6 +1934,34 @@ mod tests {
         let widths: Vec<usize> = rows.iter().map(|l| cells_width(&l.cells)).collect();
         // every row, rule included, lines up at the same width
         assert!(widths.windows(2).all(|w| w[0] == w[1]), "{widths:?}");
+    }
+
+    #[test]
+    fn ordered_lists_keep_their_numbers() {
+        let r = render("3. three\n4. four\n   - sub\n5. five\n\n- plain\n");
+        let f = flat(&r);
+        assert!(f.contains("3. three\n4. four\n  • sub\n5. five"), "{f}");
+        assert!(f.contains("• plain"), "{f}");
+    }
+
+    #[test]
+    fn wrapped_list_item_hangs_under_its_text() {
+        let r = render_wide("1. alpha beta gamma delta epsilon zeta\n", 20);
+        let item = r.lines.iter().find(|l| l.text().starts_with("1. ")).unwrap();
+        assert_eq!(item.hang, 3);
+        let rows: Vec<String> = wrap_pline(item, 20)
+            .iter()
+            .map(|c| c.iter().map(|x| x.ch).collect())
+            .collect();
+        assert!(rows.len() > 1, "{rows:?}");
+        assert!(rows[0].starts_with("1. alpha"), "{rows:?}");
+        assert!(rows[1].starts_with("   ") && !rows[1].starts_with("    "), "{rows:?}");
+    }
+
+    #[test]
+    fn rule_spans_the_page() {
+        let r = render_wide("a\n\n---\n\nb\n", 60);
+        assert!(r.lines.iter().any(|l| l.text() == "─".repeat(60)), "{}", flat(&r));
     }
 
     #[test]

@@ -493,7 +493,7 @@ impl Peek {
                 if l.wide {
                     vec![crate::render::to_line(&l.cells)]
                 } else {
-                    crate::render::wrap_pcells(&l.cells, width.max(1))
+                    crate::render::wrap_pline(l, width)
                         .iter()
                         .map(|cells| crate::render::to_line(cells))
                         .collect()
