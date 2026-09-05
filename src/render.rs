@@ -162,7 +162,12 @@ pub fn render_page_at(
     tables: TableStyle,
 ) -> Rendered {
     let mut r = Ren::new(markdown, first_line, width, tables);
-    r.run(markdown);
+    // `%% comments %%` are not part of the page: pulldown-cmark never sees
+    // them, and every offset it reports is mapped back through the cuts
+    let (stripped, cuts) = crate::md::strip_comments(markdown);
+    r.src = stripped.clone();
+    r.cuts = cuts;
+    r.run(&stripped);
     r.finish()
 }
 
@@ -447,7 +452,15 @@ struct Ren {
     tables: TableStyle,
     /// Page width in columns, used to size tables.
     width: usize,
-    /// Byte offset of the start of each source line.
+    /// The markdown as it is in the file, comments and all. `src` is what
+    /// pulldown-cmark walks — the same text with its `%% comments %%` cut
+    /// out — so every offset an event carries is into `src`, and `cuts`
+    /// turns it back into an offset into this.
+    orig: String,
+    /// Where `src` lost bytes to a comment: (offset in `src`, bytes cut there),
+    /// ascending. Empty when the note has no comments.
+    cuts: Vec<(usize, usize)>,
+    /// Byte offset of the start of each source line, in `orig`.
     line_starts: Vec<usize>,
     /// Source line the slice being rendered starts at in the file.
     first_line: usize,
@@ -496,6 +509,8 @@ impl Ren {
             table: None,
             tables,
             width,
+            orig: markdown.to_string(),
+            cuts: Vec::new(),
             line_starts,
             first_line,
             src_line: None,
@@ -542,7 +557,21 @@ impl Ren {
         self.buf().extend(cells);
     }
 
+    /// An offset into `src` as an offset into `orig`: every comment cut at or
+    /// before it puts its bytes back.
+    fn orig_offset(&self, offset: usize) -> usize {
+        offset
+            + self
+                .cuts
+                .iter()
+                .take_while(|(at, _)| *at <= offset)
+                .map(|(_, n)| n)
+                .sum::<usize>()
+    }
+
+    /// The slice-relative line of an offset into `src`.
     fn line_of(&self, offset: usize) -> usize {
+        let offset = self.orig_offset(offset);
         match self.line_starts.binary_search(&offset) {
             Ok(i) => i,
             Err(i) => i.saturating_sub(1),
@@ -551,12 +580,15 @@ impl Ren {
 
     /// Source byte offset → (line, column in chars), the line counted from the
     /// top of the *file*. `line_of` stays slice-relative on purpose: its
-    /// result indexes `line_starts` and `src`, both of which are the slice's.
+    /// result indexes `line_starts` and `orig`, both of which are the slice's.
     fn pos_of(&self, offset: usize) -> (usize, usize) {
         let line = self.line_of(offset);
         let start = self.line_starts.get(line).copied().unwrap_or(0);
-        let offset = offset.min(self.src.len());
-        let col = self.src.get(start..offset).map_or(0, |s| s.chars().count());
+        let offset = self.orig_offset(offset).min(self.orig.len());
+        let col = self
+            .orig
+            .get(start..offset)
+            .map_or(0, |s| s.chars().count());
         (self.first_line + line, col)
     }
 
@@ -2619,5 +2651,59 @@ mod tests {
         append_mentions(&mut r, &[mention("meta", "about the spec", 1)], 18);
         let row = r.lines.iter().find(|l| l.text().contains("meta")).unwrap();
         assert!(!row.text().contains("about"));
+    }
+
+    #[test]
+    fn inline_comments_vanish_from_the_page_and_offsets_still_point_home() {
+        let md = "see %% not this %% [[spec]] and `%% code %%` here\n";
+        let r = render(md);
+        let t = flat(&r);
+        assert!(!t.contains("not this"), "{t}");
+        assert!(t.contains("see spec and %% code %% here"), "{t}");
+        // every mapped cell still points at its own character in the file
+        let src_lines: Vec<&str> = md.lines().collect();
+        for line in &r.lines {
+            for c in &line.cells {
+                if let Some((l, col)) = c.src {
+                    assert_eq!(src_lines[l].chars().nth(col), Some(c.ch), "({l},{col})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_block_comment_leaves_no_trace_and_the_lines_below_keep_their_numbers() {
+        let md = "a\n\n%%\n# hidden\n\n- [ ] not a task\n%%\nb\n\n- [ ] task\n";
+        let r = render(md);
+        let t = texts(&r);
+        assert!(
+            t.iter()
+                .all(|l| !l.contains("hidden") && !l.contains("not a")),
+            "{t:?}"
+        );
+        // the page reads exactly as it would with the comment never typed
+        assert_eq!(t, texts(&render("a\n\nb\n\n- [ ] task\n")));
+        let b = r.lines.iter().find(|l| l.text() == "b").unwrap();
+        assert_eq!(b.src_line, Some(7));
+        let task = r.lines.iter().find(|l| l.text().contains("task")).unwrap();
+        assert_eq!(task.src_line, Some(9));
+        assert_eq!(task.checkbox, Some(9));
+    }
+
+    #[test]
+    fn a_line_that_is_only_a_comment_does_not_split_its_paragraph() {
+        let r = render("a\n%% note %%\nb\n");
+        assert_eq!(texts(&r), texts(&render("a\nb\n")));
+        assert_eq!(texts(&r), ["a", "b"]);
+        let b = r.lines.iter().find(|l| l.text() == "b").unwrap();
+        assert_eq!(b.src_line, Some(2));
+    }
+
+    #[test]
+    fn an_unclosed_comment_marker_and_a_commented_code_line_are_literal() {
+        let r = render("a %% b\n\n```\n%%\nx\n%%\n```\n");
+        let t = flat(&r);
+        assert!(t.contains("a %% b"), "{t}");
+        assert!(t.contains("x"), "{t}");
     }
 }

@@ -725,6 +725,17 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
         }
     }
 
+    // %% comment %% — kept as typed, delimiters and all, only quiet; nothing
+    // inside it is markdown, so the whole span is swallowed here
+    if c == '%' {
+        if let Some(end) = inline_comment_end(b.src, i) {
+            for k in i..end {
+                b.keep(k, theme::marker());
+            }
+            return Some(end);
+        }
+    }
+
     // [^1] — a footnote reference, as a superscript
     if c == '[' && b.src.get(i + 1) == Some(&'^') {
         if let Some(close) = find(b.src, i + 2, ']') {
@@ -830,6 +841,135 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
     }
 
     None
+}
+
+/// The end (exclusive) of the `%% … %%` comment opening at `i`, if one does:
+/// a `%%` with a closing `%%` further along the line. An unclosed `%%` is
+/// literal text, so it gets `None`.
+pub(crate) fn inline_comment_end(src: &[char], i: usize) -> Option<usize> {
+    if src.get(i) != Some(&'%') || src.get(i + 1) != Some(&'%') {
+        return None;
+    }
+    let mut k = i + 2;
+    while k + 1 < src.len() {
+        if src[k] == '%' && src[k + 1] == '%' {
+            return Some(k + 2);
+        }
+        k += 1;
+    }
+    None
+}
+
+/// A `%%` alone on a line: the fence of a block comment, when it has a
+/// partner further down.
+pub(crate) fn is_comment_fence(line: &str) -> bool {
+    line.trim() == "%%"
+}
+
+/// The byte ranges of `markdown` that are Obsidian comments — block comments
+/// fenced by `%%` lines, and inline `%% … %%` spans — so the reading view can
+/// leave them out. Ascending and disjoint. A fenced code block is code, not
+/// prose, so a `%%` inside one is kept; so is one inside a `` `code` `` span.
+/// A line that holds nothing but comments goes altogether, newline included,
+/// so `a\n%% x %%\nb` still reads as one paragraph.
+pub fn comment_cuts(markdown: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    // (byte start of the line, the line without its newline, byte end incl. newline)
+    let lines: Vec<(usize, &str, usize)> = {
+        let mut v = Vec::new();
+        let mut start = 0;
+        for l in markdown.split_inclusive('\n') {
+            let end = start + l.len();
+            v.push((start, l.trim_end_matches(['\n', '\r']), end));
+            start = end;
+        }
+        v
+    };
+    let mut in_fence = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let (start, line, end) = lines[i];
+        if is_fence(line) {
+            in_fence = !in_fence;
+            i += 1;
+            continue;
+        }
+        if in_fence {
+            i += 1;
+            continue;
+        }
+        if is_comment_fence(line) {
+            if let Some(j) = (i + 1..lines.len()).find(|j| is_comment_fence(lines[*j].1)) {
+                out.push(start..lines[j].2);
+                i = j + 1;
+                continue;
+            }
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut byte = start;
+        let mut k = 0;
+        while k < chars.len() {
+            if chars[k] == '`' {
+                if let Some(close) = find(&chars, k + 1, '`') {
+                    byte += chars[k..=close].iter().map(|c| c.len_utf8()).sum::<usize>();
+                    k = close + 1;
+                    continue;
+                }
+            }
+            if let Some(mut e) = inline_comment_end(&chars, k) {
+                // `a %% x %% b` reads `a b`, not `a  b`: a comment sitting
+                // between two spaces takes one of them with it
+                if k > 0 && chars[k - 1] == ' ' && chars.get(e) == Some(&' ') {
+                    e += 1;
+                }
+                let len: usize = chars[k..e].iter().map(|c| c.len_utf8()).sum();
+                spans.push(byte..byte + len);
+                byte += len;
+                k = e;
+                continue;
+            }
+            byte += chars[k].len_utf8();
+            k += 1;
+        }
+        if !spans.is_empty() {
+            let mut rest = String::new();
+            let mut at = start;
+            for s in &spans {
+                rest.push_str(&markdown[at..s.start]);
+                at = s.end;
+            }
+            rest.push_str(&markdown[at..start + line.len()]);
+            if rest.trim().is_empty() {
+                out.push(start..end);
+            } else {
+                out.extend(spans);
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `markdown` with its comments cut out, and where the cuts were: each entry
+/// is the byte offset in the stripped text at which some bytes went missing,
+/// and how many. The reading view renders the stripped text and maps every
+/// offset back through the cuts, so a click still lands where it should.
+pub fn strip_comments(markdown: &str) -> (String, Vec<(usize, usize)>) {
+    let cuts = comment_cuts(markdown);
+    if cuts.is_empty() {
+        return (markdown.to_string(), Vec::new());
+    }
+    let mut out = String::with_capacity(markdown.len());
+    let mut map = Vec::with_capacity(cuts.len());
+    let mut at = 0;
+    for c in cuts {
+        out.push_str(&markdown[at..c.start]);
+        map.push((out.len(), c.end - c.start));
+        at = c.end;
+    }
+    out.push_str(&markdown[at..]);
+    (out, map)
 }
 
 /// Hide `open..body_start` and `body_end..close_end`, style the body between.
@@ -1413,6 +1553,9 @@ pub enum BlockKind {
     /// run of lines so the whole thing reveals together the way a fence does,
     /// and so nothing inside it is ever read as markdown.
     FrontMatter,
+    /// A `%%` … `%%` block comment, fences included: drawn quiet and as
+    /// typed, and nothing inside it is markdown. An unclosed `%%` is not one.
+    Comment,
 }
 
 /// One block, as an inclusive range of source lines.
@@ -1763,6 +1906,19 @@ pub fn blocks_from(lines: &[String], from: usize) -> Vec<Block> {
             i = end + 1;
             continue;
         }
+        // a block comment swallows everything to its closing `%%` too; one
+        // that never closes is literal text and falls through
+        if is_comment_fence(&lines[i]) {
+            if let Some(end) = (i + 1..lines.len()).find(|j| is_comment_fence(&lines[*j])) {
+                out.push(Block {
+                    kind: BlockKind::Comment,
+                    start: i,
+                    end,
+                });
+                i = end + 1;
+                continue;
+            }
+        }
         if is_table_row(&lines[i]) && lines.get(i + 1).is_some_and(|l| is_table_rule(l)) {
             let mut j = i;
             while j < lines.len() && is_table_row(&lines[j]) {
@@ -1832,6 +1988,8 @@ pub fn style_block_line(lines: &[String], block: &Block, row: usize, width: usiz
         BlockKind::Rule => rule_line(src, width),
         BlockKind::Image => image_fallback_line(src),
         BlockKind::FrontMatter => front_matter_line(src),
+        // the same bargain as front matter: as typed, only quiet
+        BlockKind::Comment => front_matter_line(src),
         BlockKind::Math => math_line(src, row == block.start, row == block.end, width),
         BlockKind::Callout => callout_line(lines, block, row, width, false),
         BlockKind::Table => table_line(&lines[block.start..=block.end], row - block.start, width),
@@ -3226,5 +3384,84 @@ mod tests {
             link_key("stories/story-matrix")
         );
         assert_eq!(link_key(" A\\B "), "a/b");
+    }
+
+    #[test]
+    fn an_inline_comment_is_kept_dim_and_nothing_inside_it_is_markdown() {
+        let l = style_line("a %% **b** [[c]] %% d");
+        assert_eq!(text(&l), "a %% **b** [[c]] %% d");
+        let src: Vec<char> = "a %% **b** [[c]] %% d".chars().collect();
+        for (i, c) in l.cells.iter().enumerate() {
+            assert_eq!(c.src, i);
+            if (2..19).contains(&i) {
+                assert_eq!(c.style, theme::marker(), "col {i}: {:?}", src[i]);
+            }
+        }
+        assert_eq!(l.cells[0].style, theme::PLAIN);
+        assert_eq!(l.cells[20].style, theme::PLAIN);
+        assert_eq!(l.one_row().display_to_source(20), 20);
+    }
+
+    #[test]
+    fn an_unclosed_comment_marker_is_literal_and_the_rest_still_styles() {
+        let l = style_line("a %% **b**");
+        assert_eq!(text(&l), "a %% b");
+        assert_eq!(l.cells[2].style, theme::PLAIN);
+        assert!(l.cells[5].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn a_comment_inside_inline_code_is_code() {
+        let l = style_line("`%% x %%`");
+        assert_eq!(text(&l), "%% x %%");
+        assert!(l
+            .cells
+            .iter()
+            .all(|c| c.style.fg == theme::inline_code().fg));
+    }
+
+    #[test]
+    fn a_block_comment_is_one_block_drawn_quiet_and_an_unclosed_one_is_not() {
+        let lines = buf("a\n%%\n# not a heading\n---\n%%\nb\n");
+        let bs = blocks(&lines);
+        assert_eq!(bs.len(), 1);
+        assert_eq!(bs[0].kind, BlockKind::Comment);
+        assert_eq!((bs[0].start, bs[0].end), (1, 4));
+        for row in 1..=4 {
+            let l = style_block_line(&lines, &bs[0], row, 40);
+            assert_eq!(text(&l), lines[row]);
+            assert!(l.cells.iter().all(|c| c.style == theme::marker()), "{row}");
+            assert!(l.cells.iter().enumerate().all(|(i, c)| c.src == i));
+        }
+        // no partner: literal, and the rule below it is still a rule
+        let lines = buf("%%\n---\n");
+        let bs = blocks(&lines);
+        assert_eq!(bs.len(), 1);
+        assert_eq!(bs[0].kind, BlockKind::Rule);
+        assert_eq!(text(&style_line("%%")), "%%");
+    }
+
+    #[test]
+    fn a_comment_fence_inside_a_code_fence_is_code() {
+        let lines = buf("```\n%%\n```\n%%\nx\n%%\n");
+        let bs = blocks(&lines);
+        assert_eq!(bs.len(), 2);
+        assert_eq!(bs[0].kind, BlockKind::Fence);
+        assert_eq!(
+            (bs[1].kind, bs[1].start, bs[1].end),
+            (BlockKind::Comment, 3, 5)
+        );
+    }
+
+    #[test]
+    fn comment_cuts_cover_block_and_inline_comments_but_not_code() {
+        let md = "a %% x %% b\n%%\nhidden\n%%\n`%% c %%`\n```\n%% d %%\n```\n%% e %%\nf %% g\n";
+        let cuts = comment_cuts(md);
+        let cut: Vec<&str> = cuts.iter().map(|r| &md[r.clone()]).collect();
+        // the comment between two spaces takes one of them along
+        assert_eq!(cut, ["%% x %% ", "%%\nhidden\n%%\n", "%% e %%\n"]);
+        let (stripped, map) = strip_comments(md);
+        assert_eq!(stripped, "a b\n`%% c %%`\n```\n%% d %%\n```\nf %% g\n");
+        assert_eq!(map, [(2, 8), (4, 13), (30, 8)]);
     }
 }
