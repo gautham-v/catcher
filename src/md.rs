@@ -1867,15 +1867,67 @@ pub fn table_line_editing(lines: &[String], block: &Block, row: usize, width: us
 pub fn table_rule_editing(lines: &[String], block: &Block, width: usize, raw_row: Option<usize>) -> RLine {
     let rows = &lines[block.start..=block.end];
     let l = layout_memo(rows, width, raw_row);
-    let cells = table_rule(&l.widths)
-        .chars()
-        .map(|ch| Cell {
+    // each cell says which column it is under, so a selection can tint the
+    // rule beneath its cells; a joint belongs to no column
+    let mut cells = Vec::new();
+    for (i, w) in l.widths.iter().enumerate() {
+        if i > 0 {
+            cells.extend("─┼─".chars().map(|ch| Cell {
+                ch,
+                style: theme::marker(),
+                src: usize::MAX,
+            }));
+        }
+        cells.extend(std::iter::repeat_n('─', *w).map(|ch| Cell {
             ch,
             style: theme::marker(),
-            src: 0,
-        })
-        .collect();
+            src: i,
+        }));
+    }
     RLine { cells, src_len: 0 }
+}
+
+/// The display column each table column starts at, and its width, for the
+/// grid drawn from `lines[block]` — the grips above a table go by these.
+pub fn table_column_spans(lines: &[String], block: &Block, width: usize, raw_row: Option<usize>) -> Vec<(usize, usize)> {
+    let rows = &lines[block.start..=block.end];
+    let l = layout_memo(rows, width, raw_row);
+    let mut x = 0;
+    l.widths
+        .iter()
+        .map(|w| {
+            let at = x;
+            x += w + COL_SEP.chars().count();
+            (at, *w)
+        })
+        .collect()
+}
+
+/// Tint the cells of a drawn table row that `selected(column)` says are
+/// selected, and the separator between two selected neighbours, with
+/// `style`. `src` is the row's source, whose pipes say where columns are.
+pub fn tint_table_cells(line: &mut RLine, src: &str, selected: &dyn Fn(usize) -> bool, style: Style) {
+    let (_, pipes) = split_row(src);
+    if pipes.len() < 2 {
+        return;
+    }
+    for cell in &mut line.cells {
+        let s = cell.src;
+        // which column a source position is in, or the separator it is
+        let hit = if s < pipes[0] {
+            None
+        } else if let Some(i) = pipes.iter().position(|p| *p == s) {
+            // a pipe: between column i-1 and i
+            (i > 0 && i + 1 < pipes.len() && selected(i - 1) && selected(i)).then_some(true)
+        } else {
+            let i = pipes.iter().filter(|p| **p < s).count() - 1;
+            let i = i.min(pipes.len().saturating_sub(2));
+            Some(selected(i))
+        };
+        if hit == Some(true) {
+            cell.style = cell.style.patch(style);
+        }
+    }
 }
 
 /// Row `row` of `rows`, drawn to the layout `l`. A `raw` row keeps every
@@ -2113,6 +2165,20 @@ mod tests {
         assert_eq!(text(&raw_with_task("hi", 2)), "hi");
         assert_eq!(task_prefix("  - [ ] a"), Some((2, 8)));
         assert_eq!(task_prefix("- a"), None);
+    }
+
+    #[test]
+    fn a_selection_tints_its_cells_and_the_separator_between_them() {
+        let lines: Vec<String> = "| a | b | c |\n|---|---|---|".lines().map(String::from).collect();
+        let block = Block { kind: BlockKind::Table, start: 0, end: 1 };
+        let mut l = table_line_editing(&lines, &block, 0, 40, 0);
+        let tint = Style::new().bg(ratatui::style::Color::Red);
+        tint_table_cells(&mut l, &lines[0], &|c| c >= 1, tint);
+        let text: String = l.cells.iter().map(|c| c.ch).collect();
+        assert_eq!(text, "a │ b │ c");
+        let tinted: Vec<bool> = l.cells.iter().map(|c| c.style.bg == Some(ratatui::style::Color::Red)).collect();
+        // "a │ " untinted, then "b │ c" tinted, separator included
+        assert_eq!(tinted, vec![false, false, false, false, true, true, true, true, true]);
     }
 
     #[test]

@@ -174,12 +174,57 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                 let segs = app.wrapped(*row, &blocks, width);
                 let selection = app.editor.selection_on(*row);
                 let label = app.fold_label(*row);
+                // the column grips above a table the pointer is at the top
+                // of: one row before the table's own, a grip over each column
+                let mut y = y;
+                let mut h = *h;
+                if app.hovered_table_top(&blocks, *row) && h > 1 {
+                    let block = *crate::md::block_at(&blocks, *row).expect("a table row");
+                    let raw = Some(app.editor.cursor.0)
+                        .filter(|c| block.contains(*c))
+                        .map(|c| c - block.start);
+                    let inner = width.saturating_sub(crate::app::TABLE_GUTTER);
+                    let spans = crate::md::table_column_spans(app.editor.lines(), &block, inner, raw);
+                    let mut text = " ".repeat(crate::app::TABLE_GUTTER);
+                    let mut x = crate::app::TABLE_GUTTER;
+                    for (ci, (at, w)) in spans.iter().enumerate() {
+                        let mid = crate::app::TABLE_GUTTER + at + w / 2;
+                        while x < mid {
+                            text.push(' ');
+                            x += 1;
+                        }
+                        text.push('⠶');
+                        x += 1;
+                        let rx = area.x + (crate::app::TABLE_GUTTER + at) as u16;
+                        let rw = (*w + 3) as u16;
+                        app.table_handles.push((
+                            Rect::new(rx, y, rw, 1),
+                            crate::app::TableHandle::SelectCol(ci),
+                        ));
+                    }
+                    app.edit_rows.push(EditRow {
+                        rect: Rect::new(area.x, y, area.width, 1),
+                        line: *row,
+                        seg: usize::MAX,
+                    });
+                    lines.push(Line::from(Span::styled(text, theme::state())));
+                    y += 1;
+                    h -= 1;
+                }
+                let h = &h;
                 for (i, seg) in segs.iter().enumerate().take(*h as usize) {
                     app.edit_rows.push(EditRow {
                         rect: Rect::new(area.x, y + i as u16, area.width, 1),
                         line: *row,
                         seg: i,
                     });
+                    // the grip in a table row's gutter selects the row
+                    if i == 0 && matches!(app.table_hover, Some((_, crate::app::TableEdge::Left(r))) if r == *row) {
+                        app.table_handles.push((
+                            Rect::new(area.x, y, crate::app::TABLE_GUTTER as u16, 1),
+                            crate::app::TableHandle::SelectRow(*row),
+                        ));
+                    }
                     let mut line = seg.to_line(selection);
                     if i == 0 {
                         if let Some(label) = &label {
@@ -211,13 +256,30 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                 };
                 if app.table_rule_under(&blocks, *row) {
                     let block = *crate::md::block_at(&blocks, *row).expect("a table row");
-                    let rule = crate::md::table_rule_editing(
+                    let inner = width.saturating_sub(crate::app::TABLE_GUTTER);
+                    let mut rule = crate::md::table_rule_editing(
                         app.editor.lines(),
                         &block,
-                        width,
+                        inner,
                         Some(app.editor.cursor.0).filter(|c| block.contains(*c)).map(|c| c - block.start),
                     );
-                    extra(app, rule.to_line(None), None);
+                    // under two selected rows the rule is part of the block
+                    if let Some(sel) = app.cell_sel.filter(|s| s.start == block.start) {
+                        if let Some(t) = crate::table::Table::parse(&app.editor.lines()[block.start..=block.end]) {
+                            let rect = sel.rect(t.rows.len(), t.cols());
+                            let r = t.row_of(*row - block.start);
+                            if r.is_some_and(|r| r >= rect.r0 && r < rect.r1) {
+                                for cell in &mut rule.cells {
+                                    if cell.src != usize::MAX && cell.src >= rect.c0 && cell.src <= rect.c1 {
+                                        cell.style = cell.style.patch(theme::row());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let mut line = rule.to_line(None);
+                    line.spans.insert(0, Span::raw(" ".repeat(crate::app::TABLE_GUTTER)));
+                    extra(app, line, None);
                 }
                 if app.hovered_table_end(&blocks, *row) {
                     let grid = segs
@@ -337,7 +399,8 @@ fn row_height(
     // a table row carries the rule under it, and the last row of a table
     // whose bottom edge the pointer is at carries the add-row handle
     let extra = usize::from(app.table_rule_under(blocks, row))
-        + usize::from(app.hovered_table_end(blocks, row));
+        + usize::from(app.hovered_table_end(blocks, row))
+        + usize::from(app.hovered_table_top(blocks, row));
     ((rows.max(1) + extra) as u16, None)
 }
 
@@ -925,7 +988,11 @@ fn hint_pairs(app: &App) -> Vec<(String, &'static str)> {
         pairs.push(("← →".to_string(), "table"));
     }
     // in a grid, the keys that behave differently there
-    if app.view == View::Edit && app.overlay == Overlay::None && app.table_cell().is_some() {
+    if app.view == View::Edit && app.overlay == Overlay::None && app.cell_sel.is_some() {
+        pairs.push(("⌫".to_string(), "clear"));
+        pairs.push(("⌥↑↓←→".to_string(), "move"));
+        pairs.push(("esc".to_string(), "deselect"));
+    } else if app.view == View::Edit && app.overlay == Overlay::None && app.table_cell().is_some() {
         pairs.push(("tab".to_string(), "next cell"));
         pairs.push(("↵".to_string(), "row below"));
         pairs.push(("esc".to_string(), "source"));

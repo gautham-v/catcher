@@ -232,6 +232,167 @@ impl Table {
     }
 }
 
+/// A rectangle of cells: rows `r0..=r1`, columns `c0..=c1`, in matrix
+/// coordinates, both ends inclusive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub r0: usize,
+    pub c0: usize,
+    pub r1: usize,
+    pub c1: usize,
+}
+
+impl Rect {
+    /// The rectangle spanned by two corners, in any order.
+    pub fn between((ar, ac): (usize, usize), (br, bc): (usize, usize)) -> Rect {
+        Rect {
+            r0: ar.min(br),
+            c0: ac.min(bc),
+            r1: ar.max(br),
+            c1: ac.max(bc),
+        }
+    }
+
+    /// Clipped to a table of `rows` × `cols`.
+    pub fn clip(self, rows: usize, cols: usize) -> Rect {
+        Rect {
+            r0: self.r0.min(rows.saturating_sub(1)),
+            c0: self.c0.min(cols.saturating_sub(1)),
+            r1: self.r1.min(rows.saturating_sub(1)),
+            c1: self.c1.min(cols.saturating_sub(1)),
+        }
+    }
+}
+
+impl Table {
+    /// Empty every cell in `rect`.
+    pub fn clear(&mut self, rect: Rect) {
+        for r in rect.r0..=rect.r1.min(self.rows.len().saturating_sub(1)) {
+            for c in rect.c0..=rect.c1.min(self.cols().saturating_sub(1)) {
+                self.rows[r][c].clear();
+            }
+        }
+    }
+
+    /// The cells of `rect` as tab-separated rows: what the clipboard gets,
+    /// and what a spreadsheet reads.
+    pub fn tsv(&self, rect: Rect) -> String {
+        let rect = rect.clip(self.rows.len(), self.cols());
+        (rect.r0..=rect.r1)
+            .map(|r| {
+                (rect.c0..=rect.c1)
+                    .map(|c| self.rows[r][c].replace('\t', " "))
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Write `block` into the table with its top-left at (`r`, `c`), adding
+    /// rows and columns as needed. Returns the rectangle written.
+    pub fn paste(&mut self, r: usize, c: usize, block: &[Vec<String>]) -> Rect {
+        let height = block.len().max(1);
+        let width = block.iter().map(Vec::len).max().unwrap_or(1).max(1);
+        while self.cols() < c + width {
+            let at = self.cols();
+            for row in &mut self.rows {
+                row.insert(at, String::new());
+            }
+            self.aligns.push(Align::Left);
+        }
+        while self.rows.len() < r + height {
+            self.rows.push(vec![String::new(); self.cols()]);
+        }
+        for (i, row) in block.iter().enumerate() {
+            for (j, text) in row.iter().enumerate() {
+                self.rows[r + i][c + j] = text.clone();
+            }
+        }
+        Rect {
+            r0: r,
+            c0: c,
+            r1: r + height - 1,
+            c1: c + width - 1,
+        }
+    }
+
+    /// Remove rows `r0..=r1`. Refused when that would take the last header
+    /// row or every row.
+    pub fn delete_rows(&mut self, r0: usize, r1: usize) -> bool {
+        let r1 = r1.min(self.rows.len().saturating_sub(1));
+        if r0 > r1 || r1 + 1 - r0 >= self.rows.len() {
+            return false;
+        }
+        let heads = (r0..=r1).filter(|r| *r < self.head).count();
+        if heads >= self.head {
+            return false;
+        }
+        self.rows.drain(r0..=r1);
+        self.head -= heads;
+        true
+    }
+
+    /// Remove columns `c0..=c1`, keeping at least one.
+    pub fn delete_cols(&mut self, c0: usize, c1: usize) -> bool {
+        let c1 = c1.min(self.cols().saturating_sub(1));
+        if c0 > c1 || c1 + 1 - c0 >= self.cols() {
+            return false;
+        }
+        for row in &mut self.rows {
+            row.drain(c0..=c1);
+        }
+        self.aligns.drain(c0..=c1);
+        true
+    }
+
+    /// Slide rows `r0..=r1` one step down or up, within the header or the
+    /// body. Returns the rows' new range.
+    pub fn move_rows(&mut self, r0: usize, r1: usize, down: bool) -> Option<(usize, usize)> {
+        let other = if down { r1 + 1 } else { r0.checked_sub(1)? };
+        if other >= self.rows.len() || (other < self.head) != (r0 < self.head) {
+            return None;
+        }
+        let row = self.rows.remove(other);
+        if down {
+            self.rows.insert(r0, row);
+            Some((r0 + 1, r1 + 1))
+        } else {
+            self.rows.insert(r1, row);
+            Some((r0 - 1, r1 - 1))
+        }
+    }
+
+    /// Slide columns `c0..=c1` one step right or left. Returns their new range.
+    pub fn move_cols(&mut self, c0: usize, c1: usize, right: bool) -> Option<(usize, usize)> {
+        let other = if right { c1 + 1 } else { c0.checked_sub(1)? };
+        if other >= self.cols() {
+            return None;
+        }
+        for row in &mut self.rows {
+            let cell = row.remove(other);
+            row.insert(if right { c0 } else { c1 }, cell);
+        }
+        let a = self.aligns.remove(other);
+        self.aligns.insert(if right { c0 } else { c1 }, a);
+        Some(if right { (c0 + 1, c1 + 1) } else { (c0 - 1, c1 - 1) })
+    }
+}
+
+/// Clipboard text as a block of cells: tabs split columns, newlines rows.
+/// One line with no tab is a single cell.
+pub fn parse_tsv(text: &str) -> Vec<Vec<String>> {
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    text.split('\n')
+        .map(|l| {
+            l.trim_end_matches('\r')
+                .split('\t')
+                .map(str::to_string)
+                .collect()
+        })
+        .collect()
+}
+
 fn align_of(spec: &str) -> Align {
     let t = spec.trim();
     match (t.starts_with(':'), t.ends_with(':')) {
@@ -367,6 +528,41 @@ mod tests {
         let mut t = base.clone();
         t.apply(Op::AlignCenter, 0, 0);
         assert_eq!(t.emit()[1], "| :-: | --: |");
+    }
+
+    #[test]
+    fn selections_clear_copy_paste_delete_and_move() {
+        let base = Table::parse(&lines("| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |")).unwrap();
+        let rect = Rect::between((2, 2), (1, 1));
+        assert_eq!(rect, Rect { r0: 1, c0: 1, r1: 2, c1: 2 });
+        assert_eq!(base.tsv(rect), "2\t3\n5\t6");
+        let mut t = base.clone();
+        t.clear(rect);
+        assert_eq!(t.rows[2], vec!["4", "", ""]);
+        let mut t = base.clone();
+        let block = parse_tsv("x\ty\tz\nq\n");
+        assert_eq!(block, vec![vec!["x", "y", "z"], vec!["q"]]);
+        let wrote = t.paste(2, 2, &block);
+        assert_eq!(wrote, Rect { r0: 2, c0: 2, r1: 3, c1: 4 });
+        assert_eq!(t.cols(), 5);
+        assert_eq!(t.rows.len(), 4);
+        assert_eq!(t.rows[2], vec!["4", "5", "x", "y", "z"]);
+        assert_eq!(t.rows[3], vec!["", "", "q", "", ""]);
+        let mut t = base.clone();
+        assert!(!t.delete_rows(0, 0));
+        assert!(t.delete_rows(1, 2));
+        assert_eq!(t.rows.len(), 1);
+        let mut t = base.clone();
+        assert!(t.delete_cols(0, 1));
+        assert_eq!(t.rows[0], vec!["c"]);
+        assert!(!t.delete_cols(0, 0));
+        let mut t = base.clone();
+        assert_eq!(t.move_rows(1, 1, true), Some((2, 2)));
+        assert_eq!(t.rows[1], vec!["4", "5", "6"]);
+        assert_eq!(t.move_rows(0, 0, true), None);
+        assert_eq!(t.move_cols(0, 1, true), Some((1, 2)));
+        assert_eq!(t.rows[0], vec!["c", "a", "b"]);
+        assert_eq!(t.move_cols(1, 2, true), None);
     }
 
     #[test]
