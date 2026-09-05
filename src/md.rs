@@ -2746,11 +2746,12 @@ pub fn footnote_ordinal(lines: &[String], row: usize) -> usize {
         }
         // a `%%` block comment, like the reading view leaves it out —
         // an unclosed one is text, so only a `%%` with a partner opens one
-        if !fenced && line.trim() == "%%" {
-            if commented || lines[i + 1..].iter().any(|l| l.trim() == "%%") {
-                commented = !commented;
-                continue;
-            }
+        if !fenced
+            && line.trim() == "%%"
+            && (commented || lines[i + 1..].iter().any(|l| l.trim() == "%%"))
+        {
+            commented = !commented;
+            continue;
         }
         if !fenced && !commented {
             n += footnote_refs(line).len();
