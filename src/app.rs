@@ -2963,6 +2963,9 @@ impl App {
             self.editor.clear_selection();
             return;
         };
+        // Drop any earlier anchor first: set_cursor keeps it, and the
+        // selecting move below would then run from there to the match.
+        self.editor.clear_selection();
         self.editor.set_cursor((row, s));
         self.editor.move_cursor((row, e), true);
     }
