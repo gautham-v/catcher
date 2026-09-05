@@ -1162,6 +1162,12 @@ pub fn comment_cuts(markdown: &str) -> Vec<std::ops::Range<usize>> {
         let mut byte = start;
         let mut k = 0;
         while k < chars.len() {
+            // `\%` is a literal per cent sign, not the start of a comment
+            if chars[k] == '\\' && chars.get(k + 1).is_some_and(|c| c.is_ascii_punctuation()) {
+                byte += chars[k].len_utf8() + chars[k + 1].len_utf8();
+                k += 2;
+                continue;
+            }
             if chars[k] == '`' {
                 if let Some(close) = find(&chars, k + 1, '`') {
                     byte += chars[k..=close].iter().map(|c| c.len_utf8()).sum::<usize>();
@@ -1752,7 +1758,7 @@ pub fn wikilink_at(src: &[char], i: usize) -> Option<Wikilink> {
     }
     // `![[picture.png]]` is a picture, drawn by the image path; only an
     // embedded *note* is a link
-    if embedded && is_image_path(&target) {
+    if embedded && is_image_path(target) {
         return None;
     }
     Some(Wikilink {
@@ -5792,4 +5798,15 @@ mod tests {
         assert_eq!(stripped, "a b\n`%% c %%`\n```\n%% d %%\n```\nf %% g\n");
         assert_eq!(map, [(2, 8), (4, 13), (30, 8)]);
     }
+
+    #[test]
+    fn an_escape_wins_over_a_comment_and_an_html_tag() {
+        // the backslash check runs before every other inline construct
+        let l = style_line(r"\%% not a comment %% and \<u>not underlined</u>");
+        assert_eq!(text(&l), r"\%% not a comment %% and \<u>not underlined</u>");
+        assert!(l.cells.iter().all(|c| c.style == theme::PLAIN || c.style == theme::marker()));
+        let r = crate::render::render_page(r"\%% kept %%", 40, crate::config::TableStyle::default());
+        assert_eq!(r.lines[0].text(), "%% kept %%");
+    }
+
 }
