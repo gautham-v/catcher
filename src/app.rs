@@ -4457,7 +4457,7 @@ fn view_line(
     if row == cursor_row {
         md::raw_with_task(src, cursor.1)
     } else {
-        md::style_line(src)
+        md::style_line_in(lines, row)
     }
 }
 

@@ -161,9 +161,125 @@ pub fn render_page_at(
     width: usize,
     tables: TableStyle,
 ) -> Rendered {
-    let mut r = Ren::new(markdown, first_line, width, tables);
-    r.run(markdown);
+    // pulldown has never heard of `^[text]`: each becomes a reference to a
+    // definition appended past the end of the note, and every offset in that
+    // tail is mapped back to the text it came from
+    let (markdown, notes) = inline_footnotes(markdown);
+    let mut r = Ren::new(&markdown, first_line, width, tables);
+    r.tail_start = markdown.len() - notes.iter().map(|n| n.tail_len).sum::<usize>();
+    r.inline_notes = notes;
+    r.run(&markdown);
     r.finish()
+}
+
+/// An Obsidian inline footnote `^[text]`, rewritten for pulldown as a
+/// reference `[^~N]` whose definition is appended after the note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InlineNote {
+    label: String,
+    /// Its number, counted with the `[^label]` references in document order.
+    ordinal: usize,
+    /// Byte offset, in the rewritten body, of where the text stood inside
+    /// the `^[…]` — the same as in the note unless an earlier footnote on
+    /// the line was shorter than its label.
+    orig: usize,
+    /// Byte offset of the same text inside the appended definition.
+    def: usize,
+    /// The text's length in bytes.
+    len: usize,
+    /// How many bytes the appended definition took, blank line included.
+    tail_len: usize,
+}
+
+/// Rewrite every `^[text]` in `markdown` into a `[^~N]` reference and append
+/// the definitions. The label is padded to the text's own length, so every
+/// other byte on the line keeps its offset and a click still lands where it
+/// should; only a text shorter than its label shifts the rest of its line.
+fn inline_footnotes(markdown: &str) -> (String, Vec<InlineNote>) {
+    let mut out = String::with_capacity(markdown.len());
+    let mut notes: Vec<InlineNote> = Vec::new();
+    let mut bodies: Vec<&str> = Vec::new();
+    let mut ordinal = 1;
+    let mut fenced = false;
+    for raw in markdown.split_inclusive('\n') {
+        let line = raw.trim_end_matches('\n').trim_end_matches('\r');
+        if crate::md::is_fence(line) {
+            fenced = !fenced;
+        }
+        let refs = if fenced || !line.contains("^[") {
+            Vec::new()
+        } else {
+            crate::md::footnote_refs(line)
+        };
+        if refs.is_empty() {
+            ordinal += if fenced || !line.contains("[^") {
+                0
+            } else {
+                crate::md::footnote_refs(line).len()
+            };
+            out.push_str(raw);
+            continue;
+        }
+        // char columns → byte offsets within the line
+        let bytes: Vec<usize> = line
+            .char_indices()
+            .map(|(b, _)| b)
+            .chain(std::iter::once(line.len()))
+            .collect();
+        let mut at = 0;
+        for r in refs {
+            if !r.inline {
+                ordinal += 1;
+                continue;
+            }
+            let (start, end) = (bytes[r.start], bytes[r.end]);
+            let (b0, b1) = (bytes[r.body.0], bytes[r.body.1]);
+            out.push_str(&line[at..start]);
+            let orig = out.len() + 2;
+            let mut label = format!("~{ordinal}");
+            while label.len() < b1 - b0 {
+                label.push('~');
+            }
+            out.push_str("[^");
+            out.push_str(&label);
+            out.push(']');
+            notes.push(InlineNote {
+                label,
+                ordinal,
+                orig,
+                def: 0,
+                len: b1 - b0,
+                tail_len: 0,
+            });
+            bodies.push(&line[b0..b1]);
+            ordinal += 1;
+            at = end;
+        }
+        out.push_str(&raw[at..]);
+    }
+    if notes.is_empty() {
+        return (out, notes);
+    }
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    let body_end = out.len();
+    let mut tail_len = out.len();
+    for (n, body) in notes.iter_mut().zip(bodies) {
+        out.push_str("\n[^");
+        out.push_str(&n.label);
+        out.push_str("]: ");
+        n.def = out.len();
+        out.push_str(body);
+        out.push('\n');
+        n.tail_len = out.len() - tail_len;
+        tail_len = out.len();
+    }
+    debug_assert_eq!(
+        body_end + notes.iter().map(|n| n.tail_len).sum::<usize>(),
+        out.len()
+    );
+    (out, notes)
 }
 
 /// Add the linked-mentions footer to an already-rendered page: a rule, a count,
@@ -456,6 +572,11 @@ struct Ren {
     pending_checkbox: Option<usize>,
     /// A footnote's superscript label, waiting for its first paragraph.
     footnote: Option<String>,
+    /// The `^[text]` footnotes `inline_footnotes` rewrote, and where in `src`
+    /// their appended definitions begin: offsets from there on map back to
+    /// the text inside the `^[…]`.
+    inline_notes: Vec<InlineNote>,
+    tail_start: usize,
     done_item: bool,
     image_alt: Option<(String, String)>,
     /// Byte offset the renderer has already drawn past. pulldown-cmark has
@@ -501,6 +622,8 @@ impl Ren {
             src_line: None,
             pending_checkbox: None,
             footnote: None,
+            inline_notes: Vec::new(),
+            tail_start: usize::MAX,
             done_item: false,
             image_alt: None,
             wiki_until: 0,
@@ -542,7 +665,34 @@ impl Ren {
         self.buf().extend(cells);
     }
 
+    /// A byte offset in the appended footnote tail, taken back to the
+    /// `^[text]` it was copied from; anything in the body is its own.
+    fn remap(&self, offset: usize) -> usize {
+        if offset < self.tail_start {
+            return offset;
+        }
+        let note = self
+            .inline_notes
+            .iter()
+            .find(|n| offset <= n.def + n.len)
+            .or(self.inline_notes.last());
+        match note {
+            Some(n) => n.orig + offset.saturating_sub(n.def).min(n.len),
+            None => offset,
+        }
+    }
+
+    /// The superscript a footnote label is drawn as: an inline footnote's
+    /// number, any other label as itself.
+    fn footnote_mark(&self, label: &str) -> String {
+        match self.inline_notes.iter().find(|n| n.label == label) {
+            Some(n) => crate::md::superscript(&n.ordinal.to_string()),
+            None => crate::md::superscript(label),
+        }
+    }
+
     fn line_of(&self, offset: usize) -> usize {
+        let offset = self.remap(offset);
         match self.line_starts.binary_search(&offset) {
             Ok(i) => i,
             Err(i) => i.saturating_sub(1),
@@ -553,6 +703,7 @@ impl Ren {
     /// top of the *file*. `line_of` stays slice-relative on purpose: its
     /// result indexes `line_starts` and `src`, both of which are the slice's.
     fn pos_of(&self, offset: usize) -> (usize, usize) {
+        let offset = self.remap(offset);
         let line = self.line_of(offset);
         let start = self.line_starts.get(line).copied().unwrap_or(0);
         let offset = offset.min(self.src.len());
@@ -1214,12 +1365,13 @@ impl Ren {
                 }
             }
             Event::FootnoteReference(label) => {
-                self.push(&crate::md::superscript(&label), theme::state(), None);
+                let mark = self.footnote_mark(&label);
+                self.push(&mark, theme::state(), None);
             }
             Event::Start(Tag::FootnoteDefinition(label)) => {
                 self.blank();
                 self.src_line = Some(src_line);
-                self.footnote = Some(crate::md::superscript(&label));
+                self.footnote = Some(self.footnote_mark(&label));
             }
             Event::End(TagEnd::FootnoteDefinition) => {
                 self.footnote = None;
@@ -2041,6 +2193,87 @@ mod tests {
         assert!(rows.iter().any(|t| t.trim() == "E = mc^2" && t.starts_with("     ")), "{rows:?}");
         assert!(rows.iter().any(|t| t == "¹ Tickles"), "{rows:?}");
         assert!(rows.iter().all(|t| !t.contains("[^1]") && !t.contains("$$")), "{rows:?}");
+    }
+
+    #[test]
+    fn inline_footnotes_render_numbered_with_their_definitions() {
+        let md = "Tea[^1] and^[Milk too] then^[Sugar].\n\n[^1]: Black\n";
+        let r = render_wide(md, 40);
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(rows.iter().any(|t| t == "Tea¹ and² then³."), "{rows:?}");
+        assert!(rows.iter().any(|t| t == "¹ Black"), "{rows:?}");
+        assert!(rows.iter().any(|t| t == "² Milk too"), "{rows:?}");
+        assert!(rows.iter().any(|t| t == "³ Sugar"), "{rows:?}");
+        assert!(
+            rows.iter().all(|t| !t.contains('~') && !t.contains("^[")),
+            "{rows:?}"
+        );
+        // the definitions come after the reference footnotes, in order
+        let at = |s: &str| rows.iter().position(|t| t == s).unwrap();
+        assert!(at("¹ Black") < at("² Milk too") && at("² Milk too") < at("³ Sugar"));
+    }
+
+    #[test]
+    fn an_inline_footnote_maps_back_to_the_line_it_was_written_on() {
+        let md = "Tea[^1] and^[Milk too] then^[Sugar].\n\n[^1]: Black\n";
+        let r = render_page_at(md, 5, 40, TableStyle::default());
+        // text after the note keeps its true column: the rewrite is the same
+        // length as what it replaced
+        let first = r
+            .lines
+            .iter()
+            .find(|l| l.text().starts_with("Tea"))
+            .unwrap();
+        let t = first.cells.iter().find(|c| c.ch == 't').unwrap();
+        assert_eq!(t.src, Some((5, 23)));
+        // the appended definition belongs to the line the `^[…]` is on, and
+        // its text to the columns inside the brackets
+        let milk = r.lines.iter().find(|l| l.text() == "² Milk too").unwrap();
+        assert_eq!(milk.src_line, Some(5));
+        let m = milk.cells.iter().find(|c| c.ch == 'M').unwrap();
+        assert_eq!(m.src, Some((5, 13)));
+        let sugar = r.lines.iter().find(|l| l.text() == "³ Sugar").unwrap();
+        assert_eq!(sugar.src_line, Some(5));
+        // the real definition still maps to its own line
+        let black = r.lines.iter().find(|l| l.text() == "¹ Black").unwrap();
+        assert_eq!(black.src_line, Some(7));
+    }
+
+    #[test]
+    fn inline_footnotes_count_with_word_labels_and_skip_fences() {
+        // a word label stays a word; the inline note after it is number two,
+        // and a note shorter than its label still renders
+        let r = render("x[^note] y^[z]\n\n[^note]: def\n");
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(rows.iter().any(|t| t == "x^note y²"), "{rows:?}");
+        assert!(rows.iter().any(|t| t == "² z"), "{rows:?}");
+        assert!(rows.iter().any(|t| t == "^note def"), "{rows:?}");
+        // fenced code is left as typed
+        let r = render("```\n^[not a note]\n```\n");
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(rows.iter().any(|t| t.contains("^[not a note]")), "{rows:?}");
+        assert!(rows.iter().all(|t| !t.contains('¹')), "{rows:?}");
+        // a note with none is untouched by the rewrite
+        let (out, notes) = inline_footnotes("plain [^1]\n\n[^1]: x\n");
+        assert_eq!(out, "plain [^1]\n\n[^1]: x\n");
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn the_rewrite_keeps_the_line_and_names_the_text_it_moved() {
+        let (out, notes) = inline_footnotes("a^[bc] d");
+        assert_eq!(out, "a[^~1] d\n\n[^~1]: bc\n");
+        assert_eq!(notes.len(), 1);
+        let n = &notes[0];
+        assert_eq!(
+            (n.label.as_str(), n.ordinal, n.orig, n.len),
+            ("~1", 1, 3, 2)
+        );
+        assert_eq!(&out[n.def..n.def + n.len], "bc");
+        assert_eq!(n.tail_len, "\n[^~1]: bc\n".len());
+        // a longer text pads the label to its own length
+        let (out, _) = inline_footnotes("^[four] tail\n");
+        assert_eq!(out, "[^~1~~] tail\n\n[^~1~~]: four\n");
     }
 
     #[test]
