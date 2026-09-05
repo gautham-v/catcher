@@ -435,7 +435,9 @@ pub fn apply_folds(
                 // the marker only on the heading's first row: a heading that
                 // wrapped carries its line number on every row it took
                 let first = out.last().is_none_or(|p| p.src_line != Some(l));
-                if first {
+                if first && line.cells.iter().any(|c| c.ch == '╭') {
+                    mark_folded_card(&mut line, l, visible.hidden_under(l));
+                } else if first {
                     mark_folded(&mut line, l, visible.hidden_under(l), width);
                 }
             }
@@ -452,6 +454,50 @@ pub fn apply_folds(
         out.pop();
     }
     r.lines = out;
+}
+
+/// A folded callout's title row: the `▸ ` inside the card's top edge, where
+/// an open foldable card shows `▾ `, and how many lines it hides in the
+/// dashes at the right when they have room. The row keeps its width.
+fn mark_folded_card(line: &mut PLine, src: usize, hidden: usize) {
+    let Some(open) = line.cells.iter().position(|c| c.ch == '╭') else {
+        return;
+    };
+    let Some(close) = line.cells.iter().rposition(|c| c.ch == '╮') else {
+        return;
+    };
+    let at = open + 3;
+    let marker = |ch: char| PCell {
+        ch,
+        style: theme::fold(),
+        link: None,
+        src: Some((src, 0)),
+    };
+    let mut close = close;
+    if line.cells.get(at).is_some_and(|c| c.ch == '▾') {
+        line.cells[at] = marker('▸');
+    } else if close > at + 2 && line.cells[close - 2..close].iter().all(|c| c.ch == '─') {
+        line.cells.splice(close - 2..close, []);
+        line.cells.splice(at..at, [marker('▸'), marker(' ')]);
+    } else {
+        return;
+    }
+    let label = crate::md::fold_count(hidden);
+    let dashes = line.cells[..close]
+        .iter()
+        .rev()
+        .take_while(|c| c.ch == '─')
+        .count();
+    let need = crate::md::str_width(&label) + 3;
+    if dashes <= need {
+        return;
+    }
+    let style = line.cells[close].style;
+    let mut tail = str_cells(" ", style);
+    tail.extend(str_cells(&label, theme::marker()));
+    tail.extend(str_cells(" ─", style));
+    close = line.cells.iter().rposition(|c| c.ch == '╮').unwrap_or(close);
+    line.cells.splice(close - need..close, tail);
 }
 
 /// The `▸ ` in front of a folded heading, standing for source column 0 the
@@ -552,6 +598,20 @@ struct Table {
     row: Vec<Vec<PCell>>,
 }
 
+/// One level of quote decoration around a row.
+#[derive(Clone, Copy, Debug)]
+enum Deco {
+    /// A plain blockquote's `▌ `.
+    Rail,
+    /// A callout card: its colour, how wide it is, and the source line of
+    /// its title, which its bottom edge answers to (so a fold on the title
+    /// keeps the edge under it).
+    Card {
+        style: Style,
+        w: usize,
+        title: Option<usize>,
+    },
+}
 struct Ren {
     /// The source, kept so cells can remember the column they came from.
     src: String,
@@ -572,6 +632,10 @@ struct Ren {
     box_w: usize,
     /// The colour of the open callout box, by its kind.
     box_style: Style,
+    /// The quote decoration around the line being built, outermost first:
+    /// a rail for each plain blockquote, a card for each callout. A callout
+    /// inside a callout is a card of its own, drawn inside the outer one.
+    quotes: Vec<Deco>,
     /// A quote has just opened and nothing has been drawn inside it yet, so a
     /// block asking for a blank line above itself does not get a rail-only row.
     quote_fresh: bool,
@@ -656,6 +720,7 @@ impl Ren {
             boxed: false,
             box_w: 0,
             box_style: Style::new(),
+            quotes: Vec::new(),
             quote_fresh: false,
             quote_blank: false,
             hang: 0,
@@ -795,7 +860,11 @@ impl Ren {
     /// Width the text of a line may use once the quote decoration around it
     /// — box edges and rails — has taken its share.
     fn inner_width(&self) -> usize {
-        let taken = self.rails * 2 + if self.boxed { 4 } else { 0 };
+        let taken = if self.quotes.is_empty() {
+            self.rails * 2 + if self.boxed { 4 } else { 0 }
+        } else {
+            self.taken()
+        };
         if self.width == usize::MAX {
             usize::MAX
         } else {
@@ -810,6 +879,17 @@ impl Ren {
             usize::MAX => 40,
             w => w,
         }
+    }
+
+    /// Columns the open quotes take: two for a rail, four for a card's edges.
+    fn taken(&self) -> usize {
+        self.quotes
+            .iter()
+            .map(|d| match d {
+                Deco::Rail => 2,
+                Deco::Card { .. } => 4,
+            })
+            .sum()
     }
 
     /// Width a callout box is drawn at. A width no page has means the caller
@@ -870,7 +950,35 @@ impl Ren {
     /// or a code line inside a quote is decorated like a paragraph is. A wide
     /// (panning) row is left bare: its edges would pan off with it.
     fn emit_line(&mut self, mut line: PLine) {
-        if !line.wide && (self.rails > 0 || self.boxed) {
+        if !line.wide && !self.quotes.is_empty() {
+            let mut cells = Vec::new();
+            let mut edges: Vec<(Style, usize)> = Vec::new();
+            let mut x = 0;
+            for deco in &self.quotes {
+                match *deco {
+                    Deco::Rail => cells.extend(str_cells(
+                        &format!("{} ", theme::QUOTE_BAR),
+                        theme::marker(),
+                    )),
+                    Deco::Card { style, w, .. } => {
+                        cells.extend(str_cells("│ ", style));
+                        edges.push((style, x + w));
+                    }
+                }
+                x += 2;
+            }
+            cells.extend(line.cells);
+            // the right edges, innermost first, each out at its card's width
+            for (style, end) in edges.into_iter().rev() {
+                let used = cells_width(&cells);
+                if used + 2 > end {
+                    break;
+                }
+                cells.extend(str_cells(&" ".repeat(end - used - 2), theme::PLAIN));
+                cells.extend(str_cells(" │", style));
+            }
+            line.cells = cells;
+        } else if !line.wide && (self.rails > 0 || self.boxed) {
             let mut cells = Vec::new();
             if self.boxed {
                 cells.extend(str_cells("│ ", self.box_style));
@@ -916,13 +1024,21 @@ impl Ren {
         }
     }
 
-    /// Open a callout box: the title row, in the accent.
-    fn open_box(&mut self, kind: &str, title: &str) {
-        let w = self.box_width();
-        self.box_w = w;
+    /// Open a callout box: the title row, in the accent, then the card on the
+    /// stack so the rows after it sit inside. A card inside another is as
+    /// wide as the room the outer one leaves it. A card that can fold
+    /// (`[!kind]-` or `[!kind]+`) carries `▾ ` before its glyph.
+    fn open_box(&mut self, kind: &str, title: &str, marker: Option<char>) {
+        let w = self.box_width().saturating_sub(self.taken());
         let style = theme::callout(kind);
-        self.box_style = style;
+        if !self.boxed {
+            self.box_w = w;
+            self.box_style = style;
+        }
         let mut cells = str_cells("╭─ ", style);
+        if marker.is_some() {
+            cells.extend(str_cells(theme::UNFOLDED, style));
+        }
         if let Some(g) = crate::md::callout_glyph(kind) {
             cells.extend(str_cells(&format!("{g} "), style));
         }
@@ -942,7 +1058,8 @@ impl Ren {
         let dashes = w.saturating_sub(cells_width(&row) + 1);
         row.extend(str_cells(&"─".repeat(dashes), style));
         row.extend(str_cells("╮", style));
-        self.out.lines.push(PLine {
+        let fresh = self.quote_fresh;
+        self.emit_line(PLine {
             cells: row,
             checkbox: None,
             image: None,
@@ -950,16 +1067,26 @@ impl Ren {
             wide: false,
             hang: 0,
         });
+        self.quote_fresh = fresh;
+        self.quotes.push(Deco::Card {
+            style,
+            w,
+            title: self.src_line,
+        });
     }
 
+    /// Close the innermost card: its bottom edge, inside whatever is around
+    /// it, answering to the title's line so a fold keeps the two together.
     fn close_box(&mut self) {
-        let w = self.box_w;
+        let Some(Deco::Card { style, w, title }) = self.quotes.pop() else {
+            return;
+        };
         let row = format!("╰{}╯", "─".repeat(w.saturating_sub(2)));
-        self.out.lines.push(PLine {
-            cells: str_cells(&row, self.box_style),
+        self.emit_line(PLine {
+            cells: str_cells(&row, style),
             checkbox: None,
             image: None,
-            src_line: self.src_line,
+            src_line: title,
             wide: false,
             hang: 0,
         });
@@ -1465,18 +1592,17 @@ impl Ren {
                 self.blank();
                 self.src_line = Some(src_line);
                 match callout_at(&self.src, range.start) {
-                    Some((kind, title, end)) if !self.boxed => {
-                        self.open_box(&kind, &title);
+                    Some((kind, title, marker, end)) => {
+                        self.open_box(&kind, &title, marker);
                         self.boxed = true;
                         // the `[!type] Title` line is the box's title, not
                         // its first paragraph: nothing in it is drawn again
                         self.wiki_until = self.wiki_until.max(end);
                     }
-                    Some((_, _, end)) => {
+                    None => {
                         self.rails += 1;
-                        self.wiki_until = self.wiki_until.max(end);
+                        self.quotes.push(Deco::Rail);
                     }
-                    None => self.rails += 1,
                 }
                 self.quote_fresh = true;
                 self.styles.push(theme::quote());
@@ -1484,11 +1610,20 @@ impl Ren {
             Event::End(TagEnd::BlockQuote(_)) => {
                 self.styles.pop();
                 self.flush();
-                if self.rails > 0 {
-                    self.rails -= 1;
-                } else if self.boxed {
-                    self.boxed = false;
-                    self.close_box();
+                match self.quotes.last() {
+                    Some(Deco::Rail) => {
+                        self.rails -= 1;
+                        self.quotes.pop();
+                    }
+                    Some(Deco::Card { .. }) => {
+                        // the flag first: the edge is drawn once the card is off
+                        // the stack, and must not fall back to the outer box
+                        self.boxed = self.quotes[..self.quotes.len() - 1]
+                            .iter()
+                            .any(|d| matches!(d, Deco::Card { .. }));
+                        self.close_box();
+                    }
+                    None => {}
                 }
                 self.quote_fresh = false;
                 self.quote_blank = false;
@@ -2062,10 +2197,11 @@ fn wrap_hang(cells: &[PCell], first: usize, rest: usize) -> Vec<Vec<PCell>> {
 }
 
 /// The Obsidian callout a blockquote starting at byte `start` opens with, if
-/// any: `> [!type] Title` (a `-`/`+` fold marker after the type is ignored).
-/// Returns (type, title, byte offset of the line ending), the offset so the
-/// caller can skip everything the parser hands back from that line.
-fn callout_at(src: &str, start: usize) -> Option<(String, String, usize)> {
+/// any: `> [!type] Title`, with the `-`/`+` fold marker after the type if
+/// there is one. Returns (type, title, marker, byte offset of the line
+/// ending), the offset so the caller can skip everything the parser hands
+/// back from that line.
+fn callout_at(src: &str, start: usize) -> Option<(String, String, Option<char>, usize)> {
     let rest = src.get(start..)?;
     let line_end = rest.find('\n').map_or(rest.len(), |i| i + 1);
     let line = &rest[..line_end];
@@ -2076,9 +2212,11 @@ fn callout_at(src: &str, start: usize) -> Option<(String, String, usize)> {
     if kind.is_empty() || kind.chars().any(|c| c.is_whitespace()) {
         return None;
     }
-    let after = inner[close + 1..].trim_start_matches(['-', '+']);
+    let rest = &inner[close + 1..];
+    let marker = rest.chars().next().filter(|c| matches!(c, '-' | '+'));
+    let after = rest.trim_start_matches(['-', '+']);
     let title = after.trim().to_string();
-    Some((kind.to_lowercase(), title, start + line_end))
+    Some((kind.to_lowercase(), title, marker, start + line_end))
 }
 
 /// pulldown's alignment in the shared vocabulary.
@@ -2731,6 +2869,54 @@ mod tests {
         assert!(top.contains("✓ tip ─"), "{top:?}");
         assert!(!top.contains('·'));
         assert!(rows.iter().any(|t| t.starts_with("│ body")));
+    }
+
+    #[test]
+    fn a_callout_inside_a_callout_is_a_nested_card() {
+        let md = "> [!note] Outer\n> a\n>\n> > [!tip] Inner\n> > b\n>\n> c\n";
+        let w = 40;
+        let r = render_wide(md, w);
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        let outer = rows.iter().position(|t| t.starts_with("╭─ i note · Outer")).expect("outer top");
+        let inner = rows.iter().position(|t| t.starts_with("│ ╭─ ✓ tip · Inner")).expect("inner top");
+        assert!(inner > outer);
+        assert!(rows[inner].ends_with("╮ │"), "{:?}", rows[inner]);
+        let b = rows.iter().find(|t| t.contains(" b ")).expect("inner body");
+        assert!(b.starts_with("│ │ b") && b.ends_with("│ │"), "{b:?}");
+        let inner_close = rows.iter().position(|t| t.starts_with("│ ╰")).expect("inner bottom");
+        assert!(inner_close > inner && rows[inner_close].ends_with("╯ │"), "{:?}", rows[inner_close]);
+        let c = rows.iter().position(|t| t.starts_with("│ c")).expect("outer body after");
+        assert!(c > inner_close);
+        let outer_close = rows.iter().rposition(|t| t.starts_with('╰')).unwrap();
+        assert!(outer_close > c);
+        for t in &rows[outer..=outer_close] {
+            assert_eq!(crate::md::str_width(t), w, "{t:?}");
+        }
+        // the inner card's edges answer to its title line, the outer's to its own
+        assert_eq!(r.lines[inner_close].src_line, Some(3));
+        assert_eq!(r.lines[outer_close].src_line, Some(0));
+    }
+
+    #[test]
+    fn a_foldable_callout_shows_its_state_in_the_reading_view() {
+        let md = "> [!tip]- Go\n> a\n> b\n\nafter\n";
+        // open, the marker says it can fold
+        let open = folded(md, &[], 30);
+        let rows: Vec<String> = open.lines.iter().map(|l| l.text()).collect();
+        assert!(rows.iter().any(|t| t.starts_with("╭─ ▾ ✓ tip · Go")), "{rows:?}");
+        // folded, the body is gone and the edge sits right under the title
+        let r = folded(md, &[0], 30);
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        let top = rows.iter().position(|t| t.starts_with('╭')).expect("top");
+        assert_eq!(rows[top], "╭─ ▸ ✓ tip · Go ─── 2 lines ─╮");
+        assert!(rows[top + 1].starts_with('╰'), "{rows:?}");
+        assert!(rows.iter().all(|t| !t.contains(" a ") && !t.contains(" b ")), "{rows:?}");
+        assert!(rows.iter().any(|t| t == "after"));
+        // a callout with no marker folds too, and keeps its width doing so
+        let r = folded("> [!tip] Go\n> a\n", &[0], 30);
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        let top = rows.iter().find(|t| t.starts_with('╭')).unwrap();
+        assert_eq!(top, "╭─ ▸ ✓ tip · Go ──── 1 line ─╮");
     }
 
     #[test]

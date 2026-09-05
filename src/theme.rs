@@ -452,6 +452,8 @@ pub fn bullet(depth: usize) -> &'static str {
 }
 /// In front of a folded heading.
 pub const FOLDED: &str = "\u{25b8} ";
+/// In front of an open callout that can fold.
+pub const UNFOLDED: &str = "\u{25be} ";
 pub const QUOTE_BAR: &str = "\u{258c}";
 /// A hard line break, in place of its trailing space or backslash.
 pub const HARD_BREAK: &str = "\u{21b5}";
