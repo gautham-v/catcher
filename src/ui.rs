@@ -488,6 +488,8 @@ fn layout_preview(app: &mut App, area: Rect) -> PreviewPage {
         .map_or((0, 0), |r| (r.end, content[..r.end].lines().count()));
     let mut rendered =
         crate::render::render_page_at(&content[skip..], first, width, app.config.table_style);
+    // the front matter comes back as a box of properties, not as the YAML
+    crate::render::prepend_properties(&mut rendered, content, width, crate::dates::today());
     // the same folds the editor has: one set per note, whichever view made them
     let folded = app.folded_lines();
     crate::render::apply_folds(&mut rendered, &app.visible, &folded, width);

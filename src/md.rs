@@ -1073,6 +1073,128 @@ pub mod tags {
 }
 
 // ---------------------------------------------------------------------------
+// Front matter
+//
+// The YAML between the leading `---` fences, read by hand and only as far as
+// notes actually write it: `key: value`, `key: [a, b]`, and `key:` over a
+// block of `  - item` lines. There is no YAML crate behind this on purpose —
+// front matter is a handful of properties, and a parser that understood
+// anchors and multi-line scalars would be most of a dependency for none of
+// the notes anyone keeps. The reading view draws these as a properties box,
+// and the index reads `tags` and `aliases` out of them.
+// ---------------------------------------------------------------------------
+
+/// One top-level key of a note's front matter and the values under it. A
+/// scalar is one value; an inline `[a, b]` or a block list is several.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Property {
+    pub key: String,
+    pub values: Vec<String>,
+    /// The file line the key sits on, so a click on the drawn row can land
+    /// the cursor on it.
+    pub line: usize,
+}
+
+/// Every top-level property of the front matter that opens `content`, in
+/// file order; empty when the note has none. An indented line belongs to the
+/// key above it (a list item, or a nested map drawn as its raw `k: v` text)
+/// and a comment line is nobody's.
+pub fn front_matter_properties(content: &str) -> Vec<Property> {
+    let lines: Vec<&str> = content.lines().collect();
+    let Some(end) = crate::notes::front_matter_end(lines.iter().copied()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Property> = Vec::new();
+    let mut i = 1;
+    while i < end {
+        let line = lines[i];
+        let key_line = i;
+        i += 1;
+        if line.starts_with([' ', '\t', '-', '#']) {
+            continue;
+        }
+        let Some((key, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let rest = rest.trim();
+        let mut values = Vec::new();
+        if let Some(inner) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+            values.extend(inner.split(',').map(unquote).filter(|v| !v.is_empty()));
+        } else if !rest.is_empty() {
+            let v = unquote(rest);
+            if !v.is_empty() {
+                values.push(v);
+            }
+        } else {
+            // a block: `- item` rows, indented or not, until the next key
+            while i < end {
+                let l = lines[i];
+                match l.trim_start().strip_prefix('-') {
+                    Some(item) => {
+                        let v = unquote(item);
+                        if !v.is_empty() {
+                            values.push(v);
+                        }
+                    }
+                    None if l.starts_with([' ', '\t']) => {
+                        let v = l.trim();
+                        if !v.is_empty() && !v.starts_with('#') {
+                            values.push(v.to_string());
+                        }
+                    }
+                    None => break,
+                }
+                i += 1;
+            }
+        }
+        out.push(Property {
+            key: key.to_string(),
+            values,
+            line: key_line,
+        });
+    }
+    out
+}
+
+/// The values under `key` in the front matter that opens `content` — every
+/// item of a list, or the one scalar — with quotes shed; empty for a note
+/// without the key.
+pub fn front_matter_values(content: &str, key: &str) -> Vec<String> {
+    front_matter_properties(content)
+        .into_iter()
+        .find(|p| p.key == key)
+        .map(|p| p.values)
+        .unwrap_or_default()
+}
+
+/// The other names a note answers to: its front matter `aliases`, each in the
+/// form [`link_key`] compares on. `aliases: a, b` written without brackets is
+/// read as the list it was meant to be.
+pub fn front_matter_aliases(content: &str) -> Vec<String> {
+    front_matter_values(content, "aliases")
+        .iter()
+        .flat_map(|v| v.split(','))
+        .map(link_key)
+        .filter(|a| !a.is_empty())
+        .collect()
+}
+
+/// A YAML scalar as a person wrote it: trimmed, and the quotes taken off.
+fn unquote(text: &str) -> String {
+    let t = text.trim();
+    let t = t
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| t.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(t);
+    t.trim().to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Wikilinks
 //
 // `[[note]]` is how an Obsidian vault spells a link from one of its own notes

@@ -61,7 +61,8 @@ impl Rename {
     /// part of a path-shaped target and a written-out `.md` both survive, so
     /// `[[stories/spec.md]]` becomes `[[stories/plan.md]]` and not `[[plan]]`.
     fn retarget(&self, raw: &str) -> Option<String> {
-        let reached_old = index::resolve(&self.before, raw).is_some_and(|e| e.path == self.old);
+        let reached_old =
+            index::resolve_by_name(&self.before, raw).is_some_and(|e| e.path == self.old);
         if !reached_old {
             return None;
         }
@@ -77,7 +78,7 @@ impl Rename {
         let target = format!("{head}{}{suffix}", self.stem);
         // another note may already own the new name; then the rewrite would
         // point somewhere else, and a link left broken is the honest outcome
-        index::resolve(&self.after, &target)
+        index::resolve_by_name(&self.after, &target)
             .is_some_and(|e| e.path == self.new)
             .then_some(target)
     }
@@ -169,12 +170,14 @@ fn views(found: &[(PathBuf, String)], old: &Path, new: &Path) -> (Vec<Entry>, Ve
     let mut before = Vec::new();
     let mut after = Vec::new();
     for (path, rel) in found {
+        let (title, aliases) = index::head_at(path);
         let entry = Entry {
             path: path.clone(),
-            title: index::title_at(path),
+            title,
             rel: rel.clone(),
             folder: String::new(),
             modified: std::time::SystemTime::UNIX_EPOCH,
+            aliases,
         };
         if path == new {
             let mut moved = entry.clone();
@@ -287,6 +290,22 @@ mod tests {
         assert_eq!(read(&other), "see [[shopping]] later\n");
         assert_eq!(r.links, 1);
         assert_eq!(r.notes, vec![other]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_link_written_to_a_front_matter_alias_is_not_rewritten() {
+        let dir = tmpdir("front-alias");
+        write(
+            &dir,
+            "groceries.md",
+            "---\naliases: [shopping list]\n---\n# Groceries\n",
+        );
+        let other = write(&dir, "other.md", "[[shopping list]] and [[groceries]]\n");
+        let r = renamed(&dir, "groceries.md", "food.md");
+        // the alias still reaches the note after the rename; only the filename link moved
+        assert_eq!(read(&other), "[[shopping list]] and [[food]]\n");
+        assert_eq!(r.links, 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

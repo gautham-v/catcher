@@ -27,6 +27,10 @@ pub struct Entry {
     /// one reached through the recents list.
     pub folder: String,
     pub modified: SystemTime,
+    /// The other names the note answers to — its front matter `aliases`,
+    /// each already put through [`crate::md::link_key`] — so `[[launch]]`
+    /// reaches a note filed under some longer name.
+    pub aliases: Vec<String>,
 }
 
 impl Entry {
@@ -109,14 +113,23 @@ pub(crate) fn walk_notes(
 /// The title of the note at `path`, without reading the whole file. Shared
 /// with the linked-mentions walk, which needs the same title for a file it
 /// decided not to read whole — a note both walks must rank the same way.
+#[cfg(test)]
 pub(crate) fn title_at(path: &Path) -> String {
+    head_at(path).0
+}
+
+/// The title and the front matter aliases of the note at `path`, from one
+/// read of its head: both live at the top of the file, and a walk that opened
+/// every note twice would be a walk you could feel.
+pub(crate) fn head_at(path: &Path) -> (String, Vec<String>) {
     let mut buf = vec![0u8; TITLE_BYTES];
     let read = fs::File::open(path)
         .and_then(|mut f| f.read(&mut buf))
         .unwrap_or(0);
+    let head = String::from_utf8_lossy(&buf[..read]);
     // `title_of` steps over front matter itself, so this is the same title
     // the palette shows for a note that is already loaded
-    title_of(&String::from_utf8_lossy(&buf[..read]))
+    (title_of(&head), crate::md::front_matter_aliases(&head))
 }
 
 /// What to show beside a note's title: its folder relative to the notes dir,
@@ -189,12 +202,14 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
             .to_string_lossy()
             .into_owned();
         let folder = folder_of(&path, &home_root);
+        let (title, aliases) = head_at(&path);
         entries.push(Entry {
-            title: title_at(&path),
+            title,
             path,
             rel,
             folder,
             modified,
+            aliases,
         });
     })
     .unwrap_or_default();
@@ -212,14 +227,16 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
         let modified = fs::metadata(&path)
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
+        let (title, aliases) = head_at(&path);
         entries.push(Entry {
-            title: title_at(&path),
+            title,
             // outside every root, so the whole path is what a query has to
             // match against, and the folder is what is worth showing
             rel: short(&path),
             folder: folder_of(&path, &home_root),
             path,
             modified,
+            aliases,
         });
     }
 
@@ -262,6 +279,8 @@ pub fn link_keys(entry: &Entry) -> Vec<String> {
     for (i, _) in rel.match_indices('/') {
         keys.push(rel[i + 1..].to_string());
     }
+    // and the names its front matter says it also goes by
+    keys.extend(entry.aliases.iter().cloned());
     keys.retain(|k| !k.is_empty());
     keys
 }
@@ -271,13 +290,28 @@ pub fn link_keys(entry: &Entry) -> Vec<String> {
 /// ties broken by the shortest path, because a link that could mean two notes
 /// most likely means the one nearer the top of the vault.
 pub fn resolve<'a>(entries: &'a [Entry], target: &str) -> Option<&'a Entry> {
+    resolve_with(entries, target, true)
+}
+
+/// [`resolve`] without the alias fallback: only a note's own names count.
+/// The rename rewrite asks this one, because a link written to an alias
+/// still reaches the note after the file is renamed and must be left alone.
+pub fn resolve_by_name<'a>(entries: &'a [Entry], target: &str) -> Option<&'a Entry> {
+    resolve_with(entries, target, false)
+}
+
+fn resolve_with<'a>(entries: &'a [Entry], target: &str, aliases: bool) -> Option<&'a Entry> {
     let want = crate::md::link_key(target);
     if want.is_empty() {
         return None;
     }
     entries
         .iter()
-        .filter_map(|e| rank(e, &want).map(|r| (r, e)))
+        .filter_map(|e| {
+            rank(e, &want)
+                .or_else(|| (aliases && e.aliases.contains(&want)).then_some(3))
+                .map(|r| (r, e))
+        })
         // `scan` returns entries in filesystem order, which is not stable
         // between runs, so the path is the last word rather than the order
         // they happened to arrive in
@@ -330,34 +364,9 @@ pub fn tags_of(content: &str) -> Vec<String> {
 /// with or without brackets — or as a YAML list on the lines under it.
 /// Only a top-level `tags:` counts; an indented one belongs to some other key.
 pub fn front_matter_tags(content: &str) -> Vec<String> {
-    let lines: Vec<&str> = content.lines().collect();
-    let Some(end) = crate::notes::front_matter_end(lines.iter().copied()) else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    let mut i = 1;
-    while i < end {
-        let Some(rest) = lines[i].strip_prefix("tags:") else {
-            i += 1;
-            continue;
-        };
-        let rest = rest.trim();
-        if !rest.is_empty() {
-            push_tags(&mut out, rest.trim_start_matches('[').trim_end_matches(']'));
-            i += 1;
-            continue;
-        }
-        // a list: `- a` rows, indented or not, until the next key
-        i += 1;
-        while i < end {
-            let line = lines[i];
-            match line.trim_start().strip_prefix('-') {
-                Some(item) => push_tags(&mut out, item),
-                None if line.starts_with([' ', '\t']) => {}
-                None => break,
-            }
-            i += 1;
-        }
+    for v in crate::md::front_matter_values(content, "tags") {
+        push_tags(&mut out, &v);
     }
     out
 }
@@ -551,7 +560,62 @@ mod tests {
             rel: rel.to_string(),
             folder: String::new(),
             modified: SystemTime::UNIX_EPOCH,
+            aliases: Vec::new(),
         }
+    }
+
+    /// An entry whose front matter says it also goes by `aliases`.
+    fn aliased(rel: &str, title: &str, aliases: &[&str]) -> Entry {
+        let mut e = entry(rel, title);
+        e.aliases = aliases.iter().map(|a| crate::md::link_key(a)).collect();
+        e
+    }
+
+    #[test]
+    fn a_wikilink_falls_back_to_a_front_matter_alias_after_every_real_name() {
+        let entries = vec![
+            aliased(
+                "projects/big-launch.md",
+                "The Big Launch",
+                &["launch", "Go Live"],
+            ),
+            entry("launch.md", "Launch"),
+        ];
+        // a note actually called launch.md wins over an alias
+        assert_eq!(resolve(&entries, "launch").unwrap().rel, "launch.md");
+        // an alias reaches the note when nothing is named that, whatever the case
+        assert_eq!(
+            resolve(&entries, "go live").unwrap().rel,
+            "projects/big-launch.md"
+        );
+        assert_eq!(
+            resolve(&entries, "GO LIVE").unwrap().rel,
+            "projects/big-launch.md"
+        );
+        assert!(resolve(&entries, "nothing").is_none());
+        // the by-name resolver does not know aliases at all
+        assert!(resolve_by_name(&entries, "go live").is_none());
+        // and the alias is one of the names the styling calls resolvable
+        assert!(link_keys(&entries[0]).contains(&"go live".to_string()));
+    }
+
+    #[test]
+    fn a_scanned_note_carries_the_aliases_its_front_matter_declares() {
+        let dir = crate::testutil::tmpdir("index", "aliases");
+        fs::write(
+            dir.join("big-launch.md"),
+            "---
+aliases: [launch, \"Go Live\"]
+---
+# The Big Launch
+",
+        )
+        .unwrap();
+        let entries = scan(std::slice::from_ref(&dir), &[]);
+        let e = entries.iter().find(|e| e.rel == "big-launch.md").unwrap();
+        assert_eq!(e.title, "The Big Launch");
+        assert_eq!(e.aliases, vec!["launch", "go live"]);
+        assert_eq!(resolve(&entries, "Launch").unwrap().rel, "big-launch.md");
     }
 
     #[test]

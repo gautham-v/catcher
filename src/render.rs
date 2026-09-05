@@ -256,6 +256,130 @@ const MAX_EXCERPT_COLS: usize = 80;
 /// long name cannot push every excerpt off the page.
 const MAX_NAME_COLS: usize = 28;
 
+/// Put the note's front matter at the top of an already-rendered page, drawn
+/// as a box of properties rather than the YAML the editor shows: one row per
+/// key, keys in one column, `tags` as the `#tags` they are and clickable like
+/// the inline kind, `aliases` run together, and an ISO date followed by how
+/// far away it is from `today`.
+///
+/// Prepended rather than rendered because pulldown-cmark has no notion of front
+/// matter and the body it is handed already has the block cut off. Every row
+/// carries the file line of its key, so a click on a property lands the cursor
+/// on the line that sets it; the frame carries none.
+///
+/// A note without front matter gets nothing, not even an empty frame.
+pub fn prepend_properties(r: &mut Rendered, content: &str, width: usize, today: (i32, u32, u32)) {
+    let props = crate::md::front_matter_properties(content);
+    if props.is_empty() {
+        return;
+    }
+    let border = theme::border();
+    let width = if width == usize::MAX {
+        40
+    } else {
+        width.max(8)
+    };
+    let inner = width - 4;
+    let keyw = props
+        .iter()
+        .map(|p| crate::md::str_width(&p.key))
+        .max()
+        .unwrap_or(0)
+        .min(inner / 2);
+
+    let mut lines: Vec<PLine> = Vec::with_capacity(props.len() + 3);
+    let mut top = str_cells("┌ ", border);
+    top.extend(str_cells("properties", theme::grey()));
+    top.push(cell(' ', border));
+    let fill = width.saturating_sub(cells_width(&top) + 1);
+    top.extend(str_cells(&"─".repeat(fill), border));
+    top.push(cell('┐', border));
+    lines.push(PLine {
+        cells: top,
+        ..Default::default()
+    });
+
+    for p in &props {
+        let mut cells = str_cells("│ ", border);
+        let key = truncate_cells(&str_cells(&p.key, theme::grey()), keyw);
+        let pad = keyw - cells_width(&key);
+        cells.extend(key);
+        cells.extend(str_cells(&" ".repeat(pad + 2), theme::PLAIN));
+        let room = inner.saturating_sub(keyw + 2);
+        let value = property_cells(r, p, today);
+        cells.extend(truncate_cells(&value, room));
+        let rest = width.saturating_sub(cells_width(&cells) + 1);
+        cells.extend(str_cells(&" ".repeat(rest), theme::PLAIN));
+        cells.push(cell('│', border));
+        lines.push(PLine {
+            cells,
+            src_line: Some(p.line),
+            ..Default::default()
+        });
+    }
+
+    let mut bottom = str_cells("└", border);
+    bottom.extend(str_cells(&"─".repeat(width - 2), border));
+    bottom.push(cell('┘', border));
+    lines.push(PLine {
+        cells: bottom,
+        ..Default::default()
+    });
+    lines.push(PLine::default());
+    lines.append(&mut r.lines);
+    r.lines = lines;
+}
+
+/// The value column of one property row. Tags become clickable `#tags`,
+/// aliases and any other list are joined with a middle dot, and a lone date
+/// says how far off it is.
+fn property_cells(r: &mut Rendered, p: &crate::md::Property, today: (i32, u32, u32)) -> Vec<PCell> {
+    let mut cells = Vec::new();
+    if p.key == "tags" {
+        // `tags: a, b` and `tags: [a, b]` both arrive as text to split
+        let tags: Vec<String> = p
+            .values
+            .iter()
+            .flat_map(|v| v.split(|c: char| c == ',' || c.is_whitespace()))
+            .map(|t| crate::md::tag_key(t.trim_matches(|c| c == '"' || c == '\'')))
+            .filter(|t| !t.is_empty())
+            .collect();
+        for (i, tag) in tags.iter().enumerate() {
+            if i > 0 {
+                cells.push(cell(' ', theme::PLAIN));
+            }
+            let idx = r.urls.len();
+            r.urls.push(crate::md::LinkTarget::Tag(tag.clone()).href());
+            let mut run = str_cells(&format!("#{tag}"), theme::tag());
+            for c in &mut run {
+                c.link = Some(idx);
+            }
+            cells.extend(run);
+        }
+        return cells;
+    }
+    for (i, v) in p.values.iter().enumerate() {
+        if i > 0 {
+            cells.extend(str_cells(" · ", theme::grey()));
+        }
+        cells.extend(str_cells(v, theme::PLAIN));
+        if let Some(date) = crate::dates::parse_iso(v) {
+            let hint = crate::dates::relative(date, today);
+            cells.extend(str_cells(&format!("  {hint}"), theme::marker()));
+        }
+    }
+    cells
+}
+
+fn cell(ch: char, style: Style) -> PCell {
+    PCell {
+        ch,
+        style,
+        link: None,
+        src: None,
+    }
+}
+
 /// An excerpt styled the way the editor would style it — bold as bold, a
 /// wikilink as its label — and cut to `room` columns around the link at
 /// `link` (a char span in `excerpt`), so the link itself is always on screen.
@@ -2128,6 +2252,40 @@ mod tests {
         let (skip, first) = crate::notes::front_matter_range(content)
             .map_or((0, 0), |r| (r.end, content[..r.end].lines().count()));
         render_page_at(&content[skip..], first, usize::MAX, TableStyle::default())
+    }
+
+    #[test]
+    fn front_matter_is_drawn_as_a_box_of_properties_above_the_body() {
+        let content = "---\ntitle: Launch\ndue: 2026-10-10\ntags: [work, q3]\naliases:\n  - launch\n  - go live\n---\n# Title\n";
+        let mut r = body_of(content);
+        prepend_properties(&mut r, content, 60, (2026, 9, 5));
+        let page: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(page[0].starts_with("┌ properties ─"));
+        assert!(page[0].ends_with('┐'));
+        assert_eq!(page[0].chars().count(), 60);
+        assert!(page[1].starts_with("│ title    Launch"));
+        assert!(page[1].ends_with('│'));
+        assert!(page[2].contains("due      2026-10-10  in 5 weeks"));
+        assert!(page[3].contains("tags     #work #q3"));
+        assert!(page[4].contains("aliases  launch · go live"));
+        assert!(page[5].starts_with('└') && page[5].ends_with('┘'));
+        assert_eq!(page[6], "");
+        assert!(page[7].contains("Title"));
+        // each row knows the line its key is on; the frame knows none
+        assert_eq!(r.lines[0].src_line, None);
+        assert_eq!(r.lines[1].src_line, Some(1));
+        assert_eq!(r.lines[4].src_line, Some(4));
+        // a tag is a click away from the notes that carry it
+        let tag = r.lines[3].cells.iter().find(|c| c.ch == '#').unwrap();
+        assert_eq!(
+            crate::md::LinkTarget::parse(r.url(tag.link.unwrap()).unwrap()),
+            crate::md::LinkTarget::Tag("work".to_string())
+        );
+        assert_eq!(tag.style.fg, theme::tag().fg);
+        // and a note without front matter is left exactly as it was
+        let mut plain = body_of("# Title\n");
+        prepend_properties(&mut plain, "# Title\n", 60, (2026, 9, 5));
+        assert!(plain.lines[0].text().contains("Title"));
     }
 
     #[test]

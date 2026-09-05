@@ -348,6 +348,7 @@ mod tests {
             rel: rel.to_string(),
             folder,
             modified: SystemTime::UNIX_EPOCH,
+            aliases: Vec::new(),
         }
     }
 
@@ -360,6 +361,7 @@ mod tests {
             rel: rel.to_string(),
             folder: folder.to_string(),
             modified: SystemTime::UNIX_EPOCH,
+            aliases: Vec::new(),
         }
     }
 
