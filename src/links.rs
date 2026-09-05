@@ -9,7 +9,7 @@
 //! The alias and the `#heading` are left as they were typed.
 
 use crate::index::{self, Entry};
-use crate::notes;
+use crate::notes::{self, write_atomic};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -203,18 +203,6 @@ fn sibling_rel(rel: &str, old: &Path) -> String {
         Some(i) => format!("{}{name}", &rel[..=i]),
         None => name,
     }
-}
-
-/// Write `body` beside `path` and move it into place, so a crash between the
-/// two leaves the old note whole rather than half a new one.
-fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{name}.tmp"));
-    fs::write(&tmp, body)?;
-    fs::rename(&tmp, path)
 }
 
 /// The note at `old` now lives at `new`: rewrite every link under `roots`

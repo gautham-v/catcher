@@ -305,6 +305,14 @@ fn tui(launch: cli::Launch) -> Result<()> {
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Result<()> {
+    let result = run_loop(terminal, app);
+    // saved whether the loop ended by quitting or by an error, so a terminal
+    // hiccup never costs the note being edited
+    app.save_now();
+    result
+}
+
+fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Result<()> {
     use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
     while !app.quit {
         // a frame goes to the terminal as one piece: ratatui clears the screen
@@ -325,7 +333,6 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Result<()
         }
         app.tick();
     }
-    app.save_now();
     Ok(())
 }
 

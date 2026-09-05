@@ -222,6 +222,18 @@ pub fn tracks(stem: &str, title: &str) -> bool {
 
 /// Write PNG bytes into `attachments_dir` under a name derived from the note's
 /// title, never clobbering an existing file. Returns the file's path.
+/// Write `body` beside `path` and move it into place, so a crash between the
+/// two leaves the old file whole rather than half a new one.
+pub(crate) fn write_atomic(path: &Path, body: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.tmp"));
+    fs::write(&tmp, body)?;
+    fs::rename(&tmp, path)
+}
+
 pub fn write_attachment(attachments_dir: &Path, title: &str, png: &[u8]) -> Result<PathBuf> {
     fs::create_dir_all(attachments_dir)
         .with_context(|| format!("creating {}", attachments_dir.display()))?;
@@ -234,7 +246,7 @@ pub fn write_attachment(attachments_dir: &Path, title: &str, png: &[u8]) -> Resu
         }
         n += 1;
     };
-    fs::write(&path, png).with_context(|| format!("writing {}", path.display()))?;
+    write_atomic(&path, png).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
 }
 
@@ -311,7 +323,8 @@ pub fn unique_path(dir: &Path, title: &str, keep: Option<&Path>) -> PathBuf {
 /// `allow_rename` is false for sessions rooted outside the notes dir, where
 /// foreign filenames must never move. Updates `note.path`/`disk_title`.
 pub fn save(dir: &Path, note: &mut Note, allow_rename: bool) -> Result<PathBuf> {
-    fs::write(&note.path, &note.content)?;
+    write_atomic(&note.path, &note.content)
+        .with_context(|| format!("writing {}", note.path.display()))?;
     let tracking = note
         .path
         .file_stem()
@@ -388,7 +401,7 @@ pub fn create_named(dir: &Path, stem: &str, content: String) -> Result<Note> {
     let stem = stem.trim().trim_end_matches(".md").trim();
     let stem = if stem.is_empty() { "untitled" } else { stem };
     let path = free_path(dir, stem, None);
-    fs::write(&path, &content).with_context(|| format!("writing {}", path.display()))?;
+    write_atomic(&path, &content).with_context(|| format!("writing {}", path.display()))?;
     Ok(Note {
         disk_title: title_of(&content),
         stamp: stamp_of(&path),
@@ -402,7 +415,7 @@ pub fn create_named(dir: &Path, stem: &str, content: String) -> Result<Note> {
 pub fn create_with(dir: &Path, content: String) -> Result<Note> {
     let title = title_of(&content);
     let path = unique_path(dir, &title, None);
-    fs::write(&path, &content).with_context(|| format!("writing {}", path.display()))?;
+    write_atomic(&path, &content).with_context(|| format!("writing {}", path.display()))?;
     Ok(Note {
         stamp: stamp_of(&path),
         path,
@@ -415,6 +428,18 @@ pub fn create_with(dir: &Path, content: String) -> Result<Note> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_atomic_replaces_content_and_leaves_no_tmp() {
+        let dir = tmpdir("write_atomic");
+        let path = dir.join("a.md");
+        write_atomic(&path, "old").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+        write_atomic(&path, "new").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert!(!dir.join(".a.md.tmp").exists());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+    }
 
     #[test]
     fn front_matter_is_stepped_over_not_read_as_the_title() {
