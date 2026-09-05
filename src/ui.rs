@@ -1160,6 +1160,8 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             "browse folders — tab for contents"
         } else if contents {
             "type to search note contents"
+        } else if quick && app.tag_scanning() {
+            "scanning for notes carrying this tag…"
         } else if quick && app.tag_filter.is_some() {
             "notes carrying this tag — type to narrow"
         } else if quick {

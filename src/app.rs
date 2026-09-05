@@ -468,6 +468,9 @@ pub struct PreviewPage {
     pub widest: usize,
 }
 
+/// What a tag walk answers with: the fresh index, and the hits in it.
+type TagScan = (Vec<index::Entry>, Vec<usize>);
+
 pub struct App {
     pub config: Config,
     /// Bumped whenever `config` is replaced, so anything laid out under the
@@ -542,6 +545,11 @@ pub struct App {
     /// A walk started on a thread and not yet collected — the launch one,
     /// which must not hold up the first frame.
     index_rx: Option<std::sync::mpsc::Receiver<Vec<index::Entry>>>,
+    /// The tag scan in flight for `tag_filter`, if one is: the tag it is
+    /// for, and the fresh index plus the hits in it that the worker answers
+    /// with. `None` once the answer has landed, so the overlay's hint can
+    /// tell "scanning" from "no query yet".
+    tag_rx: Option<(String, std::sync::mpsc::Receiver<TagScan>)>,
     /// The ^O tab on screen: recent, tree, or contents.
     pub tab: QuickTab,
     /// Every body the contents tab searches, one per `open_index` entry, read
@@ -846,6 +854,7 @@ impl App {
             dragging: false,
             open_index: Vec::new(),
             index_rx: None,
+            tag_rx: None,
             tab: QuickTab::Recent,
             tag_filter: None,
             tree_open: BTreeSet::new(),
@@ -1339,6 +1348,7 @@ impl App {
         changed |= self.maybe_autosave();
         changed |= self.follow_system_theme();
         changed |= self.poll_index_scan();
+        changed |= self.poll_tag_scan();
         changed |= self.maybe_peek();
         // a filename that followed its title on save; the title is the
         // terminal's, not the frame's
@@ -1576,9 +1586,8 @@ impl App {
         };
         match rx.try_recv() {
             Ok(entries) => {
-                self.open_index = entries;
+                self.adopt_index(entries);
                 self.index_rx = None;
-                self.refresh_links();
                 true
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
@@ -1586,6 +1595,76 @@ impl App {
             // for any more, and ^O will walk again itself
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.index_rx = None;
+                true
+            }
+        }
+    }
+
+    /// Take a fresh walk as the index. A tag's list is indices into the old
+    /// one, so it is carried across by path — the same notes, wherever the
+    /// new walk ranks them — and the selection is kept inside the rows.
+    fn adopt_index(&mut self, entries: Vec<index::Entry>) {
+        if let Some((_, hits)) = self.tag_filter.as_mut() {
+            let paths: Vec<PathBuf> = hits
+                .iter()
+                .filter_map(|&i| self.open_index.get(i).map(|e| e.path.clone()))
+                .collect();
+            *hits = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| paths.contains(&e.path))
+                .map(|(i, _)| i)
+                .collect();
+        }
+        self.open_index = entries;
+        self.refresh_links();
+        if self.overlay == Overlay::QuickOpen {
+            let rows = match self.tab {
+                QuickTab::Tree => self.browse_rows().len(),
+                QuickTab::Contents => self.contents_rows().len(),
+                QuickTab::Recent => self.open_items().len(),
+            };
+            self.selected = self.selected.min(rows.saturating_sub(1));
+        }
+    }
+
+    /// Whether the tag list on screen is still being gathered.
+    pub fn tag_scanning(&self) -> bool {
+        self.tag_rx.is_some()
+    }
+
+    /// Take a tag scan started by [`App::open_tag`] if it has finished.
+    fn poll_tag_scan(&mut self) -> bool {
+        let Some((tag, rx)) = self.tag_rx.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok((entries, hits)) => {
+                let tag = tag.clone();
+                self.tag_rx = None;
+                // the walk is a fresh index whatever the tag turned up
+                self.tag_filter = None;
+                self.adopt_index(entries);
+                // the overlay may have moved on to something else meanwhile
+                if self.overlay != Overlay::QuickOpen {
+                    return true;
+                }
+                if hits.is_empty() {
+                    self.overlay = Overlay::None;
+                    self.flash(format!("no notes tagged #{tag}"));
+                } else {
+                    self.tag_filter = Some((tag, hits));
+                    self.selected = 0;
+                }
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.tag_rx = None;
+                self.tag_filter = None;
+                if self.overlay == Overlay::QuickOpen {
+                    self.overlay = Overlay::None;
+                }
                 true
             }
         }
@@ -2237,12 +2316,45 @@ impl App {
                 self.open_path(&path);
                 // a note that is still just its title is for writing, not reading
                 self.view = View::Edit;
-                // the link that made this note stops being red at once
-                self.refresh_index();
+                // the link that made this note stops being red at once —
+                // one entry pushed, not a walk of the whole vault
+                self.index_add(&path, &name);
                 self.flash(format!("created \u{201c}{name}\u{201d}"));
             }
             Err(e) => self.flash(format!("create failed: {e}")),
         }
+    }
+
+    /// Put a note this session just made into the index, where a walk would
+    /// have put it: at the front, as the most recently opened. The title is
+    /// the name it was made with, since that is all the file holds yet.
+    fn index_add(&mut self, path: &Path, name: &str) {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if self.open_index.iter().any(|e| e.path == path) {
+            return;
+        }
+        let roots = self.index_roots();
+        let home_root = roots.first().cloned().unwrap_or_default();
+        let home_root = std::fs::canonicalize(&home_root).unwrap_or(home_root);
+        let rel = roots
+            .iter()
+            .filter_map(|r| std::fs::canonicalize(r).ok())
+            .find_map(|r| {
+                path.strip_prefix(&r)
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| index::short(&path));
+        let entry = index::Entry {
+            title: name.to_string(),
+            rel,
+            folder: index::folder_of(&path, &home_root),
+            modified: std::time::SystemTime::now(),
+            aliases: Vec::new(),
+            path,
+        };
+        self.open_index.insert(0, entry);
+        self.refresh_links();
     }
 
     /// A typed path — `~/vault/spec.md`, `/tmp/x.md` — as an openable file.
@@ -2277,8 +2389,10 @@ impl App {
         self.query.clear();
         self.selected = 0;
         self.tag_filter = None;
-        // before `enter_browse`, which reads the index it builds
-        self.refresh_index();
+        self.tag_rx = None;
+        // the list already known is shown at once; a fresh walk lands through
+        // `poll_index_scan`, and the rows re-rank when it does
+        self.start_index_scan();
         self.overlay = Overlay::QuickOpen;
         self.tab = QuickTab::Recent;
         if self.config.quick_open_browse {
@@ -4185,17 +4299,29 @@ impl App {
     /// Following a `#tag`: ^O, cut to the notes that carry it. Saved first,
     /// because the tag scan reads files and the note on screen may have just
     /// gained the tag being followed.
+    ///
+    /// The scan reads every note, so it runs on a thread the way the mentions
+    /// scan does: the overlay opens at once saying it is looking, and
+    /// [`App::poll_tag_scan`] fills it in — or shuts it, if nothing carries
+    /// the tag.
     fn open_tag(&mut self, tag: &str) {
         self.save_now();
-        self.refresh_index();
-        let hits = index::with_tag(&self.open_index, tag);
-        if hits.is_empty() {
-            self.flash(format!("no notes tagged #{tag}"));
-            return;
-        }
+        let roots = self.index_roots();
+        let recents = self.recents.clone();
+        let want = tag.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let entries = index::scan(&roots, &recents);
+            let hits = index::with_tag(&entries, &want);
+            let _ = tx.send((entries, hits));
+        });
+        // an ordinary walk in flight would answer with an index the hits do
+        // not belong to; the tag walk is a fresh one anyway
+        self.index_rx = None;
+        self.tag_rx = Some((tag.to_string(), rx));
         self.query.clear();
         self.selected = 0;
-        self.tag_filter = Some((tag.to_string(), hits));
+        self.tag_filter = Some((tag.to_string(), Vec::new()));
         self.tab = QuickTab::Recent;
         self.overlay = Overlay::QuickOpen;
     }

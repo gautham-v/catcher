@@ -122,9 +122,17 @@ pub(crate) fn title_at(path: &Path) -> String {
 /// read of its head: both live at the top of the file, and a walk that opened
 /// every note twice would be a walk you could feel.
 pub(crate) fn head_at(path: &Path) -> (String, Vec<String>) {
-    let mut buf = vec![0u8; TITLE_BYTES];
+    head_into(path, &mut Vec::new())
+}
+
+/// [`head_at`] with the read buffer supplied, so a walk over thousands of
+/// notes fills one 4 KiB buffer over and over instead of zeroing a fresh one
+/// per file.
+fn head_into(path: &Path, buf: &mut Vec<u8>) -> (String, Vec<String>) {
+    buf.clear();
+    buf.resize(TITLE_BYTES, 0);
     let read = fs::File::open(path)
-        .and_then(|mut f| f.read(&mut buf))
+        .and_then(|mut f| f.read(buf))
         .unwrap_or(0);
     let head = String::from_utf8_lossy(&buf[..read]);
     // `title_of` steps over front matter itself, so this is the same title
@@ -191,6 +199,7 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
     let home_root = roots.first().cloned().unwrap_or_default();
     let home_root = fs::canonicalize(&home_root).unwrap_or(home_root);
     let mut entries: Vec<Entry> = Vec::new();
+    let mut buf = Vec::new();
     let mut seen = walk_notes(roots, None, |root, path, entry| {
         let modified = entry
             .metadata()
@@ -202,7 +211,7 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
             .to_string_lossy()
             .into_owned();
         let folder = folder_of(&path, &home_root);
-        let (title, aliases) = head_at(&path);
+        let (title, aliases) = head_into(&path, &mut buf);
         entries.push(Entry {
             title,
             path,
@@ -227,7 +236,7 @@ pub fn scan(roots: &[PathBuf], recent: &[PathBuf]) -> Vec<Entry> {
         let modified = fs::metadata(&path)
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        let (title, aliases) = head_at(&path);
+        let (title, aliases) = head_into(&path, &mut buf);
         entries.push(Entry {
             title,
             // outside every root, so the whole path is what a query has to
@@ -756,6 +765,25 @@ aliases: [launch, \"Go Live\"]
         )
         .unwrap();
         assert_eq!(title_at(&path), "Job Application Log");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn head_buffer_is_reused_without_bleeding_between_files() {
+        let dir = tmpdir("headbuf");
+        let long = dir.join("long.md");
+        let short = dir.join("short.md");
+        fs::write(
+            &long,
+            format!("# A much longer title here\n{}", "x".repeat(3000)),
+        )
+        .unwrap();
+        fs::write(&short, "# S\n").unwrap();
+        let mut buf = Vec::new();
+        assert_eq!(head_into(&long, &mut buf).0, "A much longer title here");
+        // the second read must not see the first file's tail
+        assert_eq!(head_into(&short, &mut buf).0, "S");
+        assert_eq!(buf.len(), TITLE_BYTES);
         let _ = fs::remove_dir_all(&dir);
     }
 }
