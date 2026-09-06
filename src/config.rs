@@ -434,8 +434,9 @@ impl Config {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Config {
         let mut c = Config::from_file_text(text);
-        if let Some(d) = std::env::var_os("CATCHER_DIR") {
-            c.root_at(text, PathBuf::from(d));
+        match std::env::var_os("CATCHER_DIR") {
+            Some(d) => c.root_at(text, PathBuf::from(d)),
+            None => c.resolve_folders(text),
         }
         c
     }
@@ -457,12 +458,33 @@ impl Config {
         self.notes_dir = root;
         if value(text, "attachments_dir").is_none() {
             self.attachments_dir = self.notes_dir.join("attachments");
-            self.adopt_obsidian_attachments();
+            self.attachment_subfolder = "attachments".to_string();
         }
         if value(text, "templates_dir").is_none() {
             self.templates_dir = PathBuf::from(crate::templates::DEFAULT_DIR);
-            self.adopt_obsidian_templates();
         }
+        self.resolve_folders(text);
+    }
+
+    /// Settle the two folders, once `notes_dir` is final — both the load path
+    /// and `root_at` end here, because a folder only means anything relative
+    /// to the vault it is under.
+    ///
+    /// A folder that is not there is not a folder: a `templates_dir` left in
+    /// the settings from a vault ago would otherwise leave *Insert template*
+    /// listing nothing, with no hint why. The default stands instead, and the
+    /// settings note is not rewritten — the folder may be coming back, and a
+    /// session is not the place to throw away what someone typed.
+    fn resolve_folders(&mut self, text: &str) {
+        if value(text, "templates_dir").is_some() && !self.templates_dir().is_dir() {
+            self.templates_dir = PathBuf::from(crate::templates::DEFAULT_DIR);
+        }
+        self.adopt_obsidian_templates();
+        if value(text, "attachments_dir").is_some() && !self.attachments_dir.is_dir() {
+            self.attachments_dir = self.notes_dir.join("attachments");
+            self.attachment_subfolder = "attachments".to_string();
+        }
+        self.adopt_obsidian_attachments();
     }
 
     /// When `attachments_dir` is not set (or is just the default), take the
@@ -476,7 +498,14 @@ impl Config {
             return;
         };
         if let Some(setting) = obsidian_attachment_setting(&text) {
-            self.set_obsidian_attachments(&setting);
+            // `./` and `./sub` are beside the note, so there is no one folder
+            // to look for; a plain vault folder that is not there is no answer
+            // at all, and the default is the better one
+            let s = setting.trim();
+            let beside = s.starts_with("./") || s == ".";
+            if beside || self.notes_dir.join(s.trim_matches('/')).is_dir() {
+                self.set_obsidian_attachments(&setting);
+            }
         }
     }
 
@@ -493,7 +522,9 @@ impl Config {
         };
         if let Some(folder) = obsidian_template_folder(&text) {
             let folder = folder.trim().trim_matches('/');
-            if !folder.is_empty() {
+            // a folder the vault names but no longer has is worse than the
+            // default: it makes Insert template list nothing at all
+            if !folder.is_empty() && self.notes_dir.join(folder).is_dir() {
                 self.templates_dir = PathBuf::from(folder);
             }
         }
@@ -524,7 +555,10 @@ impl Config {
         }
     }
 
-    /// The file alone, as it would be written back.
+    /// The file alone, as it would be written back — the two folders exactly
+    /// as typed, since this is what an out-of-date settings note is rewritten
+    /// from and a folder that is missing today is not one to erase.
+    /// `resolve_folders` settles them for the session.
     fn from_file_text(text: &str) -> Config {
         let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let mut c = Config::default();
@@ -536,7 +570,6 @@ impl Config {
         if let Some(v) = value(text, "attachments_dir") {
             c.attachments_dir = expand(&v, &home);
         }
-        c.adopt_obsidian_attachments();
 
         // anything unrecognised is auto: a typo should leave the terminal's
         // own polarity standing rather than pin a palette that reads wrong
@@ -621,7 +654,6 @@ impl Config {
         if let Some(v) = value(text, "templates_dir") {
             c.templates_dir = expand(&v, &home);
         }
-        c.adopt_obsidian_templates();
         c.keys = Keymap::from_settings(|key| value(text, key));
         c.preview_click = word(text, "preview_click").unwrap_or(c.preview_click);
         c.linked_mentions = flag(text, "linked_mentions", c.linked_mentions);
@@ -1439,8 +1471,15 @@ mod tests {
         let c = Config::from_str("- notes_dir: /vault\n");
         if std::env::var_os("CATCHER_DIR").is_none() {
             assert_eq!(c.attachments_dir, PathBuf::from("/vault/attachments"));
-            let c = Config::from_str("- notes_dir: /vault\n- attachments_dir: /pics\n");
-            assert_eq!(c.attachments_dir, PathBuf::from("/pics"));
+            // a folder of its own stands, as long as it is there
+            let pics = crate::testutil::tmpdir("config", "attachments-set");
+            std::fs::create_dir_all(&pics).unwrap();
+            let c = Config::from_str(&format!(
+                "- notes_dir: /vault\n- attachments_dir: {}\n",
+                pics.display()
+            ));
+            assert_eq!(c.attachments_dir, pics);
+            let _ = std::fs::remove_dir_all(&pics);
         }
     }
 
@@ -1657,6 +1696,7 @@ mod tests {
             r#"{"attachmentFolderPath": "Files"}"#,
         )
         .unwrap();
+        std::fs::create_dir_all(dir.join("Files")).unwrap();
         let mut c = Config {
             notes_dir: dir.clone(),
             attachments_dir: dir.join("attachments"),
@@ -1685,14 +1725,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(c.templates_dir(), PathBuf::from("/vault/_meta/forms"));
+        // read back from a document the folder actually exists in
+        let vault = crate::testutil::tmpdir("config", "templates-round-trip");
+        std::fs::create_dir_all(vault.join("_meta/forms")).unwrap();
+        let c = Config {
+            notes_dir: vault.clone(),
+            templates_dir: PathBuf::from("_meta/forms"),
+            ..Default::default()
+        };
         let back = Config::from_str(&c.to_document());
         assert_eq!(back.templates_dir, c.templates_dir);
         // an absolute folder stands, and a tilde expands
-        let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
         assert_eq!(
-            Config::from_str("- templates_dir: ~/forms\n").templates_dir,
-            home.join("forms")
+            Config::from_str(&format!(
+                "- templates_dir: {}\n",
+                vault.join("_meta/forms").display()
+            ))
+            .templates_dir,
+            vault.join("_meta/forms")
         );
+        let _ = std::fs::remove_dir_all(&vault);
         let c = Config {
             notes_dir: PathBuf::from("/vault"),
             templates_dir: PathBuf::from("/forms"),
@@ -1714,6 +1766,7 @@ mod tests {
         // a named templates_dir is left alone; the default is replaced
         let dir = crate::testutil::tmpdir("config", "obsidian-templates");
         std::fs::create_dir_all(dir.join(".obsidian")).unwrap();
+        std::fs::create_dir_all(dir.join("_meta/forms")).unwrap();
         std::fs::write(dir.join(".obsidian/templates.json"), json).unwrap();
         let mut c = Config {
             notes_dir: dir.clone(),
@@ -1737,6 +1790,68 @@ mod tests {
         };
         c.adopt_obsidian_templates();
         assert_eq!(c.templates_dir, PathBuf::from("templates"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_that_is_not_there_falls_back_to_the_default() {
+        let dir = crate::testutil::tmpdir("config", "dead-folders");
+        std::fs::create_dir_all(dir.join(".obsidian")).unwrap();
+        let text = |extra: &str| format!("- notes_dir: {}\n{extra}", dir.display());
+        // resolved by hand rather than through `from_str`, so a CATCHER_DIR in
+        // the environment cannot move the vault out from under the test
+        let cfg = |extra: &str| {
+            let t = text(extra);
+            let mut c = Config::from_file_text(&t);
+            c.resolve_folders(&t);
+            c
+        };
+
+        // a vault whose Obsidian settings name folders it no longer has
+        std::fs::write(
+            dir.join(".obsidian/templates.json"),
+            r#"{"folder": "gone/forms"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".obsidian/app.json"),
+            r#"{"attachmentFolderPath": "gone/pics"}"#,
+        )
+        .unwrap();
+        let c = cfg("");
+        assert_eq!(c.templates_dir, PathBuf::from("templates"));
+        assert_eq!(c.attachments_dir, dir.join("attachments"));
+
+        // the same settings, with the folders there
+        std::fs::create_dir_all(dir.join("gone/forms")).unwrap();
+        std::fs::create_dir_all(dir.join("gone/pics")).unwrap();
+        let c = cfg("");
+        assert_eq!(c.templates_dir, PathBuf::from("gone/forms"));
+        assert_eq!(c.attachments_dir, dir.join("gone/pics"));
+
+        // a `./` setting is beside the note, not a vault folder, so it is
+        // taken as written whatever is or is not on disk
+        std::fs::write(
+            dir.join(".obsidian/app.json"),
+            r#"{"attachmentFolderPath": "./nowhere"}"#,
+        )
+        .unwrap();
+        let c = cfg("");
+        assert_eq!(c.attachments_dir, dir.join("nowhere"));
+        assert_eq!(c.attachment_subfolder, "nowhere");
+
+        // and a folder the settings note names itself, that is not there
+        let _ = std::fs::remove_file(dir.join(".obsidian/app.json"));
+        let _ = std::fs::remove_file(dir.join(".obsidian/templates.json"));
+        let named = "- templates_dir: archive/forms\n- attachments_dir: /nowhere/pics\n";
+        let c = cfg(named);
+        assert_eq!(c.templates_dir, PathBuf::from("templates"));
+        assert_eq!(c.attachments_dir, dir.join("attachments"));
+        // and the settings note keeps what was typed: the rewrite is generated
+        // from the unresolved parse, so the folder may still come back
+        let on_disk = Config::from_file_text(&text(named)).to_document();
+        assert!(on_disk.contains("- templates_dir: archive/forms"));
+        assert!(on_disk.contains("- attachments_dir: /nowhere/pics"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

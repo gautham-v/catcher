@@ -94,6 +94,10 @@ pub enum Overlay {
     Find,
     /// Move the open note to another folder under the session root.
     MoveFile,
+    /// The same folder picker, choosing where templates are kept.
+    SetTemplatesDir,
+    /// The same folder picker, choosing where attachments go.
+    SetAttachmentsDir,
     /// Every heading of the open note: ⏎ goes there, ⌥⏎ folds it.
     Outline,
     /// The templates folder: ⏎ inserts one, or makes a note out of it.
@@ -154,6 +158,10 @@ pub enum Command {
     Trash,
     /// A new note whose body is a template from the templates folder.
     NewFromTemplate,
+    /// Point `templates_dir` at a folder in the vault.
+    SetTemplatesDir,
+    /// Point `attachments_dir` at a folder in the vault.
+    SetAttachmentsDir,
     InsertTable,
     Table(crate::table::Op),
     TableSource,
@@ -182,9 +190,11 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 44] = [
+const COMMANDS: [Command; 46] = [
     Command::Act(Action::NewNote),
     Command::NewFromTemplate,
+    Command::SetTemplatesDir,
+    Command::SetAttachmentsDir,
     Command::Act(Action::DailyNote),
     Command::Act(Action::QuickOpen),
     Command::Act(Action::SearchAll),
@@ -286,6 +296,8 @@ impl Command {
             Command::OpenVault => ("Open vault…", "another folder as the notes folder for this session"),
             Command::Trash => ("Trash", "the notes in .trash; ⏎ puts one back, ⌥⌫ removes it for good"),
             Command::NewFromTemplate => ("New from template", "a new note whose body is a template"),
+            Command::SetTemplatesDir => ("Set templates folder…", "the folder Insert template lists; pick one in the vault"),
+            Command::SetAttachmentsDir => ("Set attachments folder…", "where pasted images and attachments go"),
             Command::InsertTable => ("Table: Insert table", "a 2×2 grid at the cursor"),
             Command::InsertCallout => ("Insert callout", "> [!note] with a title and a body"),
             Command::InsertMath => ("Insert math block", "$$ … $$ on lines of their own"),
@@ -403,6 +415,9 @@ pub enum Item {
     Folder(String),
     /// A folder the open note can be moved into, from the move picker.
     MoveTo(PathBuf),
+    /// A folder from the same picker, standing for a folder *setting* rather
+    /// than a move: the settings key it answers, and the folder.
+    SetFolder(&'static str, PathBuf),
     /// A note the open one can be folded into, from the merge picker.
     MergeTo(PathBuf),
     /// One line of a note, from the contents tab: the entry and the line.
@@ -593,6 +608,9 @@ pub struct App {
     /// Every folder the move picker offers, walked once when it opens rather
     /// than on every frame it is on screen.
     move_targets: Vec<(PathBuf, usize)>,
+    /// The settings key the folder picker is answering, when it was opened to
+    /// set a folder rather than to move a note.
+    folder_setting: Option<&'static str>,
     /// The notes in `.trash`, read when the trash picker opens and after
     /// anything it does changes them.
     trash: Vec<notes::Trashed>,
@@ -841,6 +859,7 @@ impl App {
             contents_rx: None,
             contents_cache: std::cell::RefCell::new(None),
             move_targets: Vec::new(),
+            folder_setting: None,
             trash: Vec::new(),
             purge: None,
             templates: Vec::new(),
@@ -2741,7 +2760,9 @@ impl App {
             Overlay::QuickOpen if self.tab == QuickTab::Bookmarks => self.bookmark_items(),
             Overlay::QuickOpen if self.tab == QuickTab::Unresolved => self.unresolved_items(),
             Overlay::QuickOpen => self.open_items(),
-            Overlay::MoveFile => self.move_items(),
+            Overlay::MoveFile | Overlay::SetTemplatesDir | Overlay::SetAttachmentsDir => {
+                self.move_items()
+            }
             Overlay::MergeInto => self.merge_items(),
             Overlay::OpenVault => self.vault_items(),
             Overlay::Outline => self.outline_items(),
@@ -3067,11 +3088,25 @@ impl App {
         scored.into_iter().map(|(_, it)| it).collect()
     }
 
-    /// Every folder under the session root the open note could move to,
-    /// the root itself first, the rest in path order. Hidden folders and the
-    /// attachments folder are skipped; so is the folder the note is in now.
+    /// Every folder under the session root the open note could move to: the
+    /// folder tree, less the folder the note is in now.
     pub fn move_targets(&self) -> Vec<(PathBuf, usize)> {
-        fn walk(dir: &Path, skip: &Path, out: &mut Vec<(PathBuf, usize)>) {
+        let mut out = self.folder_targets(Some(&self.config.attachments_dir));
+        let here = self
+            .active_note()
+            .path
+            .parent()
+            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+        out.retain(|(d, _)| Some(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone())) != here);
+        out
+    }
+
+    /// Every folder under the session root, the root itself first, the rest
+    /// in path order, each with how many notes it holds. Hidden folders are
+    /// skipped, and so is `skip` — the move picker has no use for the
+    /// attachments folder, where the folder settings pickers list everything.
+    fn folder_targets(&self, skip: Option<&Path>) -> Vec<(PathBuf, usize)> {
+        fn walk(dir: &Path, skip: Option<&Path>, out: &mut Vec<(PathBuf, usize)>) {
             let Ok(rd) = std::fs::read_dir(dir) else {
                 return;
             };
@@ -3084,7 +3119,7 @@ impl App {
                     continue;
                 }
                 if p.is_dir() {
-                    if p != skip {
+                    if Some(p.as_path()) != skip {
                         subs.push(p);
                     }
                 } else if p.extension().is_some_and(|x| x == "md") {
@@ -3098,13 +3133,7 @@ impl App {
             }
         }
         let mut out = Vec::new();
-        walk(&self.dir, &self.config.attachments_dir, &mut out);
-        let here = self
-            .active_note()
-            .path
-            .parent()
-            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
-        out.retain(|(d, _)| Some(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone())) != here);
+        walk(&self.dir, skip, &mut out);
         out
     }
 
@@ -3118,12 +3147,19 @@ impl App {
         }
     }
 
-    /// Move-picker rows for the current query, best first.
+    /// Folder-picker rows for the current query, best first — a move, or a
+    /// folder setting, depending on what the picker was opened for.
     pub fn move_items(&self) -> Vec<Item> {
         let mut scored: Vec<(i64, Item)> = Vec::new();
         for (dir, _) in &self.move_targets {
             if let Some(s) = search::fuzzy(&self.query, &self.move_label(dir)) {
-                scored.push((s, Item::MoveTo(dir.clone())));
+                scored.push((
+                    s,
+                    match self.folder_setting {
+                        Some(key) => Item::SetFolder(key, dir.clone()),
+                        None => Item::MoveTo(dir.clone()),
+                    },
+                ));
             }
         }
         scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
@@ -3166,6 +3202,14 @@ impl App {
             Item::Folder(_) | Item::Notice => {}
             // palette-only: the one command without a key
             Item::Command(Command::MoveFile) => self.open_move(),
+            Item::Command(Command::SetTemplatesDir) => {
+                let current = self.config.templates_dir();
+                self.open_folder_picker(Overlay::SetTemplatesDir, "templates_dir", &current);
+            }
+            Item::Command(Command::SetAttachmentsDir) => {
+                let current = self.config.attachments_dir.clone();
+                self.open_folder_picker(Overlay::SetAttachmentsDir, "attachments_dir", &current);
+            }
             Item::Command(Command::MergeInto) => self.open_merge(),
             Item::Command(Command::Unresolved) => self.open_unresolved(),
             Item::Command(Command::Bookmark) => self.toggle_bookmark(),
@@ -3195,6 +3239,7 @@ impl App {
                 }
             }
             Item::MoveTo(dir) => self.commit_move(&dir),
+            Item::SetFolder(key, dir) => self.commit_folder_setting(key, &dir),
             Item::MergeTo(path) => self.open_merge_confirm(&path),
         }
     }
@@ -3203,8 +3248,68 @@ impl App {
         self.save_now();
         self.query.clear();
         self.selected = 0;
+        self.folder_setting = None;
         self.move_targets = self.move_targets();
         self.overlay = Overlay::MoveFile;
+    }
+
+    /// The move picker again, but choosing a folder for `key` — every folder
+    /// in the vault, the root included, with the row the setting names now
+    /// already selected.
+    fn open_folder_picker(&mut self, overlay: Overlay, key: &'static str, current: &Path) {
+        self.query.clear();
+        self.folder_setting = Some(key);
+        self.move_targets = self.folder_targets(None);
+        self.overlay = overlay;
+        let current = std::fs::canonicalize(current).unwrap_or_else(|_| current.to_path_buf());
+        self.selected = self
+            .overlay_items()
+            .iter()
+            .position(|it| match it {
+                Item::SetFolder(_, dir) => {
+                    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone()) == current
+                }
+                _ => false,
+            })
+            .unwrap_or(0);
+    }
+
+    /// How a picked folder is written into the settings note: relative to the
+    /// vault it sits under, `.` for the vault itself, and a full path for a
+    /// folder outside it.
+    fn folder_setting_value(root: &Path, dir: &Path) -> String {
+        match dir.strip_prefix(root) {
+            Ok(r) if r.as_os_str().is_empty() => ".".to_string(),
+            Ok(r) => r.to_string_lossy().replace('\\', "/"),
+            Err(_) => dir.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// Write the picked folder to `key` and use it from here on, without a
+    /// restart. The path is written the way a person would type it: relative
+    /// to the vault, `.` for the vault itself.
+    fn commit_folder_setting(&mut self, key: &'static str, dir: &Path) {
+        let rel = Self::folder_setting_value(&self.dir, dir);
+        if let Err(e) = crate::config::set_value(key, &rel) {
+            self.flash(format!("settings not written: {e}"));
+            return;
+        }
+        // live at once: the setting is about where the next template or the
+        // next paste goes, and waiting for a restart to find out is no answer
+        match key {
+            "attachments_dir" => {
+                // stored absolute, unlike templates_dir, so it is joined here
+                self.config.attachments_dir = match rel.as_str() {
+                    "." => self.config.notes_dir.clone(),
+                    rel => self.config.notes_dir.join(rel),
+                };
+                self.flash(format!("attachments folder: {rel}"));
+            }
+            _ => {
+                self.config.templates_dir = PathBuf::from(&rel);
+                self.flash(format!("templates folder: {rel}"));
+            }
+        }
     }
 
     /// Move the open note into `dir`. The filename comes along (made unique
@@ -3706,6 +3811,8 @@ impl App {
             Overlay::Palette
             | Overlay::QuickOpen
             | Overlay::MoveFile
+            | Overlay::SetTemplatesDir
+            | Overlay::SetAttachmentsDir
             | Overlay::MergeInto
             | Overlay::Outline
             | Overlay::Templates
@@ -5142,6 +5249,8 @@ impl App {
                 Overlay::Palette
                 | Overlay::QuickOpen
                 | Overlay::MoveFile
+                | Overlay::SetTemplatesDir
+                | Overlay::SetAttachmentsDir
                 | Overlay::MergeInto
                 | Overlay::Outline
                 | Overlay::Templates
@@ -5175,6 +5284,8 @@ impl App {
             Overlay::Palette
                 | Overlay::QuickOpen
                 | Overlay::MoveFile
+                | Overlay::SetTemplatesDir
+                | Overlay::SetAttachmentsDir
                 | Overlay::MergeInto
                 | Overlay::Outline
                 | Overlay::Templates
@@ -5566,6 +5677,8 @@ mod tests {
             [
                 "New note",
                 "New from template",
+                "Set templates folder…",
+                "Set attachments folder…",
                 "Today's note",
                 "Open note",
                 "Search in all files",
@@ -6154,6 +6267,40 @@ mod tests {
             .settings_rows()
             .iter()
             .any(|(k, v, _)| *k == "key_template" && v == "none"));
+    }
+
+    #[test]
+    fn the_two_folder_settings_are_palette_only_commands() {
+        assert!(COMMANDS.contains(&Command::SetTemplatesDir));
+        assert!(COMMANDS.contains(&Command::SetAttachmentsDir));
+        // palette-only, like Move to folder: there is no key to bind
+        assert_eq!(Command::SetTemplatesDir.action(), None);
+        assert_eq!(Command::SetAttachmentsDir.action(), None);
+        assert_eq!(
+            Command::SetTemplatesDir.label(),
+            (
+                "Set templates folder…",
+                "the folder Insert template lists; pick one in the vault"
+            )
+        );
+        assert_eq!(
+            Command::SetAttachmentsDir.label(),
+            (
+                "Set attachments folder…",
+                "where pasted images and attachments go"
+            )
+        );
+    }
+
+    #[test]
+    fn a_picked_folder_is_written_the_way_a_person_would_type_it() {
+        let root = PathBuf::from("/vault");
+        let val = |p: &str| App::folder_setting_value(&root, Path::new(p));
+        assert_eq!(val("/vault"), ".");
+        assert_eq!(val("/vault/templates"), "templates");
+        assert_eq!(val("/vault/_meta/forms"), "_meta/forms");
+        // a folder outside the vault has no relative form
+        assert_eq!(val("/elsewhere/forms"), "/elsewhere/forms");
     }
 
     #[test]

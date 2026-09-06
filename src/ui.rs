@@ -94,6 +94,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Overlay::Palette
         | Overlay::QuickOpen
         | Overlay::MoveFile
+        | Overlay::SetTemplatesDir
+        | Overlay::SetAttachmentsDir
         | Overlay::MergeInto
         | Overlay::Outline
         | Overlay::Templates
@@ -1335,6 +1337,10 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             "open a note — any folder, most recent first"
         } else if app.overlay == Overlay::MoveFile {
             "move this note to a folder"
+        } else if app.overlay == Overlay::SetTemplatesDir {
+            "the templates folder — pick one"
+        } else if app.overlay == Overlay::SetAttachmentsDir {
+            "the attachments folder — pick one"
         } else if app.overlay == Overlay::MergeInto {
             "merge this note into another — type to narrow"
         } else if outline {
@@ -1823,7 +1829,7 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
                 "note",
             ),
         },
-        Item::MoveTo(dir) => {
+        Item::MoveTo(dir) | Item::SetFolder(_, dir) => {
             let notes = std::fs::read_dir(dir)
                 .map(|rd| {
                     rd.flatten()
