@@ -4,9 +4,9 @@
 //! token and the text an accepted row inserts are testable without an app;
 //! the app supplies the candidates and keeps the popup's state.
 
-use std::collections::HashMap;
 use crate::index::Entry;
 use crate::search;
+use std::collections::HashMap;
 
 /// What the cursor is inside, and so what the popup offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,14 +87,13 @@ fn link_token(chars: &[char], col: usize) -> Option<Token> {
             query: inside[hash + 1..].to_string(),
         });
     }
-    // `[[^` is Obsidian's way into this note's blocks, `#` left unsaid
-    if inside.starts_with('^') {
+    // `[[^` — and `[[note^` — is Obsidian's way into blocks, `#` left unsaid
+    if let Some(caret) = inside.find('^') {
+        let note = inside[..caret].trim().to_string();
         return Some(Token {
-            kind: Kind::Anchor {
-                note: String::new(),
-            },
-            start: open,
-            query: inside,
+            kind: Kind::Anchor { note },
+            start: open + inside[..caret].chars().count(),
+            query: inside[caret..].to_string(),
         });
     }
     Some(Token {
@@ -277,7 +276,11 @@ pub fn fresh_block_id(text: &str, row: usize, taken: &[String]) -> String {
         let mut id = String::with_capacity(6);
         for _ in 0..6 {
             let d = (n % 36) as u8;
-            id.push(if d < 10 { (b'0' + d) as char } else { (b'a' + d - 10) as char });
+            id.push(if d < 10 {
+                (b'0' + d) as char
+            } else {
+                (b'a' + d - 10) as char
+            });
             n /= 36;
         }
         if !taken.contains(&id) {
@@ -297,7 +300,9 @@ pub fn block_candidates(query: &str, lines: &[String]) -> Vec<Candidate> {
         .filter(|b| {
             query.is_empty()
                 || search::fuzzy(query, &b.text).is_some()
-                || b.id.as_deref().is_some_and(|id| search::fuzzy(query, id).is_some())
+                || b.id
+                    .as_deref()
+                    .is_some_and(|id| search::fuzzy(query, id).is_some())
         })
         .map(|b| match b.id {
             Some(id) => Candidate {
@@ -353,9 +358,9 @@ pub fn accept(line: &str, col: usize, token: &Token, insert: &str) -> (String, u
     let head: String = chars[..token.start.min(col)].iter().collect();
     let rest: String = chars[col..].iter().collect();
     let mut out = head;
-    // a block picked from `[[^` lands as `[[#^id]]`, the link that means
-    // "this note, that block"
-    if insert.starts_with('^') && token.query.starts_with('^') && out.ends_with("[[") {
+    // a block picked from `[[^` or `[[note^` — the `#` left unsaid — lands as
+    // `[[#^id]]` / `[[note#^id]]`, the link that names a block
+    if insert.starts_with('^') && token.query.starts_with('^') && !out.ends_with('#') {
         out.push('#');
     }
     out.push_str(insert);
@@ -428,6 +433,23 @@ mod tests {
                 "^ab".into()
             ))
         );
+        // a caret with the `#` left unsaid asks for that note's blocks too
+        assert_eq!(
+            tok("![[2026-09-05^", 14),
+            Some((
+                Kind::Anchor {
+                    note: "2026-09-05".into()
+                },
+                13,
+                "^".into()
+            ))
+        );
+        // and the accepted row puts the `#` in
+        let token = crate::complete::token_at("![[2026-09-05^", 14).unwrap();
+        assert_eq!(
+            accept("![[2026-09-05^", 14, &token, "^ab72fb"),
+            ("![[2026-09-05#^ab72fb]]".to_string(), 23)
+        );
     }
 
     #[test]
@@ -473,7 +495,13 @@ mod tests {
     fn a_bare_caret_after_the_brackets_lists_this_notes_blocks() {
         assert_eq!(
             tok("see [[^la", 9),
-            Some((Kind::Anchor { note: String::new() }, 6, "^la".into()))
+            Some((
+                Kind::Anchor {
+                    note: String::new()
+                },
+                6,
+                "^la".into()
+            ))
         );
         let t = token_at("see [[^la", 9).unwrap();
         assert_eq!(
@@ -482,7 +510,10 @@ mod tests {
         );
         // through `#^` the hash is already there
         let t = token_at("[[note#^la", 10).unwrap();
-        assert_eq!(accept("[[note#^la", 10, &t, "^ab12cd"), ("[[note#^ab12cd]]".into(), 16));
+        assert_eq!(
+            accept("[[note#^la", 10, &t, "^ab12cd"),
+            ("[[note#^ab12cd]]".into(), 16)
+        );
     }
 
     #[test]
@@ -524,7 +555,14 @@ mod tests {
         assert_eq!(refs[0].text, "First paragraph line one");
         assert_eq!(refs[0].last, 3);
         assert_eq!(refs[0].id.as_deref(), Some("keep1"));
-        assert_eq!(refs[1], BlockRef { text: "- item a".into(), last: 5, id: None });
+        assert_eq!(
+            refs[1],
+            BlockRef {
+                text: "- item a".into(),
+                last: 5,
+                id: None
+            }
+        );
         assert_eq!(refs[2].text, "- item b");
         assert_eq!(refs[2].id.as_deref(), Some("itemb"));
         assert_eq!(refs[3].last, 12);

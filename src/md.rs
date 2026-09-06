@@ -4067,8 +4067,6 @@ pub mod embeds {
     }
 }
 
-/// How many lines of the embedded note the card shows.
-pub const EMBED_LINES: usize = 3;
 /// The most of an embedded note that is read: a card wants its first lines,
 /// not a megabyte of someone's log.
 const EMBED_READ_CAP: u64 = 64 * 1024;
@@ -4080,10 +4078,10 @@ pub struct EmbedCard {
     pub title: String,
     /// The heading the embed points into, when it names one.
     pub heading: Option<String>,
-    /// The first lines of the body (or of the section), blanks skipped.
+    /// The embedded lines: the whole body, or the whole section the embed
+    /// names — as they stand in the file, blanks and indents kept, so either
+    /// view can lay them out as markdown.
     pub lines: Vec<String>,
-    /// How many more lines the section has past the ones shown.
-    pub more: usize,
     /// Whether the note was found at all.
     pub found: embeds::Found,
 }
@@ -4106,7 +4104,6 @@ pub fn embed_card(embed: &NoteEmbed) -> EmbedCard {
         title: embed.target.clone(),
         heading: embed.heading.clone(),
         lines: Vec::new(),
-        more: 0,
         found: found.clone(),
     };
     let embeds::Found::Note(path) = found else {
@@ -4145,17 +4142,31 @@ pub fn embed_card(embed: &NoteEmbed) -> EmbedCard {
             }
         }
     };
-    let prose: Vec<&str> = section
-        .into_iter()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
-    card.lines = prose
-        .iter()
-        .take(EMBED_LINES)
-        .map(|l| l.trim().to_string())
-        .collect();
-    card.more = prose.len().saturating_sub(EMBED_LINES);
+    // the blank lines at either end are the seam with the embed, not content
+    let start = section.iter().position(|l| !l.trim().is_empty());
+    card.lines = match start {
+        None => Vec::new(),
+        Some(a) => {
+            let b = section
+                .iter()
+                .rposition(|l| !l.trim().is_empty())
+                .unwrap_or(a);
+            section[a..=b].iter().map(|l| l.to_string()).collect()
+        }
+    };
     card
+}
+
+/// The line without its trailing ` ^blockid` — an address, not prose, and
+/// nothing a card's preview of the line should show.
+pub fn strip_block_id(line: &str) -> &str {
+    match block_id_at(line) {
+        Some((col, _)) => {
+            let byte = line.char_indices().nth(col).map_or(line.len(), |(b, _)| b);
+            &line[..byte]
+        }
+        None => line,
+    }
 }
 
 /// The text of an ATX heading line — up to three spaces of indent and the
@@ -4173,14 +4184,7 @@ pub fn heading_text(line: &str) -> Option<&str> {
     } else {
         body
     };
-    let body = match block_id_at(body) {
-        Some((col, _)) => {
-            let byte = body.char_indices().nth(col).map_or(body.len(), |(b, _)| b);
-            &body[..byte]
-        }
-        None => body,
-    };
-    Some(body.trim())
+    Some(strip_block_id(body).trim())
 }
 
 /// The lines under the heading called `name` (matched without case), up to
@@ -4363,11 +4367,11 @@ pub fn human_size(bytes: u64) -> String {
     format!("{size:.1} {}", UNITS[unit])
 }
 
-/// The rows hung under a `![[note]]` line in the editor: the first lines of
-/// the embedded note, dimmed, and a last row saying how to open it and how
-/// much was left out. Nothing at all while the vault is still being walked or
+/// The rows hung under a `![[note]]` line in the editor: the embedded note
+/// itself, styled the way the editor styles its own lines and wrapped behind
+/// the card's rail. Nothing at all while the vault is still being walked or
 /// the note does not exist — the title row has already said so.
-pub fn embed_rows(src: &str, width: usize, open_key: &str) -> Vec<RLine> {
+pub fn embed_rows(src: &str, width: usize) -> Vec<RLine> {
     let Some(embed) = note_embed_line(src) else {
         return Vec::new();
     };
@@ -4381,33 +4385,38 @@ pub fn embed_rows(src: &str, width: usize, open_key: &str) -> Vec<RLine> {
     } else {
         width.saturating_sub(2).max(1)
     };
-    let row = |text: &str, text_style: Style| {
-        let mut cells = embed_rail(style, 0);
-        let text = if room == usize::MAX {
-            text.to_string()
-        } else {
-            truncate(text, room)
-        };
-        cells.extend(at(&text, text_style, 0));
-        RLine { cells, src_len: 0 }
+    // an embedded note is not this note: nothing in it is the buffer's, so
+    // no cell answers to a source column here
+    let blank = |line: RLine| -> Vec<RLine> {
+        let cells: Vec<Cell> = line
+            .cells
+            .into_iter()
+            .map(|c| Cell { src: 0, ..c })
+            .collect();
+        let chars: Vec<char> = cells.iter().map(|c| c.ch).collect();
+        wrap_breaks(&chars, room, room)
+            .into_iter()
+            .map(|(a, b)| {
+                let mut row = embed_rail(style, 0);
+                row.extend(cells[a..b].iter().cloned());
+                RLine {
+                    cells: row,
+                    src_len: 0,
+                }
+            })
+            .collect()
     };
-    let mut out: Vec<RLine> = card.lines.iter().map(|l| row(l, theme::marker())).collect();
-    if card.more > 0 {
-        out.push(row(
-            &format!("{open_key} opens · {}", more_lines(card.more)),
-            theme::marker(),
-        ));
-    }
-    out
-}
-
-/// `1 more line` / `N more lines`.
-pub fn more_lines(n: usize) -> String {
-    if n == 1 {
-        "1 more line".to_string()
-    } else {
-        format!("{n} more lines")
-    }
+    let lines = card.lines.clone();
+    let blocks = blocks(&lines);
+    (0..lines.len())
+        .flat_map(|row| {
+            let line = match block_at(&blocks, row) {
+                Some(b) => style_block_line(&lines, b, row, room),
+                None => style_line(&lines[row]),
+            };
+            blank(line)
+        })
+        .collect()
 }
 
 /// One source cell of a table row: its trimmed text and where that text starts.
@@ -5612,19 +5621,40 @@ mod tests {
         // the front matter and the title line are not the body
         assert_eq!(
             whole.lines,
-            vec!["First line.", "Second **line**.", "## Goals"]
+            vec![
+                "First line.",
+                "Second **line**.",
+                "",
+                "## Goals",
+                "- ship it",
+                "- test it",
+                "",
+                "- doc it",
+                "- more",
+                "- and more",
+                "",
+                "## Later",
+                "Nothing.",
+            ]
         );
-        assert_eq!(whole.more, 7);
         assert!(matches!(whole.found, embeds::Found::Note(_)));
 
         // a heading picks its section, whatever its case
         let goals = embed_card(&note_embed_line("![[plan#goals]]").unwrap());
         assert_eq!(goals.head(), "Plan › goals");
-        assert_eq!(goals.lines, vec!["- ship it", "- test it", "- doc it"]);
-        assert_eq!(goals.more, 2);
+        assert_eq!(
+            goals.lines,
+            vec![
+                "- ship it",
+                "- test it",
+                "",
+                "- doc it",
+                "- more",
+                "- and more"
+            ]
+        );
         let later = embed_card(&note_embed_line("![[plan#Later]]").unwrap());
         assert_eq!(later.lines, vec!["Nothing."]);
-        assert_eq!(later.more, 0);
         let nope = embed_card(&note_embed_line("![[plan#Nope]]").unwrap());
         assert_eq!(nope.lines, vec!["(no such heading)"]);
 
@@ -5683,33 +5713,40 @@ mod tests {
         assert_eq!(row.display_to_source(0), 0);
         assert!(row.display_to_source(12) <= title.src_len);
 
-        // the rows hung under it: the section, dimmed, and how to open it
-        let rows = embed_rows("![[plan#Goals]]", 40, "⌥⏎");
+        // the rows hung under it: the whole section, behind the rail
+        let rows = embed_rows("![[plan#Goals]]", 40);
         let texts: Vec<String> = rows.iter().map(text).collect();
         assert_eq!(
             texts,
             vec![
-                "▌ - ship it",
-                "▌ - test it",
-                "▌ - doc it",
-                "▌ ⌥⏎ opens · 2 more lines",
+                "▌ • ship it",
+                "▌ • test it",
+                "▌ ",
+                "▌ • doc it",
+                "▌ • more",
+                "▌ • and more",
             ]
         );
-        assert_eq!(rows[0].cells[2].style.fg, theme::marker().fg);
-        // nothing left out, nothing said about it
-        assert_eq!(embed_rows("![[plan#Later]]", 40, "⌥⏎").len(), 1);
-        // a narrow page cuts the rows rather than overrunning it
-        let narrow = embed_rows("![[plan#Goals]]", 8, "⌥⏎");
+        // a section of one line hangs one row
+        assert_eq!(embed_rows("![[plan#Later]]", 40).len(), 1);
+        // a narrow page wraps the rows rather than overrunning it, and every
+        // row a line wraps into keeps its rail
+        let narrow = embed_rows("![[plan#Goals]]", 8);
         assert!(
             narrow.iter().all(|r| str_width(&text(r)) <= 8),
             "{narrow:?}"
         );
+        assert!(
+            narrow.iter().all(|r| text(r).starts_with("▌ ")),
+            "{narrow:?}"
+        );
+        assert!(narrow.len() > rows.len(), "{narrow:?}");
 
         // a note that is not there says so, in grey, and hangs nothing
         let gone = style_block_line(&buf("![[gone]]"), &bs[0], 0, 40);
         assert_eq!(text(&gone), "▌ gone (no such note)");
         assert_eq!(gone.cells[2].style.fg, theme::grey().fg);
-        assert!(embed_rows("![[gone]]", 40, "⌥⏎").is_empty());
+        assert!(embed_rows("![[gone]]", 40).is_empty());
 
         // an un-walked vault: the title alone, nothing declared missing
         embeds::forget();
@@ -5717,7 +5754,7 @@ mod tests {
             text(&style_block_line(&lines, &bs[0], 0, 40)),
             "▌ plan › Goals"
         );
-        assert!(embed_rows("![[plan#Goals]]", 40, "⌥⏎").is_empty());
+        assert!(embed_rows("![[plan#Goals]]", 40).is_empty());
     }
 
     #[test]

@@ -152,6 +152,29 @@ pub fn render_page(markdown: &str, width: usize, tables: TableStyle) -> Rendered
     render_page_at(markdown, 0, width, tables)
 }
 
+thread_local! {
+    /// How many embedded notes are being drawn inside one another. A note
+    /// that embeds a note that embeds it back would otherwise never finish.
+    static EMBED_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Step the embed depth by `by`. False when the card is already too deep to
+/// draw — an embed two notes down shows its title row and no more.
+fn embed_depth(by: isize) -> bool {
+    EMBED_DEPTH.with(|d| {
+        let now = d.get();
+        if by < 0 {
+            d.set(now.saturating_sub(1));
+            return true;
+        }
+        if now >= 2 {
+            return false;
+        }
+        d.set(now + 1);
+        true
+    })
+}
+
 /// The same, when `markdown` is a slice of a longer file that begins at source
 /// line `first_line` — the reading view hands us a body with its front matter
 /// already cut off. Every line number a cell reports is file-absolute, because
@@ -844,6 +867,8 @@ type Fence = (Option<String>, String, Vec<(usize, usize)>);
 enum Deco {
     /// A plain blockquote's `▌ `.
     Rail,
+    /// An embed card's `▌ `, in the card's own colour.
+    Embed { style: Style },
     /// A callout card: its colour, how wide it is, and the source line of
     /// its title, which its bottom edge answers to (so a fold on the title
     /// keeps the edge under it).
@@ -1163,7 +1188,7 @@ impl Ren {
         self.quotes
             .iter()
             .map(|d| match d {
-                Deco::Rail => 2,
+                Deco::Rail | Deco::Embed { .. } => 2,
                 Deco::Card { .. } => 4,
             })
             .sum()
@@ -1237,6 +1262,9 @@ impl Ren {
                         &format!("{} ", theme::QUOTE_BAR),
                         theme::marker(),
                     )),
+                    Deco::Embed { style } => {
+                        cells.extend(str_cells(&format!("{} ", theme::QUOTE_BAR), style))
+                    }
                     Deco::Card { style, w, .. } => {
                         cells.extend(str_cells("│ ", style));
                         edges.push((style, x + w));
@@ -1548,8 +1576,10 @@ impl Ren {
         self.out
             .urls
             .push(crate::md::LinkTarget::Wiki(embed.target.clone()).href());
-        let rail = format!("{} ", theme::QUOTE_BAR);
-        self.push(&rail, style, None);
+        // the rail is a decoration, not text, so every row the card takes
+        // gets one
+        self.rails += 1;
+        self.quotes.push(Deco::Embed { style });
         match card.found {
             crate::md::embeds::Found::Missing => self.push(
                 &format!("{} (no such note)", card.head()),
@@ -1559,22 +1589,63 @@ impl Ren {
             _ => self.push(&card.head(), style.add_modifier(Modifier::BOLD), Some(idx)),
         }
         self.flush();
-        for line in &card.lines {
-            self.push(&rail, style, None);
-            let cells = crate::md::style_inline(line).into_iter().map(|c| PCell {
-                ch: c.ch,
-                style: c.style,
-                link: None,
-                src: None,
-            });
-            self.buf().extend(cells);
-            self.flush();
+        self.splice(&card.lines.join("\n"));
+        self.rails -= 1;
+        self.quotes.pop();
+    }
+
+    /// Draw an embedded note's markdown into this page, behind whatever rails
+    /// are open: it is rendered on its own at the room left inside them, and
+    /// its rows are put on the page as they come — its links and pictures
+    /// re-numbered into ours, and no cell answering to a column of this file,
+    /// which is not where any of it came from.
+    fn splice(&mut self, markdown: &str) {
+        if markdown.trim().is_empty() || !embed_depth(1) {
+            return;
         }
-        if card.more > 0 {
-            self.push(&rail, style, None);
-            self.push(&crate::md::more_lines(card.more), theme::marker(), None);
-            self.flush();
+        let width = match self.inner_width() {
+            usize::MAX => usize::MAX,
+            w => w.max(4),
+        };
+        let sub = render_page_at(markdown, 0, width, self.tables);
+        let (urls, images) = (self.out.urls.len(), self.out.images.len());
+        self.out.urls.extend(sub.urls);
+        self.out.images.extend(sub.images);
+        for line in sub.lines {
+            let line = PLine {
+                cells: line
+                    .cells
+                    .into_iter()
+                    .map(|c| PCell {
+                        link: c.link.map(|i| i + urls),
+                        src: None,
+                        ..c
+                    })
+                    .collect(),
+                checkbox: None,
+                image: line.image.map(|i| i + images),
+                src_line: None,
+                wide: line.wide,
+                hang: line.hang,
+            };
+            // the page wraps what it draws, and by then the rails are cells
+            // like any other: a long line is wrapped here, while the room
+            // inside the rail is still known, so every row of it gets one
+            if line.wide || width == usize::MAX {
+                self.emit_line(line);
+                continue;
+            }
+            for (i, row) in wrap_pline(&line, width).into_iter().enumerate() {
+                self.emit_line(PLine {
+                    cells: row,
+                    image: if i == 0 { line.image } else { None },
+                    // the indent is in the cells now
+                    hang: 0,
+                    ..line.clone()
+                });
+            }
         }
+        embed_depth(-1);
     }
 
     /// One picture on a line of its own: the `🖼 alt (url)` label that stands
@@ -2026,7 +2097,7 @@ impl Ren {
                 self.styles.pop();
                 self.flush();
                 match self.quotes.last() {
-                    Some(Deco::Rail) => {
+                    Some(Deco::Rail) | Some(Deco::Embed { .. }) => {
                         self.rails -= 1;
                         self.quotes.pop();
                     }
@@ -4183,14 +4254,15 @@ mod tests {
             .iter()
             .position(|t| t == "▌ Plan › Goals")
             .expect("a title row");
+        // the whole section is drawn, as markdown, behind the card's rail
         assert_eq!(
             &texts[at..at + 5],
             &[
                 "▌ Plan › Goals",
-                "▌ - ship it",
-                "▌ - test it",
-                "▌ - doc it",
-                "▌ 1 more line"
+                "▌ • ship it",
+                "▌ • test it",
+                "▌ • doc it",
+                "▌ • more",
             ]
         );
         // the title is a link to the note, in the callout colour
@@ -4209,7 +4281,40 @@ mod tests {
             .add_modifier
             .contains(Modifier::BOLD));
         assert!(texts.iter().all(|t| !t.contains("]]")), "{texts:?}");
-        assert_eq!(texts.last().unwrap(), "▌ 5 more lines");
+        // and it runs to the end of the note, headings and all
+        assert!(texts.iter().any(|t| t.contains("Goals")), "{texts:?}");
+        assert_eq!(texts.last().unwrap().trim_end(), "▌ Nothing.");
+
+        // a paragraph too long for the page wraps inside the card: every row
+        // it takes has the rail, and none of them overruns
+        crate::testutil::write(
+            &dir,
+            "long.md",
+            "# Long\n\nsome words that will not fit on one narrow page at all, not nearly\n",
+        );
+        let r = render_wide("![[long]]\n", 24);
+        let texts: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(texts.len() > 3, "{texts:?}");
+        assert!(texts.iter().all(|t| t.starts_with("▌ ")), "{texts:?}");
+        assert!(
+            texts.iter().all(|t| crate::md::str_width(t) <= 24),
+            "{texts:?}"
+        );
+
+        // a note that embeds a note draws it, but stops there: the innermost
+        // card is its title row alone, so two notes that embed each other
+        // still finish
+        crate::testutil::write(&dir, "a.md", "# A\n\nfrom a\n\n![[b]]\n");
+        crate::testutil::write(&dir, "b.md", "# B\n\nfrom b\n\n![[a]]\n");
+        let r = render("![[a]]\n");
+        let texts: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(texts.iter().any(|t| t.contains("from a")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("from b")), "{texts:?}");
+        assert_eq!(
+            texts.iter().filter(|t| t.contains("from b")).count(),
+            1,
+            "{texts:?}"
+        );
 
         // no such note
         let r = render("![[gone]]\n");
