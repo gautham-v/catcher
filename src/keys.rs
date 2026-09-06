@@ -56,6 +56,7 @@ pub enum Action {
     Tags,
     Find,
     InsertTemplate,
+    ExtractNote,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -302,6 +303,12 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_template",
         None,
         "insert a template from the templates folder at the cursor",
+    ),
+    (
+        Action::ExtractNote,
+        "key_extract",
+        None,
+        "extract the selection, or the section under the cursor, into a note of its own",
     ),
 ];
 

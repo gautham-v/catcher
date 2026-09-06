@@ -102,7 +102,28 @@ pub enum Overlay {
     OpenVault,
     /// The notes in `.trash`: ⏎ puts one back, ⌥⌫ removes it for good.
     Trash,
+    /// The extract prompt: what the new note is called, and what is left
+    /// where its lines were.
+    Extract,
+    /// Every note but this one, to pick the one this one is folded into.
+    MergeInto,
+    /// What that merge would do, before it does any of it.
+    ConfirmMerge,
     Help,
+}
+
+/// The merge waiting on its confirmation: the note this one would be folded
+/// into, and what the pass found to do.
+pub struct MergePlan {
+    pub target: PathBuf,
+    /// The target's title, which is what the popup calls it.
+    pub into: String,
+    /// This note's title: the heading its body arrives under.
+    pub heading: String,
+    /// The `##` that heading is written with, one level under the target's.
+    pub marker: String,
+    pub links: usize,
+    pub notes: usize,
 }
 
 /// The completion popup: the token it answers, its rows and the one the
@@ -119,6 +140,8 @@ pub enum Command {
     /// A palette row for something a key can also do: one path, either way.
     Act(Action),
     MoveFile,
+    /// Fold this note into another one, and send it to the trash.
+    MergeInto,
     /// Every unresolved `[[wikilink]]` in the vault, in ^O.
     Unresolved,
     /// Bookmark the open note, or take its bookmark away.
@@ -159,7 +182,7 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 42] = [
+const COMMANDS: [Command; 44] = [
     Command::Act(Action::NewNote),
     Command::NewFromTemplate,
     Command::Act(Action::DailyNote),
@@ -174,6 +197,8 @@ const COMMANDS: [Command; 42] = [
     Command::Act(Action::RenameFile),
     Command::MoveFile,
     Command::Trash,
+    Command::Act(Action::ExtractNote),
+    Command::MergeInto,
     Command::Unresolved,
     Command::Bookmark,
     Command::Bookmarks,
@@ -249,10 +274,12 @@ impl Command {
                 Action::ToggleProperties => ("Toggle properties (hide / show)", "the front matter: box, line or hidden on the page; dim or hidden in the editor"),
                 Action::HideProperties => ("Hide properties", "the front matter off the page entirely; Toggle properties brings it back"),
                 Action::ToggleOpener => ("Toggle opener", "the decode animation when catcher starts: on or off"),
+                Action::ExtractNote => ("Extract to new note", "the selection becomes a note beside this one, a [[link]] stays"),
                 // the rest have no palette row; COMMANDS never names them
                 _ => ("", ""),
             },
             Command::MoveFile => ("Move to folder", "another folder under this one"),
+            Command::MergeInto => ("Merge into note…", "append this note to another, rewrite links to it, trash this one"),
             Command::Unresolved => ("Unresolved links", "every [[link]] to a note that is not there; ⏎ goes to it"),
             Command::Bookmark => ("Bookmark note", "keep this note in the bookmarks list, or take it out"),
             Command::Bookmarks => ("Bookmarks", "the bookmarked notes; ⏎ opens one"),
@@ -345,6 +372,10 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
                 "open the note in a split right / below / a new tab (⌥click too)",
             ),
             ("⌥⌫", "in Trash, delete the note under the cursor for good"),
+            (
+                "tab",
+                "in the extract prompt: leave a [[link]], an ![[embed]], or nothing",
+            ),
         ],
     ),
     (
@@ -372,6 +403,8 @@ pub enum Item {
     Folder(String),
     /// A folder the open note can be moved into, from the move picker.
     MoveTo(PathBuf),
+    /// A note the open one can be folded into, from the merge picker.
+    MergeTo(PathBuf),
     /// One line of a note, from the contents tab: the entry and the line.
     /// Choosing it opens the note there.
     Line(usize, usize),
@@ -599,6 +632,13 @@ pub struct App {
     preview_dragging: bool,
     /// Buffer for the inline rename prompt.
     pub rename_input: String,
+    /// The extract prompt: the lines it would take, the name typed for the
+    /// note they become, and what is left standing in their place.
+    pub extract_range: (usize, usize),
+    pub extract_input: String,
+    pub extract_leave: crate::composer::Leave,
+    /// The merge waiting on its confirmation, if one is.
+    pub merge_plan: Option<MergePlan>,
     /// The find prompt's two fields, and which of them the typing goes to.
     pub find_input: String,
     pub replace_input: String,
@@ -729,6 +769,10 @@ impl App {
 
         let mut app = App {
             rename_input: String::new(),
+            extract_range: (0, 0),
+            extract_input: String::new(),
+            extract_leave: crate::composer::Leave::default(),
+            merge_plan: None,
             find_input: String::new(),
             replace_input: String::new(),
             find_replacing: false,
@@ -1235,14 +1279,22 @@ impl App {
     /// back, so switching to one does not show the old text.
     fn adopt_rewritten(&mut self, report: &crate::links::Report) {
         for path in &report.notes {
-            let Some(i) = self.notes.iter().position(|n| {
-                std::fs::canonicalize(&n.path).unwrap_or_else(|_| n.path.clone()) == *path
-            }) else {
-                continue;
-            };
-            if let Ok(fresh) = notes::load_one(&self.notes[i].path) {
-                self.notes[i] = fresh;
-            }
+            self.adopt(path);
+        }
+    }
+
+    /// Re-read the copy this session holds of the note at `path`, if it holds
+    /// one at all: something outside the editor has just written that file,
+    /// and a stale buffer would put the old text back on its next save.
+    fn adopt(&mut self, path: &Path) {
+        let want = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let Some(i) = self.notes.iter().position(|n| {
+            std::fs::canonicalize(&n.path).unwrap_or_else(|_| n.path.clone()) == want
+        }) else {
+            return;
+        };
+        if let Ok(fresh) = notes::load_one(&self.notes[i].path) {
+            self.notes[i] = fresh;
         }
     }
 
@@ -2690,6 +2742,7 @@ impl App {
             Overlay::QuickOpen if self.tab == QuickTab::Unresolved => self.unresolved_items(),
             Overlay::QuickOpen => self.open_items(),
             Overlay::MoveFile => self.move_items(),
+            Overlay::MergeInto => self.merge_items(),
             Overlay::OpenVault => self.vault_items(),
             Overlay::Outline => self.outline_items(),
             Overlay::Trash => self.trash_items(),
@@ -3113,6 +3166,7 @@ impl App {
             Item::Folder(_) | Item::Notice => {}
             // palette-only: the one command without a key
             Item::Command(Command::MoveFile) => self.open_move(),
+            Item::Command(Command::MergeInto) => self.open_merge(),
             Item::Command(Command::Unresolved) => self.open_unresolved(),
             Item::Command(Command::Bookmark) => self.toggle_bookmark(),
             Item::Command(Command::Bookmarks) => self.open_bookmarks(),
@@ -3141,6 +3195,7 @@ impl App {
                 }
             }
             Item::MoveTo(dir) => self.commit_move(&dir),
+            Item::MergeTo(path) => self.open_merge_confirm(&path),
         }
     }
 
@@ -3353,6 +3408,182 @@ impl App {
         }
     }
 
+    /// The palette's *Extract to new note*: work out which lines would go —
+    /// the selection widened to whole lines, or the section under the cursor's
+    /// heading — and put the prompt up over them.
+    fn open_extract(&mut self) {
+        self.enter_edit_view();
+        let blocks = self.blocks();
+        let range = if self.editor.selection().is_some() {
+            Some(self.editor.selected_rows())
+        } else {
+            crate::composer::section_range(self.editor.lines(), &blocks, self.editor.cursor.0)
+        };
+        let Some((from, to)) = range else {
+            self.flash("select something, or put the cursor on a heading".to_string());
+            return;
+        };
+        let to = to.min(self.editor.lines().len().saturating_sub(1));
+        self.extract_range = (from, to);
+        self.extract_input = crate::composer::title_prefill(&self.editor.lines()[from..=to]);
+        self.extract_leave = crate::composer::Leave::default();
+        self.overlay = Overlay::Extract;
+    }
+
+    /// How many lines the extract prompt is standing over.
+    pub fn extract_lines(&self) -> usize {
+        let (from, to) = self.extract_range;
+        (to + 1).saturating_sub(from)
+    }
+
+    /// Commit the extract: the lines become a note beside this one, and what
+    /// the prompt chose stands where they were, as one undo step.
+    fn commit_extract(&mut self) {
+        self.overlay = Overlay::None;
+        let title = self.extract_input.trim().to_string();
+        if title.is_empty() {
+            self.flash("extract cancelled — no title".to_string());
+            return;
+        }
+        let (from, to) = self.extract_range;
+        let to = to.min(self.editor.lines().len().saturating_sub(1));
+        let dir = self
+            .active_note()
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.dir.clone());
+        let taken = crate::composer::extract(
+            &dir,
+            self.editor.lines(),
+            (from, to),
+            &title,
+            self.extract_leave,
+        );
+        let (path, replacement) = match taken {
+            Ok(made) => made,
+            Err(e) => return self.flash(format!("extract failed: {e}")),
+        };
+        self.editor.replace_lines(from, to, replacement, (from, 0));
+        self.sync_editor_to_note();
+        self.save_now();
+        // a note that was not there a moment ago: the link to it should draw
+        // as a link, and follow
+        self.reindex();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.flash(format!("{name} made · ⌥⏎ opens it"));
+    }
+
+    /// The palette's *Merge into note…*: every note in the vault but this
+    /// one, to pick the one this one is folded into.
+    fn open_merge(&mut self) {
+        self.save_now();
+        self.query.clear();
+        self.selected = 0;
+        self.merge_plan = None;
+        self.start_index_scan();
+        self.overlay = Overlay::MergeInto;
+    }
+
+    /// Merge-picker rows for the current query: every other note, best first,
+    /// and with no query the index order ^O itself opens on.
+    pub fn merge_items(&self) -> Vec<Item> {
+        let here = std::fs::canonicalize(&self.active_note().path)
+            .unwrap_or_else(|_| self.active_note().path.clone());
+        let others = self.open_index.iter().filter(|e| e.path != here);
+        if self.query.is_empty() {
+            return others.map(|e| Item::MergeTo(e.path.clone())).collect();
+        }
+        let mut scored: Vec<(i64, Item)> = Vec::new();
+        for e in others {
+            if let Some(s) = search::score_entry(&self.query, &e.name(), &e.title, &e.rel) {
+                scored.push((s, Item::MergeTo(e.path.clone())));
+            }
+        }
+        scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+        scored.into_iter().map(|(_, it)| it).collect()
+    }
+
+    /// ⏎ on a merge row: count what the merge would touch and ask before any
+    /// of it happens.
+    fn open_merge_confirm(&mut self, target: &Path) {
+        self.sync_editor_to_note();
+        self.save_now();
+        let Ok(body) = std::fs::read_to_string(target) else {
+            self.flash("merge failed: cannot read that note".to_string());
+            return;
+        };
+        let here = self.active_note().path.clone();
+        let heading = self.active_note().title();
+        let (links, notes) =
+            crate::links::merged_links(&here, target, &heading, &self.index_roots());
+        self.merge_plan = Some(MergePlan {
+            target: target.to_path_buf(),
+            into: notes::title_of(&body),
+            marker: "#".repeat(crate::composer::merge_level(&body)),
+            heading,
+            links,
+            notes,
+        });
+        self.overlay = Overlay::ConfirmMerge;
+    }
+
+    /// Commit the merge: the links first, while this note is still where they
+    /// expect it, then the body onto the target, then the file into the
+    /// trash. The target opens on the heading its body arrived under.
+    fn commit_merge(&mut self) {
+        self.overlay = Overlay::None;
+        let Some(plan) = self.merge_plan.take() else {
+            return;
+        };
+        self.sync_editor_to_note();
+        self.save_now();
+        let here = self.active_note().path.clone();
+        let source = self.active_note().content.clone();
+        let report =
+            crate::links::retarget_merged(&here, &plan.target, &plan.heading, &self.index_roots());
+        // read after the rewrite: the target is one of the notes it wrote
+        let Ok(body) = std::fs::read_to_string(&plan.target) else {
+            self.flash("merge failed: cannot read that note".to_string());
+            return;
+        };
+        let merged = crate::composer::merge(&body, &source, &plan.heading);
+        if let Err(e) = notes::write_atomic(&plan.target, &merged) {
+            self.flash(format!("merge failed: {e}"));
+            return;
+        }
+        if let Err(e) = notes::trash_note(&self.dir, &here) {
+            self.flash(format!("merge failed: {e}"));
+            return;
+        }
+        self.notes.remove(self.active);
+        self.active = 0;
+        self.dirty = false;
+        self.adopt_rewritten(&report);
+        self.adopt(&plan.target);
+        self.open_path(&plan.target);
+        self.reindex();
+        // the heading the body arrived under: the last one that says so, since
+        // the target may have had a section by that name already
+        let at = self.editor.lines().iter().rposition(|l| {
+            md::heading_text(l).is_some_and(|t| t.eq_ignore_ascii_case(&plan.heading))
+        });
+        if let Some(line) = at {
+            self.goto_heading(line);
+        }
+        self.flash(format!(
+            "merged into {} · {} rewritten",
+            plan.into,
+            match report.links {
+                1 => "1 link".to_string(),
+                n => format!("{n} links"),
+            }
+        ));
+    }
+
     fn toggle_preview(&mut self) {
         self.view = match self.view {
             View::Edit => View::Preview,
@@ -3475,6 +3706,7 @@ impl App {
             Overlay::Palette
             | Overlay::QuickOpen
             | Overlay::MoveFile
+            | Overlay::MergeInto
             | Overlay::Outline
             | Overlay::Templates
             | Overlay::OpenVault
@@ -3499,6 +3731,26 @@ impl App {
                     }
                 }
             }
+            Overlay::Extract => {
+                if !edit_line(&mut self.extract_input, &key) {
+                    match key.code {
+                        KeyCode::Tab | KeyCode::BackTab => {
+                            self.extract_leave = self.extract_leave.next()
+                        }
+                        KeyCode::Enter => self.commit_extract(),
+                        KeyCode::Esc => self.overlay = Overlay::None,
+                        _ => {}
+                    }
+                }
+            }
+            Overlay::ConfirmMerge => match key.code {
+                KeyCode::Enter => self.commit_merge(),
+                KeyCode::Esc => {
+                    self.overlay = Overlay::None;
+                    self.merge_plan = None;
+                }
+                _ => {}
+            },
             Overlay::Find => self.on_find_key(key),
             Overlay::None => match self.view {
                 View::Preview => self.on_preview_key(key),
@@ -3948,6 +4200,7 @@ impl App {
                 self.overlay = Overlay::ConfirmDelete;
             }
             Action::RenameFile => self.open_rename(),
+            Action::ExtractNote => self.open_extract(),
             Action::Find => self.open_find(),
             Action::InsertTemplate => self.open_templates(false),
             Action::FollowLink => self.follow_link_at_cursor(),
@@ -4889,6 +5142,7 @@ impl App {
                 Overlay::Palette
                 | Overlay::QuickOpen
                 | Overlay::MoveFile
+                | Overlay::MergeInto
                 | Overlay::Outline
                 | Overlay::Templates
                 | Overlay::Trash,
@@ -4921,6 +5175,7 @@ impl App {
             Overlay::Palette
                 | Overlay::QuickOpen
                 | Overlay::MoveFile
+                | Overlay::MergeInto
                 | Overlay::Outline
                 | Overlay::Templates
                 | Overlay::Trash
@@ -4944,7 +5199,10 @@ impl App {
             }
         } else if self.overlay == Overlay::ConfirmDelete {
             self.cancel_confirm();
-        } else if self.overlay == Overlay::RenameFile {
+        } else if matches!(
+            self.overlay,
+            Overlay::RenameFile | Overlay::Extract | Overlay::ConfirmMerge
+        ) {
             self.overlay = Overlay::None;
         } else if self.view == View::Preview
             && self
@@ -5320,6 +5578,8 @@ mod tests {
                 "Rename file",
                 "Move to folder",
                 "Trash",
+                "Extract to new note",
+                "Merge into note…",
                 "Unresolved links",
                 "Bookmark note",
                 "Bookmarks",
