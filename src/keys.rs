@@ -332,6 +332,8 @@ const SUPERSEDED: &[(&str, &[&str])] = &[
         "key_forward",
         &["⌥→", "alt+right", "ctrl+⌥→", "ctrl+alt+right", "^F"],
     ),
+    // shipped unbound, and the settings note wrote that down as `none`
+    ("key_find", &["none", "off", ""]),
 ];
 
 fn superseded(key: &str, spec: &str) -> bool {
@@ -909,6 +911,13 @@ mod tests {
             map.action(&ev(KeyCode::Char('F'), shifted)),
             Some(Action::SearchAll)
         );
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            Some(Action::Find)
+        );
+        // a settings note written while find shipped unbound says `none`;
+        // that is the old default, not a choice, so ^F still finds
+        let map = Keymap::from_settings(|k| (k == "key_find").then(|| "none".to_string()));
         assert_eq!(
             map.action(&ev(KeyCode::Char('f'), KeyModifiers::CONTROL)),
             Some(Action::Find)
