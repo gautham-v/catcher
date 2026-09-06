@@ -62,6 +62,19 @@ pub struct Palette {
     pub success: Color,
     /// The ground a highlight or an inverted heading sits its text on.
     pub ground: Color,
+    /// The five roles a fenced block's words take when `code_colors` is on.
+    /// Hue here is the one exception to the rule above, and it earns it: a
+    /// fence is already a patch of its own, so colour inside it says what a
+    /// token *is* without competing with anything the prose spends hue on.
+    pub code_keyword: Color,
+    pub code_string: Color,
+    /// Numbers take the accent: a literal is the one thing in a fence that a
+    /// reader scans for, the same job the accent does on the page.
+    pub code_number: Color,
+    /// Drawn italic as well as grey — a comment is the one part of a fence
+    /// that is prose.
+    pub code_comment: Color,
+    pub code_type: Color,
 }
 
 /// One settable colour: its settings-file name, the field it sets, and the
@@ -75,7 +88,7 @@ pub struct ColorKey {
 /// Every colour the settings file accepts, in the order the settings document
 /// lists them. The single source of truth: a name that isn't here can't be
 /// set and isn't documented.
-pub const COLORS: [ColorKey; 13] = [
+pub const COLORS: [ColorKey; 18] = [
     color(
         "accent",
         |p| &mut p.accent,
@@ -97,6 +110,11 @@ pub const COLORS: [ColorKey; 13] = [
     ),
     color("success", |p| &mut p.success, "tip and success callouts"),
     color("ground", |p| &mut p.ground, "under a highlight"),
+    color("code_keyword", |p| &mut p.code_keyword, "fn, let, for"),
+    color("code_string", |p| &mut p.code_string, "quoted text in code"),
+    color("code_number", |p| &mut p.code_number, "numeric literals"),
+    color("code_comment", |p| &mut p.code_comment, "comments, italic"),
+    color("code_type", |p| &mut p.code_type, "type and class names"),
 ];
 
 const fn color(
@@ -108,8 +126,8 @@ const fn color(
 }
 
 /// Just the names, derived from `COLORS`.
-pub const COLOR_KEYS: [&str; 13] = {
-    let mut keys = [""; 13];
+pub const COLOR_KEYS: [&str; 18] = {
+    let mut keys = [""; 18];
     let mut i = 0;
     while i < keys.len() {
         keys[i] = COLORS[i].name;
@@ -154,6 +172,11 @@ pub const DARK: Palette = Palette {
     danger: Color::Rgb(0xf7, 0x76, 0x8e),
     success: Color::Rgb(0x7f, 0xc8, 0x8f),
     ground: Color::Rgb(0x14, 0x14, 0x14),
+    code_keyword: Color::Rgb(0xc7, 0x92, 0xea),
+    code_string: Color::Rgb(0x9e, 0xce, 0x6a),
+    code_number: Color::Rgb(0xff, 0x9e, 0x64),
+    code_comment: Color::Rgb(0x5c, 0x63, 0x70),
+    code_type: Color::Rgb(0xe5, 0xc0, 0x7b),
 };
 
 pub const LIGHT: Palette = Palette {
@@ -170,6 +193,11 @@ pub const LIGHT: Palette = Palette {
     danger: Color::Rgb(0xcd, 0x30, 0x48),
     success: Color::Rgb(0x2e, 0x7d, 0x4f),
     ground: Color::Rgb(0xee, 0xee, 0xee),
+    code_keyword: Color::Rgb(0x6f, 0x42, 0xc1),
+    code_string: Color::Rgb(0x2c, 0x6e, 0x2f),
+    code_number: Color::Rgb(0xb8, 0x5c, 0x18),
+    code_comment: Color::Rgb(0x5f, 0x6a, 0x75),
+    code_type: Color::Rgb(0x7a, 0x5f, 0x14),
 };
 
 /// The palette in force. A lock rather than a `OnceLock`: settings are
@@ -509,6 +537,27 @@ mod tests {
             assert_ne!(p.heading, p.bright);
         }
         set_palette(DARK);
+    }
+
+    #[test]
+    fn the_five_code_roles_are_told_apart_at_both_polarities() {
+        for p in [DARK, LIGHT] {
+            let roles = [
+                p.code_keyword,
+                p.code_string,
+                p.code_number,
+                p.code_comment,
+                p.code_type,
+            ];
+            for (i, a) in roles.iter().enumerate() {
+                for b in &roles[i + 1..] {
+                    assert_ne!(a, b, "two roles share a colour in {p:?}");
+                }
+                // and none of them is the code foreground, which is what a
+                // token with no role keeps
+                assert_ne!(*a, p.code_fg);
+            }
+        }
     }
 
     #[test]

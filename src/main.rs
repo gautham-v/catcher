@@ -11,6 +11,7 @@ mod dates;
 mod editor;
 mod find;
 mod fold;
+mod highlight;
 mod history;
 mod images;
 mod index;
