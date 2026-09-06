@@ -890,6 +890,12 @@ struct Ren {
     /// closing fence, because whether it is drawn at all is only known once
     /// there is a diagram to draw.
     mermaid: Option<(String, usize)>,
+    /// Inside a fence whose language syntect knows and `code_colors` is on:
+    /// the language, the body so far and the offset it started at. Held back
+    /// for the same reason mermaid is — the block is parsed whole, once, and
+    /// a line is coloured by what the lines above it opened. A fence without
+    /// a language it knows never sets this and is drawn as it always was.
+    code: Option<(String, String, usize)>,
     table: Option<Table>,
     /// How a table wider than the page is drawn.
     tables: TableStyle,
@@ -964,6 +970,7 @@ impl Ren {
             list_numbers: Vec::new(),
             in_code_block: false,
             mermaid: None,
+            code: None,
             table: None,
             tables,
             width,
@@ -1834,6 +1841,41 @@ impl Ren {
         }
     }
 
+    /// A fence whose language syntect knows: the same two-space indent, the
+    /// same source offsets and the same ground as any other code block, with
+    /// each run of the line in its role's colour. A line the highlighter has
+    /// nothing to say about is pushed exactly as the plain arm pushes it, so
+    /// a fence half of which failed to parse still reads as code.
+    fn emit_code(&mut self, lang: &str, src: &str, off: usize) {
+        let runs = crate::highlight::runs(lang, src);
+        let mut off = off;
+        for (i, raw) in src.split_inclusive('\n').enumerate() {
+            let l = raw.trim_end_matches('\n').trim_end_matches('\r');
+            self.push("  ", theme::code(), None);
+            match runs.as_ref().and_then(|r| r.get(i)) {
+                Some(line_runs) => {
+                    let mut at = 0;
+                    for run in line_runs {
+                        let Some(text) = l.get(at..at + run.len) else {
+                            break;
+                        };
+                        let style = crate::highlight::style(run.role);
+                        self.push_at(text, style, None, Some(off + at));
+                        at += run.len;
+                    }
+                    if at < l.len() {
+                        self.push_at(&l[at..], theme::code(), None, Some(off + at));
+                    }
+                }
+                None => self.push_at(l, theme::code(), None, Some(off)),
+            }
+            off += raw.len();
+            let cells = std::mem::take(&mut self.cells);
+            let src_line = self.src_line;
+            self.emit_wrapped(cells, None, None, src_line, 2);
+        }
+    }
+
     fn run(&mut self, markdown: &str) {
         for (event, range) in Parser::new_ext(markdown, options()).into_offset_iter() {
             // file-absolute, like `pos_of`: this is the number a preview click
@@ -1978,11 +2020,18 @@ impl Ren {
                 if matches!(&kind, CodeBlockKind::Fenced(info) if crate::mermaid::is_mermaid(info))
                 {
                     self.mermaid = Some((String::new(), 0));
+                } else if let CodeBlockKind::Fenced(info) = &kind {
+                    if let Some(lang) = crate::highlight::language(info) {
+                        self.code = Some((lang.to_string(), String::new(), 0));
+                    }
                 }
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let Some((src, off)) = self.mermaid.take() {
                     self.emit_mermaid(&src, off);
+                }
+                if let Some((lang, src, off)) = self.code.take() {
+                    self.emit_code(&lang, &src, off);
                 }
                 self.in_code_block = false;
                 self.flush();
@@ -2113,6 +2162,12 @@ impl Ren {
                 } else if let Some((buf, off)) = self.mermaid.as_mut() {
                     // held back, not drawn: the fence is a diagram until the
                     // close proves otherwise, and a diagram is drawn whole
+                    if buf.is_empty() {
+                        *off = range.start;
+                    }
+                    buf.push_str(&text);
+                } else if let Some((_, buf, off)) = self.code.as_mut() {
+                    // held back for the same reason, and drawn on the close
                     if buf.is_empty() {
                         *off = range.start;
                     }
@@ -3626,6 +3681,57 @@ mod tests {
             .unwrap();
         assert_eq!(r.url(bare.link.unwrap()), Some("https://z.example/p"));
         assert!(line.text().contains("https://z.example/p"));
+    }
+
+    /// the style the reading view drew the first `word` of the page in
+    fn style_of(r: &Rendered, word: &str) -> Style {
+        let (line, at) = r
+            .lines
+            .iter()
+            .find_map(|l| l.text().find(word).map(|at| (l, at)))
+            .unwrap_or_else(|| panic!("{word} is nowhere on the page"));
+        line.cells[at].style
+    }
+
+    #[test]
+    fn a_fence_that_names_a_language_is_coloured_by_role() {
+        let _lock = crate::testutil::serial();
+        crate::highlight::set_enabled(true);
+        theme::set_palette(theme::DARK);
+        let r = render("```rust\n// why\nfn add() -> u32 { 12 }\n```\n");
+        // the source is on the page exactly as it was typed
+        assert!(flat(&r).contains("fn add() -> u32 { 12 }"));
+        assert_eq!(style_of(&r, "fn").fg, Some(theme::DARK.code_keyword));
+        assert_eq!(style_of(&r, "u32").fg, Some(theme::DARK.code_type));
+        assert_eq!(style_of(&r, "12").fg, Some(theme::DARK.code_number));
+        assert_eq!(style_of(&r, "// why").fg, Some(theme::DARK.code_comment));
+        // a name has no role and keeps the code colour, ground and all
+        assert_eq!(style_of(&r, "add"), theme::code());
+        // and a click still lands on the character it was aimed at
+        let line = r.lines.iter().find(|l| l.text().contains("fn ")).unwrap();
+        let at = line.text().find("fn ").unwrap();
+        assert_eq!(line.cells[at].src, Some((2, 0)));
+    }
+
+    #[test]
+    fn a_fence_without_a_language_catcher_knows_is_drawn_as_it_always_was() {
+        let _lock = crate::testutil::serial();
+        crate::highlight::set_enabled(true);
+        theme::set_palette(theme::DARK);
+        for md in [
+            "```\nfn add() {}\n```\n",
+            "```gibberish\nfn add() {}\n```\n",
+        ] {
+            let r = render(md);
+            let line = r.lines.iter().find(|l| l.text().contains("fn")).unwrap();
+            assert!(line.cells.iter().all(|c| c.style == theme::code()), "{md}");
+        }
+        // and neither is a fence with colour turned off
+        crate::highlight::set_enabled(false);
+        let r = render("```rust\nfn add() {}\n```\n");
+        let line = r.lines.iter().find(|l| l.text().contains("fn")).unwrap();
+        assert!(line.cells.iter().all(|c| c.style == theme::code()));
+        crate::highlight::set_enabled(true);
     }
 
     #[test]
