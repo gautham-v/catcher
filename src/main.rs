@@ -4,6 +4,7 @@ mod cli;
 mod clipboard;
 mod commands;
 mod complete;
+mod composer;
 mod config;
 mod contents;
 mod daily;
