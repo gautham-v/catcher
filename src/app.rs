@@ -96,6 +96,8 @@ pub enum Overlay {
     MoveFile,
     /// Every heading of the open note: ⏎ goes there, ⌥⏎ folds it.
     Outline,
+    /// The templates folder: ⏎ inserts one, or makes a note out of it.
+    Templates,
     /// Re-root the session in another folder: recent vaults, or a typed path.
     OpenVault,
     /// The notes in `.trash`: ⏎ puts one back, ⌥⌫ removes it for good.
@@ -127,6 +129,8 @@ pub enum Command {
     OpenVault,
     /// The notes in `.trash`, in a picker of their own.
     Trash,
+    /// A new note whose body is a template from the templates folder.
+    NewFromTemplate,
     InsertTable,
     Table(crate::table::Op),
     TableSource,
@@ -155,8 +159,9 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 40] = [
+const COMMANDS: [Command; 42] = [
     Command::Act(Action::NewNote),
+    Command::NewFromTemplate,
     Command::Act(Action::DailyNote),
     Command::Act(Action::QuickOpen),
     Command::Act(Action::SearchAll),
@@ -196,6 +201,7 @@ const COMMANDS: [Command; 40] = [
     Command::InsertCallout,
     Command::InsertMath,
     Command::InsertFootnote,
+    Command::Act(Action::InsertTemplate),
 ];
 
 impl Command {
@@ -232,6 +238,7 @@ impl Command {
                 Action::MoveLineDown => ("Move line down", "the line or selection, one down"),
                 Action::ToggleHeading => ("Toggle heading", "#, ##, ###, then none"),
                 Action::InsertDate => ("Insert today's date", "2026-09-01, at the cursor"),
+                Action::InsertTemplate => ("Insert template", "a note from the templates folder, at the cursor"),
                 Action::CopyPath => ("Copy path", "the note's path, to the clipboard"),
                 Action::RevealFile => ("Reveal in Finder", "show the file on disk"),
                 Action::OpenSplitRight => ("Open in split right", "this note again, beside this one"),
@@ -251,6 +258,7 @@ impl Command {
             Command::Bookmarks => ("Bookmarks", "the bookmarked notes; ⏎ opens one"),
             Command::OpenVault => ("Open vault…", "another folder as the notes folder for this session"),
             Command::Trash => ("Trash", "the notes in .trash; ⏎ puts one back, ⌥⌫ removes it for good"),
+            Command::NewFromTemplate => ("New from template", "a new note whose body is a template"),
             Command::InsertTable => ("Table: Insert table", "a 2×2 grid at the cursor"),
             Command::InsertCallout => ("Insert callout", "> [!note] with a title and a body"),
             Command::InsertMath => ("Insert math block", "$$ … $$ on lines of their own"),
@@ -383,6 +391,10 @@ pub enum Item {
     Vault(PathBuf),
     /// A note in `.trash`, from the trash picker. Choosing it puts it back.
     Trashed(PathBuf),
+    /// A template file, from the templates picker. Choosing it inserts the
+    /// template or makes a note out of it, depending on which command opened
+    /// the picker.
+    Template(PathBuf),
     Command(Command),
 }
 
@@ -555,6 +567,12 @@ pub struct App {
     /// being confirmed is the permanent one. `None` for the ordinary delete,
     /// which is what tells the two apart in one box.
     purge: Option<PathBuf>,
+    /// Every template the picker offers, read once when it opens, the same
+    /// way the move picker walks its folders.
+    pub templates: Vec<crate::templates::Template>,
+    /// Whether the open templates picker makes a new note out of what is
+    /// picked, rather than inserting it at the cursor.
+    pub template_new: bool,
     /// A source line the reading view should scroll to on its next draw. Only
     /// the draw knows which page row a line lands on once wrapped.
     pub preview_goto: Option<usize>,
@@ -781,6 +799,8 @@ impl App {
             move_targets: Vec::new(),
             trash: Vec::new(),
             purge: None,
+            templates: Vec::new(),
+            template_new: false,
             preview_goto: None,
             overlay_rect: Rect::default(),
             hover: None,
@@ -2673,6 +2693,7 @@ impl App {
             Overlay::OpenVault => self.vault_items(),
             Overlay::Outline => self.outline_items(),
             Overlay::Trash => self.trash_items(),
+            Overlay::Templates => self.template_items(),
             _ => Vec::new(),
         }
     }
@@ -2738,8 +2759,14 @@ impl App {
     }
 
     fn new_note(&mut self) {
+        self.new_note_with(String::new());
+    }
+
+    /// A new note holding `content`, open and ready to type in. The filename
+    /// follows its first line, as every new note's does.
+    fn new_note_with(&mut self, content: String) {
         self.save_now();
-        match notes::create(&self.dir) {
+        match notes::create_with(&self.dir, content) {
             Ok(n) => {
                 self.notes.insert(0, n);
                 self.active = 0;
@@ -2749,6 +2776,76 @@ impl App {
             }
             Err(e) => self.flash(format!("create failed: {e}")),
         }
+    }
+
+    /// *Insert template* and *New from template*: the templates folder read
+    /// once, and the picker up. An empty folder still opens — the prompt
+    /// there says where to put a template — rather than flashing and leaving
+    /// nothing to look at.
+    fn open_templates(&mut self, new_note: bool) {
+        self.save_now();
+        self.templates = crate::templates::list(&self.config.templates_dir());
+        self.template_new = new_note;
+        self.query.clear();
+        self.selected = 0;
+        self.overlay = Overlay::Templates;
+    }
+
+    /// Templates picker rows for the current query, best first.
+    pub fn template_items(&self) -> Vec<Item> {
+        crate::templates::filter(&self.templates, &self.query)
+            .into_iter()
+            .map(|t| Item::Template(t.path.clone()))
+            .collect()
+    }
+
+    /// A template file read and filled in. `{{date}}` and the days either
+    /// side of it are in `daily_format`, so a `[[link]]` written in a
+    /// template reaches the daily note it names.
+    fn render_template(&mut self, path: &Path, title: &str) -> Option<String> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Some(crate::templates::render(
+                &text,
+                title,
+                &self.config.daily_format,
+                crate::dates::now(),
+            )),
+            Err(e) => {
+                self.flash(format!("template: {e}"));
+                None
+            }
+        }
+    }
+
+    /// *Insert template*: the template at the cursor, in one undo step, with
+    /// the cursor left at the end of what went in.
+    fn insert_template(&mut self, path: &Path) {
+        self.enter_edit_view();
+        let title = self.active_note().title();
+        let Some(body) = self.render_template(path, &title) else {
+            return;
+        };
+        self.editor.insert_str(&body);
+        self.sync_editor_to_note();
+        let name = crate::templates::name(path);
+        let undo = self.config.keys.label(Action::Undo);
+        self.flash(if undo.is_empty() {
+            format!("{name} inserted")
+        } else {
+            format!("{name} inserted · {undo} undoes")
+        });
+    }
+
+    /// *New from template*: a note whose body is the template, made the way
+    /// any new note is. A note that does not exist yet has no title of its
+    /// own, so `{{title}}` is what catcher calls one until its first line
+    /// says otherwise.
+    fn new_from_template(&mut self, path: &Path) {
+        let title = notes::title_of("");
+        let Some(body) = self.render_template(path, &title) else {
+            return;
+        };
+        self.new_note_with(body);
     }
 
     /// Today's note, made from the template the first time and then simply
@@ -3005,6 +3102,13 @@ impl App {
             Item::At(path, line) => self.open_path_line(&path, line),
             Item::Vault(root) => self.open_vault(&root),
             Item::Trashed(path) => self.restore_trashed(&path),
+            Item::Template(path) => {
+                if self.template_new {
+                    self.new_from_template(&path);
+                } else {
+                    self.insert_template(&path);
+                }
+            }
             // handled above, before the overlay was closed
             Item::Folder(_) | Item::Notice => {}
             // palette-only: the one command without a key
@@ -3014,6 +3118,7 @@ impl App {
             Item::Command(Command::Bookmarks) => self.open_bookmarks(),
             Item::Command(Command::OpenVault) => self.open_vault_picker(),
             Item::Command(Command::Trash) => self.open_trash(),
+            Item::Command(Command::NewFromTemplate) => self.open_templates(true),
             Item::Command(Command::InsertTable) => self.insert_table(),
             Item::Command(Command::InsertCallout) => {
                 self.insert_block(vec!["> [!note] ".to_string(), "> ".to_string()], 0, 10);
@@ -3371,6 +3476,7 @@ impl App {
             | Overlay::QuickOpen
             | Overlay::MoveFile
             | Overlay::Outline
+            | Overlay::Templates
             | Overlay::OpenVault
             | Overlay::Trash => self.on_palette_key(key),
             Overlay::ConfirmDelete => match key.code {
@@ -3843,6 +3949,7 @@ impl App {
             }
             Action::RenameFile => self.open_rename(),
             Action::Find => self.open_find(),
+            Action::InsertTemplate => self.open_templates(false),
             Action::FollowLink => self.follow_link_at_cursor(),
             Action::NavBack => self.nav_history(true),
             Action::NavForward => self.nav_history(false),
@@ -4783,6 +4890,7 @@ impl App {
                 | Overlay::QuickOpen
                 | Overlay::MoveFile
                 | Overlay::Outline
+                | Overlay::Templates
                 | Overlay::Trash,
                 _,
             ) => self.select_step(delta),
@@ -4814,6 +4922,7 @@ impl App {
                 | Overlay::QuickOpen
                 | Overlay::MoveFile
                 | Overlay::Outline
+                | Overlay::Templates
                 | Overlay::Trash
         ) {
             if let Some((_, item)) = self
@@ -5198,6 +5307,7 @@ mod tests {
             labels,
             [
                 "New note",
+                "New from template",
                 "Today's note",
                 "Open note",
                 "Search in all files",
@@ -5237,6 +5347,7 @@ mod tests {
                 "Insert callout",
                 "Insert math block",
                 "Insert footnote",
+                "Insert template",
             ]
         );
         // every Act row names an action with a label; the palette-only ones
@@ -5758,6 +5869,31 @@ mod tests {
             .settings_rows()
             .iter()
             .any(|(k, v, _)| *k == "key_outline" && v == "none"));
+    }
+
+    #[test]
+    fn the_two_template_commands_sit_in_the_palette_and_one_takes_a_key() {
+        assert!(COMMANDS.contains(&Command::Act(Action::InsertTemplate)));
+        assert!(COMMANDS.contains(&Command::NewFromTemplate));
+        assert_eq!(
+            Command::Act(Action::InsertTemplate).label(),
+            (
+                "Insert template",
+                "a note from the templates folder, at the cursor"
+            )
+        );
+        assert_eq!(
+            Command::NewFromTemplate.label(),
+            ("New from template", "a new note whose body is a template")
+        );
+        // making a note out of one is palette-only; inserting takes a key
+        assert_eq!(Command::NewFromTemplate.action(), None);
+        let map = crate::keys::Keymap::default();
+        assert_eq!(map.label(Action::InsertTemplate), "");
+        assert!(map
+            .settings_rows()
+            .iter()
+            .any(|(k, v, _)| *k == "key_template" && v == "none"));
     }
 
     #[test]

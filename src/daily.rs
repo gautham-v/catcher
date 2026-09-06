@@ -28,42 +28,13 @@ pub fn resolve(notes_dir: &Path, setting: &Path) -> PathBuf {
     }
 }
 
-/// The template with its variables filled in for `now`. `{{title}}` is the
-/// long date; `{{date}}`, `{{yesterday}}` and `{{tomorrow}}` are in
-/// `daily_format` so they link to the notes those days get; `{{time}}` is
-/// `HH:mm`; `{{date:FMT}}` and `{{time:FMT}}` take any format. An unknown
-/// variable is left as it was typed.
+/// The template with its variables filled in for `now`. The pass itself is
+/// [`crate::templates::render`], which *Insert template* uses too; a daily
+/// note only decides what `{{title}}` is — the long date, since that is what
+/// the day's note is called.
 pub fn render(template: &str, format: &str, now: Now) -> String {
-    let ((y, m, d), time) = now;
-    let mut out = String::new();
-    let mut rest = template;
-    while let Some(start) = rest.find("{{") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        let Some(end) = after.find("}}") else {
-            out.push_str(&rest[start..]);
-            return out;
-        };
-        let (name, fmt) = match after[..end].split_once(':') {
-            Some((n, f)) => (n.trim(), Some(f)),
-            None => (after[..end].trim(), None),
-        };
-        let value = match (name, fmt) {
-            ("title", None) => Some(dates::long(y, m, d)),
-            ("date", fmt) => Some(dates::format(fmt.unwrap_or(format), now)),
-            ("time", fmt) => Some(dates::format(fmt.unwrap_or("HH:mm"), now)),
-            ("yesterday", None) => Some(dates::format(format, (dates::shift(y, m, d, -1), time))),
-            ("tomorrow", None) => Some(dates::format(format, (dates::shift(y, m, d, 1), time))),
-            _ => None,
-        };
-        match value {
-            Some(v) => out.push_str(&v),
-            None => out.push_str(&rest[start..start + 2 + end + 2]),
-        }
-        rest = &after[end + 2..];
-    }
-    out.push_str(rest);
-    out
+    let ((y, m, d), _) = now;
+    crate::templates::render(template, &dates::long(y, m, d), format, now)
 }
 
 /// What a fresh note holds when there is no template file: a heading.

@@ -55,6 +55,7 @@ pub enum Action {
     ToggleOpener,
     Tags,
     Find,
+    InsertTemplate,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -295,6 +296,12 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_find",
         None,
         "find in note — step through matches, or replace them",
+    ),
+    (
+        Action::InsertTemplate,
+        "key_template",
+        None,
+        "insert a template from the templates folder at the cursor",
     ),
 ];
 
