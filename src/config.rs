@@ -228,6 +228,10 @@ pub struct Config {
     /// `attachments`, or what an Obsidian vault's `./sub` setting names. Not
     /// a setting of its own — read from the vault, never written.
     pub attachment_subfolder: String,
+    /// The folder *Insert template* lists, under the notes dir unless
+    /// absolute. Kept as written, like `daily_dir`, so the settings file
+    /// reads back the way it was typed.
+    pub templates_dir: PathBuf,
     pub theme: Theme,
     /// User colour overrides, already applied on top of the theme's palette.
     pub palette: Palette,
@@ -302,6 +306,7 @@ impl Default for Config {
         Config {
             attachments_dir: notes_dir.join("attachments"),
             attachment_subfolder: "attachments".to_string(),
+            templates_dir: PathBuf::from(crate::templates::DEFAULT_DIR),
             notes_dir,
             theme: Theme::Auto,
             palette: theme::base(theme::detected()),
@@ -448,6 +453,10 @@ impl Config {
             self.attachments_dir = self.notes_dir.join("attachments");
             self.adopt_obsidian_attachments();
         }
+        if value(text, "templates_dir").is_none() {
+            self.templates_dir = PathBuf::from(crate::templates::DEFAULT_DIR);
+            self.adopt_obsidian_templates();
+        }
     }
 
     /// When `attachments_dir` is not set (or is just the default), take the
@@ -462,6 +471,25 @@ impl Config {
         };
         if let Some(setting) = obsidian_attachment_setting(&text) {
             self.set_obsidian_attachments(&setting);
+        }
+    }
+
+    /// When `templates_dir` is not set (or is just the default), take the
+    /// vault's own answer: Obsidian's Templates plugin keeps its folder in
+    /// `.obsidian/templates.json`, and that is where a vault's templates are
+    /// whether or not catcher was told about them.
+    fn adopt_obsidian_templates(&mut self) {
+        if self.templates_dir != Path::new(crate::templates::DEFAULT_DIR) {
+            return;
+        }
+        let Ok(text) = fs::read_to_string(self.notes_dir.join(".obsidian/templates.json")) else {
+            return;
+        };
+        if let Some(folder) = obsidian_template_folder(&text) {
+            let folder = folder.trim().trim_matches('/');
+            if !folder.is_empty() {
+                self.templates_dir = PathBuf::from(folder);
+            }
         }
     }
 
@@ -583,6 +611,10 @@ impl Config {
         if let Some(v) = value(text, "daily_template") {
             c.daily_template = expand(&v, &home);
         }
+        if let Some(v) = value(text, "templates_dir") {
+            c.templates_dir = expand(&v, &home);
+        }
+        c.adopt_obsidian_templates();
         c.keys = Keymap::from_settings(|key| value(text, key));
         c.preview_click = word(text, "preview_click").unwrap_or(c.preview_click);
         c.linked_mentions = flag(text, "linked_mentions", c.linked_mentions);
@@ -607,6 +639,11 @@ impl Config {
     /// The daily template file, resolved against the notes dir.
     pub fn daily_template(&self) -> PathBuf {
         crate::daily::resolve(&self.notes_dir, &self.daily_template)
+    }
+
+    /// The folder *Insert template* lists, resolved against the notes dir.
+    pub fn templates_dir(&self) -> PathBuf {
+        crate::daily::resolve(&self.notes_dir, &self.templates_dir)
     }
 
     /// How an attachment should be written into a note: relative when it sits
@@ -645,6 +682,11 @@ impl Config {
             "attachments_dir",
             short(&self.attachments_dir),
             "where pasted images go",
+        );
+        d.row(
+            "templates_dir",
+            short(&self.templates_dir),
+            "the folder Insert template lists; a vault's .obsidian/templates.json sets it when this does not",
         );
 
         d.section("Daily note");
@@ -965,12 +1007,23 @@ impl Doc {
 ///
 /// Both separators are accepted so a `key = value` typed out of habit still
 /// works.
-/// The `attachmentFolderPath` string in an Obsidian `app.json`, found by
-/// looking rather than parsing: the file is flat and the value is a plain
-/// string, and a JSON reader would be a dependency for one key.
+/// The `attachmentFolderPath` string in an Obsidian `app.json`.
 pub fn obsidian_attachment_setting(json: &str) -> Option<String> {
-    let key = "\"attachmentFolderPath\"";
-    let rest = &json[json.find(key)? + key.len()..];
+    obsidian_string(json, "attachmentFolderPath")
+}
+
+/// The `folder` string in an Obsidian `templates.json` — where that vault's
+/// Templates plugin keeps its files.
+pub fn obsidian_template_folder(json: &str) -> Option<String> {
+    obsidian_string(json, "folder")
+}
+
+/// A string value out of one of Obsidian's small config files, found by
+/// looking rather than parsing: the files are flat and the values are plain
+/// strings, and a JSON reader would be a dependency for two keys.
+fn obsidian_string(json: &str, name: &str) -> Option<String> {
+    let key = format!("\"{name}\"");
+    let rest = &json[json.find(&key)? + key.len()..];
     let rest = rest.trim_start();
     let rest = rest.strip_prefix(':')?.trim_start();
     let rest = rest.strip_prefix('"')?;
@@ -1586,6 +1639,72 @@ mod tests {
         };
         c.adopt_obsidian_attachments();
         assert_eq!(c.attachments_dir, PathBuf::from("/pics"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_templates_folder_defaults_to_templates_and_round_trips() {
+        let c = Config::default();
+        assert_eq!(c.templates_dir, PathBuf::from("templates"));
+        assert_eq!(c.templates_dir(), c.notes_dir.join("templates"));
+        let c = Config {
+            notes_dir: PathBuf::from("/vault"),
+            templates_dir: PathBuf::from("_meta/forms"),
+            ..Default::default()
+        };
+        assert_eq!(c.templates_dir(), PathBuf::from("/vault/_meta/forms"));
+        let back = Config::from_str(&c.to_document());
+        assert_eq!(back.templates_dir, c.templates_dir);
+        // an absolute folder stands, and a tilde expands
+        let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        assert_eq!(
+            Config::from_str("- templates_dir: ~/forms\n").templates_dir,
+            home.join("forms")
+        );
+        let c = Config {
+            notes_dir: PathBuf::from("/vault"),
+            templates_dir: PathBuf::from("/forms"),
+            ..Default::default()
+        };
+        assert_eq!(c.templates_dir(), PathBuf::from("/forms"));
+    }
+
+    #[test]
+    fn the_templates_folder_comes_from_obsidian_when_the_setting_does_not() {
+        let json = r#"{ "folder": "_meta/forms", "createTitle": "" }"#;
+        assert_eq!(
+            obsidian_template_folder(json).as_deref(),
+            Some("_meta/forms")
+        );
+        assert_eq!(obsidian_template_folder(r#"{"other": "x"}"#), None);
+        assert_eq!(obsidian_template_folder(r#"{"folder": 3}"#), None);
+
+        // a named templates_dir is left alone; the default is replaced
+        let dir = crate::testutil::tmpdir("config", "obsidian-templates");
+        std::fs::create_dir_all(dir.join(".obsidian")).unwrap();
+        std::fs::write(dir.join(".obsidian/templates.json"), json).unwrap();
+        let mut c = Config {
+            notes_dir: dir.clone(),
+            ..Default::default()
+        };
+        c.adopt_obsidian_templates();
+        assert_eq!(c.templates_dir, PathBuf::from("_meta/forms"));
+        assert_eq!(c.templates_dir(), dir.join("_meta/forms"));
+        let mut c = Config {
+            notes_dir: dir.clone(),
+            templates_dir: PathBuf::from("forms"),
+            ..Default::default()
+        };
+        c.adopt_obsidian_templates();
+        assert_eq!(c.templates_dir, PathBuf::from("forms"));
+        // an empty folder in the file is no answer at all
+        std::fs::write(dir.join(".obsidian/templates.json"), r#"{"folder": ""}"#).unwrap();
+        let mut c = Config {
+            notes_dir: dir.clone(),
+            ..Default::default()
+        };
+        c.adopt_obsidian_templates();
+        assert_eq!(c.templates_dir, PathBuf::from("templates"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
