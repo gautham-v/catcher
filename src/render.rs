@@ -834,6 +834,11 @@ struct Table {
     row: Vec<Vec<PCell>>,
 }
 
+/// A fence held back until its closing marker: the language syntect knows for
+/// it, its body so far, and where each of the parser's text events landed in
+/// the body against where it came from in the file.
+type Fence = (Option<String>, String, Vec<(usize, usize)>);
+
 /// One level of quote decoration around a row.
 #[derive(Clone, Copy, Debug)]
 enum Deco {
@@ -890,12 +895,18 @@ struct Ren {
     /// closing fence, because whether it is drawn at all is only known once
     /// there is a diagram to draw.
     mermaid: Option<(String, usize)>,
-    /// Inside a fence whose language syntect knows and `code_colors` is on:
-    /// the language, the body so far and the offset it started at. Held back
-    /// for the same reason mermaid is — the block is parsed whole, once, and
-    /// a line is coloured by what the lines above it opened. A fence without
-    /// a language it knows never sets this and is drawn as it always was.
-    code: Option<(String, String, usize)>,
+    /// Inside a fence: its language when syntect knows one and `code_colors`
+    /// is on, the body so far, and the offset it started at. Held back the
+    /// way mermaid is — the block is drawn whole because the band around it,
+    /// the padding rows and the width of its gutter are all facts about the
+    /// block, not about any one line of it. An indented code block sets none
+    /// of this and is drawn line by line, as it always was.
+    ///
+    /// The third field is where each of the parser's text events landed in
+    /// the buffer and where it came from in the file, because the two do not
+    /// advance together: a CRLF note loses its `\r` on the way in, and a
+    /// block's offsets would drift a byte a line without the marks.
+    code: Option<Fence>,
     table: Option<Table>,
     /// How a table wider than the page is drawn.
     tables: TableStyle,
@@ -1841,17 +1852,38 @@ impl Ren {
         }
     }
 
-    /// A fence whose language syntect knows: the same two-space indent, the
-    /// same source offsets and the same ground as any other code block, with
-    /// each run of the line in its role's colour. A line the highlighter has
-    /// nothing to say about is pushed exactly as the plain arm pushes it, so
-    /// a fence half of which failed to parse still reads as code.
-    fn emit_code(&mut self, lang: &str, src: &str, off: usize) {
-        let runs = crate::highlight::runs(lang, src);
-        let mut off = off;
+    /// A fenced block as a band: one blank row of code ground above and below
+    /// it, two columns of that ground either side, and the block's own rows
+    /// between — line-numbered down the left, each line's indent ruled every
+    /// fourth column. What Obsidian draws, in the colours the terminal has.
+    ///
+    /// The whole fence at once and not a line at a time, because everything
+    /// the band needs is a fact about the block: how wide the gutter is, that
+    /// the numbers restart at 1, and that a line the highlighter could not
+    /// reach still sits inside the same band. A fence whose language syntect
+    /// does not know arrives here too, with `lang` `None`: it takes the band
+    /// and the gutter and keeps the plain code colour throughout.
+    fn emit_code(&mut self, lang: Option<&str>, src: &str, marks: &[(usize, usize)]) {
+        let runs = lang.and_then(|l| crate::highlight::runs(l, src));
+        let lines = src.split_inclusive('\n').count();
+        // the last line's number decides the width, so the column never moves
+        // under the reader as the block goes past nine or ninety-nine rows
+        let gutter = if crate::highlight::numbers() {
+            lines.to_string().len() + 2
+        } else {
+            0
+        };
+        let avail = self.inner_width();
+        // a width no page has means the caller did not care: no band is
+        // painted and nothing is wrapped, which is what the unbounded render
+        // asks for
+        let band = avail != usize::MAX;
+        let text_w = avail.saturating_sub(gutter + 4).max(8);
+        self.emit_band_row(avail);
+        let mut pos = 0;
         for (i, raw) in src.split_inclusive('\n').enumerate() {
             let l = raw.trim_end_matches('\n').trim_end_matches('\r');
-            self.push("  ", theme::code(), None);
+            let off = source_offset(marks, pos);
             match runs.as_ref().and_then(|r| r.get(i)) {
                 Some(line_runs) => {
                     let mut at = 0;
@@ -1869,11 +1901,54 @@ impl Ren {
                 }
                 None => self.push_at(l, theme::code(), None, Some(off)),
             }
-            off += raw.len();
-            let cells = std::mem::take(&mut self.cells);
+            pos += raw.len();
+            let cells = indent_guides(std::mem::take(&mut self.cells));
+            let rows = if band {
+                wrap_pcells(&cells, text_w)
+            } else {
+                vec![cells]
+            };
             let src_line = self.src_line;
-            self.emit_wrapped(cells, None, None, src_line, 2);
+            for (j, row) in rows.into_iter().enumerate() {
+                // the two columns of padding are ours, and so is the gutter:
+                // neither carries a source position, so a click on one lands
+                // where a click past the end of a line lands and a selection
+                // over the block never picks the numbers up
+                let mut out = str_cells("  ", theme::code());
+                out.extend(gutter_cells(i + 1, gutter, j == 0));
+                out.extend(row);
+                if band {
+                    let pad = avail.saturating_sub(cells_width(&out));
+                    out.extend(str_cells(&" ".repeat(pad), theme::code()));
+                }
+                self.emit_line(PLine {
+                    cells: out,
+                    checkbox: None,
+                    image: None,
+                    src_line,
+                    wide: false,
+                    hang: 0,
+                });
+            }
         }
+        self.emit_band_row(avail);
+    }
+
+    /// One blank row of the block's ground: the padding above and below the
+    /// code, which is what makes a fence read as a band rather than as a run
+    /// of coloured lines.
+    fn emit_band_row(&mut self, avail: usize) {
+        if avail == usize::MAX {
+            return;
+        }
+        self.emit_line(PLine {
+            cells: str_cells(&" ".repeat(avail), theme::code()),
+            checkbox: None,
+            image: None,
+            src_line: self.src_line,
+            wide: false,
+            hang: 0,
+        });
     }
 
     fn run(&mut self, markdown: &str) {
@@ -2021,17 +2096,16 @@ impl Ren {
                 {
                     self.mermaid = Some((String::new(), 0));
                 } else if let CodeBlockKind::Fenced(info) = &kind {
-                    if let Some(lang) = crate::highlight::language(info) {
-                        self.code = Some((lang.to_string(), String::new(), 0));
-                    }
+                    let lang = crate::highlight::language(info).map(str::to_string);
+                    self.code = Some((lang, String::new(), Vec::new()));
                 }
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let Some((src, off)) = self.mermaid.take() {
                     self.emit_mermaid(&src, off);
                 }
-                if let Some((lang, src, off)) = self.code.take() {
-                    self.emit_code(&lang, &src, off);
+                if let Some((lang, src, marks)) = self.code.take() {
+                    self.emit_code(lang.as_deref(), &src, &marks);
                 }
                 self.in_code_block = false;
                 self.flush();
@@ -2166,11 +2240,9 @@ impl Ren {
                         *off = range.start;
                     }
                     buf.push_str(&text);
-                } else if let Some((_, buf, off)) = self.code.as_mut() {
+                } else if let Some((_, buf, marks)) = self.code.as_mut() {
                     // held back for the same reason, and drawn on the close
-                    if buf.is_empty() {
-                        *off = range.start;
-                    }
+                    marks.push((buf.len(), range.start));
                     buf.push_str(&text);
                 } else if let Some(sup) = self.script() {
                     // inside <sub> or <sup>: the glyphs change, not the style
@@ -2582,6 +2654,72 @@ fn align_of(a: Alignment) -> crate::md::Align {
         Alignment::Center => crate::md::Align::Center,
         _ => crate::md::Align::Left,
     }
+}
+
+/// Where byte `pos` of a buffered fence came from in the file: the last text
+/// event that began at or before it, plus however far past its start `pos`
+/// is. One event per line in practice, which is what keeps a CRLF fence
+/// honest — the `\r` the parser dropped is put back by the next event's own
+/// offset rather than counted.
+fn source_offset(marks: &[(usize, usize)], pos: usize) -> usize {
+    match marks.iter().rev().find(|(at, _)| *at <= pos) {
+        Some((at, off)) => off + (pos - at),
+        None => pos,
+    }
+}
+
+/// The line number down the left of a row of a fence, right-aligned in the
+/// digits the block's last number needs and then two columns of air. A
+/// wrapped continuation row gets the air and no number: the number counts
+/// source lines, and a wrap did not make one.
+fn gutter_cells(n: usize, width: usize, first: bool) -> Vec<PCell> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let label = if first { n.to_string() } else { String::new() };
+    str_cells(
+        &format!("{label:>w$}  ", w = width - 2),
+        theme::code_gutter(),
+    )
+}
+
+/// A code row's leading whitespace redrawn as indent guides: a thin rule
+/// standing in every fourth column, so depth is countable at a glance instead
+/// of measurable with a finger. A tab stands four columns wide here, which is
+/// the only width that lets the rules line up with spaces beside them.
+///
+/// Only the leading run: a rule struck through the middle of a string would
+/// be reading the text, not ruling it.
+fn indent_guides(cells: Vec<PCell>) -> Vec<PCell> {
+    if !crate::highlight::numbers() {
+        return cells;
+    }
+    let lead = cells
+        .iter()
+        .take_while(|c| c.ch == ' ' || c.ch == '\t')
+        .count();
+    if lead == 0 {
+        return cells;
+    }
+    let guide = theme::code_guide();
+    let mut out: Vec<PCell> = Vec::with_capacity(cells.len() + lead * 3);
+    for c in &cells[..lead] {
+        let width = if c.ch == '\t' { 4 - out.len() % 4 } else { 1 };
+        for k in 0..width {
+            let at = out.len();
+            let ruled = at.is_multiple_of(4);
+            out.push(PCell {
+                ch: if ruled { theme::CODE_GUIDE } else { ' ' },
+                style: if ruled { guide } else { c.style },
+                link: None,
+                // a tab is one character however many columns it takes, so
+                // only the first of them answers to it
+                src: if k == 0 { c.src } else { None },
+            });
+        }
+    }
+    out.extend_from_slice(&cells[lead..]);
+    out
 }
 
 fn str_cells(s: &str, style: Style) -> Vec<PCell> {
@@ -3705,12 +3843,76 @@ mod tests {
         assert_eq!(style_of(&r, "u32").fg, Some(theme::DARK.code_type));
         assert_eq!(style_of(&r, "12").fg, Some(theme::DARK.code_number));
         assert_eq!(style_of(&r, "// why").fg, Some(theme::DARK.code_comment));
-        // a name has no role and keeps the code colour, ground and all
-        assert_eq!(style_of(&r, "add"), theme::code());
+        // a comment says it with colour alone now: no lean, which only
+        // blurred a fence at terminal sizes
+        assert!(style_of(&r, "// why").add_modifier.is_empty());
+        assert_eq!(style_of(&r, "add").fg, Some(theme::DARK.code_function));
+        assert_eq!(style_of(&r, "(").fg, Some(theme::DARK.code_punctuation));
         // and a click still lands on the character it was aimed at
         let line = r.lines.iter().find(|l| l.text().contains("fn ")).unwrap();
         let at = line.text().find("fn ").unwrap();
         assert_eq!(line.cells[at].src, Some((2, 0)));
+    }
+
+    /// The band Obsidian draws, in a terminal: a padding row of the code
+    /// ground above the block, numbers down its left, and the ground running
+    /// the full width of the page column.
+    #[test]
+    fn a_fence_is_a_banded_block_with_its_lines_numbered() {
+        let _lock = crate::testutil::serial();
+        crate::highlight::set_enabled(true);
+        crate::highlight::set_numbers(true);
+        theme::set_palette(theme::DARK);
+        let r = render_wide("text\n\n```rust\nlet a = 1;\n    let b = 2;\n```\n", 40);
+        let first = r
+            .lines
+            .iter()
+            .position(|l| l.text().contains("let a"))
+            .unwrap();
+        // the number is right there in front of the first line, and the
+        // second line takes the next one
+        assert!(
+            r.lines[first].text().starts_with("  1  let a = 1;"),
+            "{:?}",
+            r.lines[first].text()
+        );
+        assert!(r.lines[first + 1].text().starts_with("  2  "));
+        // a padding row of the block's own ground above it and below it
+        for row in [first - 1, first + 2] {
+            let cells = &r.lines[row].cells;
+            assert!(cells
+                .iter()
+                .all(|c| c.ch == ' ' && c.style == theme::code()));
+            assert_eq!(cells.len(), 40);
+        }
+        // every row of the band is the full width of the page column
+        assert_eq!(cells_width(&r.lines[first].cells), 40);
+        // the gutter is the renderer's, not the file's: a click on it maps
+        // nowhere and a selection over the block leaves the numbers behind
+        assert!(r.lines[first].cells[..5].iter().all(|c| c.src.is_none()));
+        assert_eq!(r.lines[first].cells[2].style, theme::code_gutter());
+        // the second line's indent is ruled rather than spelt out in spaces
+        let guides = &r.lines[first + 1];
+        assert_eq!(guides.text().chars().nth(5), Some(theme::CODE_GUIDE));
+        assert_eq!(guides.cells[5].style, theme::code_guide());
+        // and turning the numbers off takes the guides with them
+        crate::highlight::set_numbers(false);
+        let r = render_wide("```rust\nlet a = 1;\n    let b = 2;\n```\n", 40);
+        let line = r.lines.iter().find(|l| l.text().contains("let a")).unwrap();
+        assert!(line.text().starts_with("  let a = 1;"));
+        let line = r.lines.iter().find(|l| l.text().contains("let b")).unwrap();
+        assert!(!line.text().contains(theme::CODE_GUIDE));
+        crate::highlight::set_numbers(true);
+    }
+
+    /// Is every cell of a code row that came from the file the plain code
+    /// colour? The gutter and the padding are the renderer's own and carry
+    /// no source position, so they are not part of the answer.
+    fn code_cells_plain(line: &PLine) -> bool {
+        line.cells
+            .iter()
+            .filter(|c| c.src.is_some())
+            .all(|c| c.style == theme::code())
     }
 
     #[test]
@@ -3724,13 +3926,14 @@ mod tests {
         ] {
             let r = render(md);
             let line = r.lines.iter().find(|l| l.text().contains("fn")).unwrap();
-            assert!(line.cells.iter().all(|c| c.style == theme::code()), "{md}");
+            // the band and its gutter it still gets; a colour it does not
+            assert!(code_cells_plain(line), "{md}");
         }
         // and neither is a fence with colour turned off
         crate::highlight::set_enabled(false);
         let r = render("```rust\nfn add() {}\n```\n");
         let line = r.lines.iter().find(|l| l.text().contains("fn")).unwrap();
-        assert!(line.cells.iter().all(|c| c.style == theme::code()));
+        assert!(code_cells_plain(line));
         crate::highlight::set_enabled(true);
     }
 

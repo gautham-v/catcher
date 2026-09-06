@@ -37,7 +37,7 @@ or `cargo install catcher`. Then run `catcher`.
 - **Merge into note…** in the palette folds this note into another one: its body arrives at the end of that note under a heading of its own (one level under the target's top one), its `tags:` and `aliases:` join the target's front matter, its title becomes an alias so old links still resolve, every `[[link]]` to it in the vault becomes `[[Target#This note]]`, and the file moves to `.trash`.
 - **Delete note** moves the file to `.trash` at the top of the vault, Obsidian's own folder, rather than off the disk; the confirmation says how many notes link here first. **Trash** in the palette lists what is in there, most recently deleted first: **⏎** puts one back in the folder it came from and opens it, **⌥⌫** deletes it for good. Attachments are never moved, and a trashed note is out of everything else — ^O, the tree, the mentions, the recents — with the `[[links]]` to it grey like any other missing note.
 - A ` ```mermaid ` fence is drawn as text: flowcharts and sequence diagrams, in box-drawing characters, no images and no network. Other kinds keep their source under a label.
-- A fence that names a language — ` ```rust `, ` ```sh `, ` ```python ` — has its keywords, strings, numbers, comments and type names coloured in both views; a language nothing knows, or none at all, reads as it always did, and `code_colors: no` turns the whole thing off.
+- A fenced block reads as a band on the page: the code background runs the full width of the column, with a blank row above and below and two columns either side, line numbers down the left in a dim gutter, and a thin rule every fourth column of a line's indent. `code_numbers: no` drops the numbers and the rules. A fence that names a language — ` ```rust `, ` ```sh `, ` ```python ` — has its words coloured by role in both views, eight of them: keywords, strings, numbers, comments, type names, function names, operators and punctuation. A language nothing knows, or none at all, still gets the band and the gutter and none of the colour, and `code_colors: no` turns the colour off everywhere.
 - Callouts, front matter, tables wider than the page (they pan sideways), checkboxes and `==highlights==` all render. Callouts fold (`> [!kind]- Title` starts folded, **⌥←** / **⌥→** or a click toggles) and nest. The reading view draws front matter as a properties box, tags clickable and dates with a relative hint; a click on the box's edge folds it to one line and a click on the line opens it again. **Toggle properties** in the palette cycles box, line and hidden, and **Hide properties** goes straight to hidden (`properties: box · line · hide` in the settings); in the editor they flip `front_matter` between dim and hide.
 - Tasks: `1. [ ]` numbered tasks get a checkbox, and the `[/]` in progress, `[-]` cancelled, `[>]` forwarded and `[?]` question states draw as glyphs. Nested bullets alternate `•`, `◦`, `▪`.
 - Also rendered, both views: `%% comments %%` (dimmed in the editor, gone from the page), inline footnotes `^[text]` numbered with `[^n]` references, and the HTML notes actually use — `<kbd>`, `<sub>`, `<sup>`, `<u>`, `<mark>`, `<br>`, `<!-- comments -->`. The editor shows backslash escapes literally, a dim `↵` for a hard line break, setext headings and indented code.
@@ -85,7 +85,20 @@ Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, 
 
 ## Settings
 
-**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes, attachments and templates folders, the daily note's folder, file name format and template, theme (`auto`, `dark`, `light`) and colours, syntax colour in fenced code (`code_colors`, and `code_keyword`, `code_string`, `code_number`, `code_comment`, `code_type`), page width, borders, status bar (`status_words` adds a word and character count), the start-up animation (`opener`), autosave delay, tab width, front matter, table style, wikilinks, whether a rename updates links, linked mentions, autocomplete, how far **^O** looks, and every key binding (`key_fold`, `key_unfold`, and the unbound `key_fold_all` / `key_unfold_all` among them). Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
+**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes, attachments and templates folders, the daily note's folder, file name format and template, theme (`auto`, `dark`, `light`) and colours, syntax colour in fenced code (`code_colors`, `code_numbers`, and `code_keyword`, `code_string`, `code_number`, `code_comment`, `code_type`, `code_function`, `code_operator`, `code_punctuation`, with `code_gutter` and `code_guide` for the ruling), page width, borders, status bar (`status_words` adds a word and character count), the start-up animation (`opener`), autosave delay, tab width, front matter, table style, wikilinks, whether a rename updates links, linked mentions, autocomplete, how far **^O** looks, and every key binding (`key_fold`, `key_unfold`, and the unbound `key_fold_all` / `key_unfold_all` among them). Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
+
+Obsidian's colours, if you would rather have them than catcher's: paste these into the settings file and **^S**.
+
+```
+- code_keyword: #f07ab8
+- code_string: #9ece6a
+- code_number: #7aa2f7
+- code_comment: #6b6b6b
+- code_type: #7dcfff
+- code_function: #e0c26a
+- code_operator: #f07ab8
+- code_punctuation: #b4b4b4
+```
 
 ## Development
 
