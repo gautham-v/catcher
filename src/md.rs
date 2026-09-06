@@ -3492,7 +3492,7 @@ pub fn block_at(blocks: &[Block], row: usize) -> Option<&Block> {
 pub fn style_block_line(lines: &[String], block: &Block, row: usize, width: usize) -> RLine {
     let src = lines.get(row).map(String::as_str).unwrap_or("");
     match block.kind {
-        BlockKind::Fence => fence_line(src, row == block.start || row == block.end),
+        BlockKind::Fence => code_fence_line(&lines[block.start..=block.end], row - block.start),
         BlockKind::Mermaid => {
             mermaid_line(&lines[block.start..=block.end], row - block.start, width)
         }
@@ -3585,6 +3585,68 @@ fn fence_line(src: &str, cap: bool) -> RLine {
             src: i,
         })
         .collect();
+    done(cells, src)
+}
+
+/// One line of a ``` fence, `i` counted from the fence's opening line. The
+/// caps are drawn as they always were; a body line takes its words' colours
+/// when the fence names a language syntect knows and `code_colors` is on.
+///
+/// The whole fence is highlighted at once even though the editor draws a line
+/// at a time — a comment or a string opened three lines up decides what this
+/// one is — and the answer is remembered by language and body, so walking the
+/// rows of a fence parses it once and an edit inside it simply misses.
+fn code_fence_line(rows: &[String], i: usize) -> RLine {
+    let src = rows.get(i).map(String::as_str).unwrap_or("");
+    if i == 0 || i + 1 == rows.len() {
+        return fence_line(src, true);
+    }
+    match fence_runs(rows).as_ref().and_then(|r| r.get(i - 1)) {
+        Some(runs) => code_line(src, runs),
+        None => fence_line(src, false),
+    }
+}
+
+/// The highlighter's runs for a whole fence, one `Vec` per body line: `None`
+/// when the fence names no language catcher can colour.
+fn fence_runs(rows: &[String]) -> Option<std::rc::Rc<Vec<Vec<crate::highlight::Run>>>> {
+    let lang = crate::highlight::language(fence_info(rows.first()?))?;
+    // the caps are the fence, not the code; a fence left unclosed at the end
+    // of the buffer has its last line read as one all the same
+    let body: String = rows[1..rows.len().saturating_sub(1)]
+        .iter()
+        .map(|l| format!("{l}\n"))
+        .collect();
+    crate::highlight::runs(lang, &body)
+}
+
+/// A highlighted code line: one cell per source char, as `fence_line` draws
+/// it, with each run in its role's colour. Anything the highlighter did not
+/// reach keeps the plain code colour.
+fn code_line(src: &str, runs: &[crate::highlight::Run]) -> RLine {
+    let mut cells = Vec::with_capacity(src.len());
+    let mut at = 0;
+    let mut col = 0;
+    let mut push = |text: &str, style: Style, col: &mut usize| {
+        for ch in text.chars() {
+            cells.push(Cell {
+                ch,
+                style,
+                src: *col,
+            });
+            *col += 1;
+        }
+    };
+    for run in runs {
+        let Some(text) = src.get(at..at + run.len) else {
+            break;
+        };
+        push(text, crate::highlight::style(run.role), &mut col);
+        at += run.len;
+    }
+    if let Some(rest) = src.get(at..) {
+        push(rest, theme::code(), &mut col);
+    }
     done(cells, src)
 }
 
@@ -5753,6 +5815,45 @@ mod tests {
         let bs = blocks(&lines);
         assert_eq!((bs[0].start, bs[0].end), (1, 3));
         assert_eq!(text(&style_block_line(&lines, &bs[0], 2, 80)), "");
+    }
+
+    #[test]
+    fn a_fence_that_names_a_language_is_coloured_a_line_at_a_time() {
+        let _lock = crate::testutil::serial();
+        crate::highlight::set_enabled(true);
+        theme::set_palette(theme::DARK);
+        let lines = buf("```rust\n// why\nlet n = 12;\n```\n");
+        let bs = blocks(&lines);
+        assert_eq!(bs[0].kind, BlockKind::Fence);
+        // the label row is the language name, dim, as it always was
+        let cap = style_block_line(&lines, &bs[0], 0, 80);
+        assert_eq!(text(&cap), "rust");
+        assert!(cap.cells.iter().all(|c| c.style == theme::marker()));
+        // and a body line is coloured by role, one cell per source column
+        let l = style_block_line(&lines, &bs[0], 2, 80);
+        assert_eq!(text(&l), "let n = 12;");
+        assert_eq!(l.cells[0].style.fg, Some(theme::DARK.code_keyword));
+        assert_eq!(l.cells[8].style.fg, Some(theme::DARK.code_number));
+        assert_eq!(l.cells[4].style, theme::code());
+        assert_eq!(l.one_row().display_to_source(4), 4);
+        // a comment leans, and it is the line above that says so
+        let c = style_block_line(&lines, &bs[0], 1, 80);
+        assert_eq!(c.cells[0].style.fg, Some(theme::DARK.code_comment));
+
+        // a fence that names nothing catcher knows is drawn as it always was
+        for src in [
+            "```\nlet n = 12;\n```\n",
+            "```gibberish\nlet n = 12;\n```\n",
+        ] {
+            let lines = buf(src);
+            let l = style_block_line(&lines, &blocks(&lines)[0], 1, 80);
+            assert!(l.cells.iter().all(|c| c.style == theme::code()), "{src}");
+        }
+        // nor is one with colour turned off
+        crate::highlight::set_enabled(false);
+        let l = style_block_line(&lines, &bs[0], 2, 80);
+        assert!(l.cells.iter().all(|c| c.style == theme::code()));
+        crate::highlight::set_enabled(true);
     }
 
     #[test]
