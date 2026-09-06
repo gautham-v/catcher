@@ -25,6 +25,7 @@ mod outline;
 mod render;
 mod search;
 mod table;
+mod templates;
 mod terminal;
 #[cfg(test)]
 mod testutil;
