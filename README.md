@@ -38,7 +38,7 @@ or `cargo install catcher`. Then run `catcher`.
 - Also rendered, both views: `%% comments %%` (dimmed in the editor, gone from the page), inline footnotes `^[text]` numbered with `[^n]` references, and the HTML notes actually use — `<kbd>`, `<sub>`, `<sup>`, `<u>`, `<mark>`, `<br>`, `<!-- comments -->`. The editor shows backslash escapes literally, a dim `↵` for a hard line break, setext headings and indented code.
 - **Outline** in the palette (rebindable as `key_outline`) lists the note's headings: type to filter, **⏎** jumps, **⌥⏎** folds the section.
 - Sections fold. On a heading, **⌥←** folds everything under it down to the next heading of the same or a higher level, **⌥→** opens it again; a folded heading shows `▸` and how many lines it hides. Folds are per note and last for the session, and the reading view keeps them: a click on a heading there folds or unfolds it, and **⌥←** / **⌥→** take the heading the selection is on, or the first one on screen.
-- On start the note decodes out of noise for most of a second; any key cuts it short. **Toggle opener** in the palette turns it off and on (`opener: yes · no`).
+- On start the note decodes out of noise for half a second; any key cuts it short. **Toggle opener** in the palette turns it off and on (`opener: yes · no`).
 - Notes autosave. Edit a note in another program and catcher takes what is on disk: the buffer reloads, the cursor stays on its line, and **^Z** brings the old buffer back. A file deleted from under it is said so in the status bar and recreated on the next save.
 - Mouse works: click, drag to select and copy, scroll. **^V** pastes a clipboard image as a PNG.
 
