@@ -2,12 +2,12 @@
 //!
 //! syntect ships themes of its own and none of them is catcher's, so this
 //! stops at the parse. It walks the scope stack a grammar puts over each
-//! token and maps the top scope that means anything onto one of five roles;
+//! token and maps the top scope that means anything onto one of eight roles;
 //! `theme` alone says what colour a role is drawn in, the same as everywhere
-//! else. Five roles and not fifty because a note is read at prose distance —
-//! keyword, string, number, comment and type are as much as a fence can carry
-//! before it stops being text and starts being a picture. Everything else
-//! keeps the code foreground it already had.
+//! else. Eight roles and not fifty because a note is read at prose distance —
+//! keyword, string, number, comment, type, function, operator and punctuation
+//! are as much as a fence can carry before it stops being text and starts
+//! being a picture. Everything else keeps the code foreground it already had.
 //!
 //! The syntax set costs a couple of hundred milliseconds to load, so it is
 //! loaded once, lazily, and only when a fence that actually names a language
@@ -16,7 +16,7 @@
 //! same fence once per row per pass and scrolling must never re-parse.
 
 use crate::theme;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -31,6 +31,9 @@ pub enum Role {
     Number,
     Comment,
     Type,
+    Function,
+    Operator,
+    Punctuation,
 }
 
 /// One run of a line that shares a role: how many bytes of it the run covers.
@@ -56,6 +59,22 @@ pub fn enabled() -> bool {
     ENABLED.read().map(|b| *b).unwrap_or(true)
 }
 
+/// Whether the reading view rules a fence with line numbers — the
+/// `code_numbers` setting. The indent guides follow it: both are the same
+/// answer to "how deep am I in this block", and a reader who turned one off
+/// did not ask for the other.
+static NUMBERS: RwLock<bool> = RwLock::new(true);
+
+pub fn set_numbers(on: bool) {
+    if let Ok(mut w) = NUMBERS.write() {
+        *w = on;
+    }
+}
+
+pub fn numbers() -> bool {
+    NUMBERS.read().map(|b| *b).unwrap_or(true)
+}
+
 static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
 
 fn syntaxes() -> &'static SyntaxSet {
@@ -74,8 +93,8 @@ pub fn language(info: &str) -> Option<&str> {
 }
 
 /// The style a role is drawn in: the code block's own foreground and ground,
-/// with the role's hue over it. A comment also leans, the one place a fence
-/// says something with weight rather than colour.
+/// with the role's hue over it. Hue and nothing else — a fence is already a
+/// patch of its own, and italics inside one only blur it at terminal sizes.
 pub fn style(role: Option<Role>) -> Style {
     let base = theme::code();
     let p = theme::palette();
@@ -84,10 +103,21 @@ pub fn style(role: Option<Role>) -> Style {
         Some(Role::Keyword) => base.fg(p.code_keyword),
         Some(Role::Str) => base.fg(p.code_string),
         Some(Role::Number) => base.fg(p.code_number),
-        Some(Role::Comment) => base.fg(p.code_comment).add_modifier(Modifier::ITALIC),
+        Some(Role::Comment) => base.fg(p.code_comment),
         Some(Role::Type) => base.fg(p.code_type),
+        Some(Role::Function) => base.fg(p.code_function),
+        Some(Role::Operator) => base.fg(p.code_operator),
+        Some(Role::Punctuation) => base.fg(p.code_punctuation),
     }
 }
+
+/// Scopes that name a function wherever the grammar puts them — a
+/// definition and a call are the same name doing the same job.
+const FUNCTION_SCOPES: [&str; 3] = [
+    "entity.name.function",
+    "support.function",
+    "variable.function",
+];
 
 /// Scopes that name a type wherever the grammar puts them.
 const TYPE_SCOPES: [&str; 8] = [
@@ -139,7 +169,25 @@ const DECL_WORDS: [&str; 16] = [
 /// punctuation that opens one, and the comment is underneath it) and a
 /// string's quotes part of the string.
 pub fn role(scopes: &[String], text: &str) -> Option<Role> {
-    scopes.iter().rev().find_map(|s| scope_role(s, text))
+    scopes
+        .iter()
+        .rev()
+        .find_map(|s| scope_role(s, text))
+        .or_else(|| call_name(scopes))
+}
+
+/// A word inside a `meta.function-call` that the grammar named nothing more
+/// specific than a variable: the call's own name. Only asked once every
+/// other scope has come back empty, so a type or a keyword inside a call
+/// keeps what it already is.
+fn call_name(scopes: &[String]) -> Option<Role> {
+    // the innermost `meta.`, or the arguments would be names too: a call's
+    // own arguments sit one `meta.group` deeper than the call
+    let inner = scopes.iter().rev().find(|s| under(s, "meta"))?;
+    let named = scopes
+        .last()
+        .is_some_and(|s| under(s, "variable") || under(s, "entity.name") || under(s, "meta.path"));
+    (under(inner, "meta.function-call") && named).then_some(Role::Function)
 }
 
 fn scope_role(scope: &str, text: &str) -> Option<Role> {
@@ -151,6 +199,9 @@ fn scope_role(scope: &str, text: &str) -> Option<Role> {
     }
     if under(scope, "constant.numeric") {
         return Some(Role::Number);
+    }
+    if under(scope, "keyword.operator") {
+        return Some(Role::Operator);
     }
     if under(scope, "keyword") || under(scope, "storage.modifier") {
         return Some(Role::Keyword);
@@ -165,12 +216,18 @@ fn scope_role(scope: &str, text: &str) -> Option<Role> {
             Role::Type
         });
     }
-    // a function's *name* stays plain: the five roles say what a token is,
-    // not whether it is being defined, and a name is a name in either place
-    TYPE_SCOPES
-        .iter()
-        .any(|p| under(scope, p))
-        .then_some(Role::Type)
+    if FUNCTION_SCOPES.iter().any(|p| under(scope, p)) {
+        return Some(Role::Function);
+    }
+    if TYPE_SCOPES.iter().any(|p| under(scope, p)) {
+        return Some(Role::Type);
+    }
+    // `punctuation.definition.string` opens a string and `…comment` opens a
+    // comment: those are the thing they open, and the scope under them says
+    // so. Only punctuation that defines nothing — a bracket, a comma, a
+    // semicolon — is punctuation in its own right.
+    (under(scope, "punctuation") && !under(scope, "punctuation.definition"))
+        .then_some(Role::Punctuation)
 }
 
 /// Is `scope` `prefix`, or something under it? Whole dot-separated segments
@@ -306,27 +363,53 @@ mod tests {
     }
 
     #[test]
-    fn a_rust_snippet_takes_the_five_roles() {
+    fn a_rust_snippet_takes_the_eight_roles() {
         set_enabled(true);
-        let src = "// a note\nfn add(a: u32) -> u32 {\n    let n = 12;\n    \"hi\"\n}\n";
+        let src = "// a note\npub fn wikilink_at(a: u32) -> u32 {\n    let n = a + 12;\n    if n != 0 { \"hi\" }\n}\n";
         let r = roles("rust", src);
         assert_eq!(role_of(&r, "//"), Some(Role::Comment));
         assert_eq!(role_of(&r, " a note"), Some(Role::Comment));
         assert_eq!(role_of(&r, "fn"), Some(Role::Keyword));
+        assert_eq!(role_of(&r, "pub"), Some(Role::Keyword));
         assert_eq!(role_of(&r, "let"), Some(Role::Keyword));
         // the same `storage.type` scope as `let`, told apart by the word
         assert_eq!(role_of(&r, "u32"), Some(Role::Type));
         assert_eq!(role_of(&r, "12"), Some(Role::Number));
         assert_eq!(role_of(&r, "hi"), Some(Role::Str));
-        // a function's name is a name, and stays the code colour
-        assert_eq!(role_of(&r, "add"), None);
+        // a name is a name whether it is being declared or called
+        assert_eq!(role_of(&r, "wikilink_at"), Some(Role::Function));
+        assert_eq!(role_of(&r, "+"), Some(Role::Operator));
+        // the grammar hands `!=` back a character at a time; both halves are
+        // the one operator
+        assert_eq!(role_of(&r, "!"), Some(Role::Operator));
+        assert_eq!(role_of(&r, "("), Some(Role::Punctuation));
+        assert_eq!(role_of(&r, "{"), Some(Role::Punctuation));
         // and every run together is the source back again
         let back: String = r.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(back, src.replace('\n', ""));
     }
 
     #[test]
-    fn a_shell_snippet_takes_the_five_roles() {
+    fn a_script_snippet_takes_them_too() {
+        set_enabled(true);
+        let r = roles(
+            "js",
+            "function wikilink_at(a) {\n  return wikilink_at(a + 1) != 2;\n}\n",
+        );
+        assert_eq!(role_of(&r, "function"), Some(Role::Keyword));
+        // declared, and called again inside itself
+        assert_eq!(role_of(&r, "wikilink_at"), Some(Role::Function));
+        assert_eq!(role_of(&r, "+"), Some(Role::Operator));
+        assert_eq!(role_of(&r, "!="), Some(Role::Operator));
+        assert_eq!(role_of(&r, "("), Some(Role::Punctuation));
+        assert_eq!(role_of(&r, "{"), Some(Role::Punctuation));
+        // a call's argument is not its name: only the innermost `meta.` scope
+        // being the call itself makes a bare word a function
+        assert_eq!(role_of(&r, "a"), None);
+    }
+
+    #[test]
+    fn a_shell_snippet_takes_them_as_well() {
         set_enabled(true);
         let r = roles(
             "sh",
@@ -337,8 +420,8 @@ mod tests {
         assert_eq!(role_of(&r, "for"), Some(Role::Keyword));
         assert_eq!(role_of(&r, "done"), Some(Role::Keyword));
         assert_eq!(role_of(&r, "world"), Some(Role::Str));
-        // a builtin is not a type and not a keyword
-        assert_eq!(role_of(&r, "echo"), None);
+        // a builtin is the shell's function, and reads as one
+        assert_eq!(role_of(&r, "echo"), Some(Role::Function));
     }
 
     #[test]
@@ -372,6 +455,26 @@ mod tests {
             Some(Role::Type)
         );
         assert_eq!(role(&["variable.other.rust".into()], "x"), None);
+        // `keyword.operator` is an operator now, not a keyword
+        assert_eq!(
+            role(&["keyword.operator.arithmetic.rust".into()], "+"),
+            Some(Role::Operator)
+        );
+        assert_eq!(
+            role(&["entity.name.function.rust".into()], "add"),
+            Some(Role::Function)
+        );
+        assert_eq!(
+            role(&["punctuation.section.group.begin.rust".into()], "("),
+            Some(Role::Punctuation)
+        );
+        // but punctuation that *defines* something is that thing: the quotes
+        // are the string they open
+        let quoted = [
+            "string.quoted.double.rust".into(),
+            "punctuation.definition.string.begin.rust".into(),
+        ];
+        assert_eq!(role(&quoted, "\""), Some(Role::Str));
     }
 
     #[test]
@@ -408,18 +511,26 @@ mod tests {
     }
 
     #[test]
-    fn a_comment_leans_and_every_other_role_is_only_a_hue() {
+    fn every_role_is_a_hue_and_nothing_but_a_hue() {
         theme::set_palette(theme::DARK);
         let p = theme::DARK;
         assert_eq!(style(None), theme::code());
-        assert_eq!(style(Some(Role::Keyword)).fg, Some(p.code_keyword));
-        assert_eq!(style(Some(Role::Str)).fg, Some(p.code_string));
-        assert_eq!(style(Some(Role::Number)).fg, Some(p.code_number));
-        assert_eq!(style(Some(Role::Type)).fg, Some(p.code_type));
-        let comment = style(Some(Role::Comment));
-        assert_eq!(comment.fg, Some(p.code_comment));
-        assert!(comment.add_modifier.contains(Modifier::ITALIC));
-        // the block's own ground is kept, whatever the role
-        assert_eq!(comment.bg, Some(p.code_bg));
+        for (role, fg) in [
+            (Role::Keyword, p.code_keyword),
+            (Role::Str, p.code_string),
+            (Role::Number, p.code_number),
+            (Role::Type, p.code_type),
+            (Role::Comment, p.code_comment),
+            (Role::Function, p.code_function),
+            (Role::Operator, p.code_operator),
+            (Role::Punctuation, p.code_punctuation),
+        ] {
+            let s = style(Some(role));
+            assert_eq!(s.fg, Some(fg), "{role:?}");
+            // the block's own ground is kept, whatever the role, and no role
+            // leans or bolds: a comment used to, and it only blurred
+            assert_eq!(s.bg, Some(p.code_bg), "{role:?}");
+            assert!(s.add_modifier.is_empty(), "{role:?}");
+        }
     }
 }

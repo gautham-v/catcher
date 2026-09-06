@@ -62,7 +62,7 @@ pub struct Palette {
     pub success: Color,
     /// The ground a highlight or an inverted heading sits its text on.
     pub ground: Color,
-    /// The five roles a fenced block's words take when `code_colors` is on.
+    /// The eight roles a fenced block's words take when `code_colors` is on.
     /// Hue here is the one exception to the rule above, and it earns it: a
     /// fence is already a patch of its own, so colour inside it says what a
     /// token *is* without competing with anything the prose spends hue on.
@@ -71,10 +71,25 @@ pub struct Palette {
     /// Numbers take the accent: a literal is the one thing in a fence that a
     /// reader scans for, the same job the accent does on the page.
     pub code_number: Color,
-    /// Drawn italic as well as grey — a comment is the one part of a fence
-    /// that is prose.
+    /// A comment is the one part of a fence that is prose, and grey is all
+    /// it takes to say so — the lean it used to carry made a paragraph of
+    /// notes inside a block wobble at terminal sizes.
     pub code_comment: Color,
     pub code_type: Color,
+    /// A function's name, wherever it is defined or called. The page's own
+    /// h2 colour: a name in code is doing the same job a heading does.
+    pub code_function: Color,
+    /// `+`, `!=`, `->` and `(`, `{`, `;` — the joins. Both are the same
+    /// quiet grey on purpose: they are the punctuation of code, and reading
+    /// them first would be reading it backwards.
+    pub code_operator: Color,
+    pub code_punctuation: Color,
+    /// The line numbers down the left of a fence on the page. Dim enough to
+    /// count as ruling rather than as text.
+    pub code_gutter: Color,
+    /// The thin rule standing in every fourth column of a line's indent.
+    /// Fainter again than the gutter: it is a hint of depth, not a border.
+    pub code_guide: Color,
 }
 
 /// One settable colour: its settings-file name, the field it sets, and the
@@ -88,7 +103,7 @@ pub struct ColorKey {
 /// Every colour the settings file accepts, in the order the settings document
 /// lists them. The single source of truth: a name that isn't here can't be
 /// set and isn't documented.
-pub const COLORS: [ColorKey; 18] = [
+pub const COLORS: [ColorKey; 23] = [
     color(
         "accent",
         |p| &mut p.accent,
@@ -113,8 +128,17 @@ pub const COLORS: [ColorKey; 18] = [
     color("code_keyword", |p| &mut p.code_keyword, "fn, let, for"),
     color("code_string", |p| &mut p.code_string, "quoted text in code"),
     color("code_number", |p| &mut p.code_number, "numeric literals"),
-    color("code_comment", |p| &mut p.code_comment, "comments, italic"),
+    color("code_comment", |p| &mut p.code_comment, "comments"),
     color("code_type", |p| &mut p.code_type, "type and class names"),
+    color("code_function", |p| &mut p.code_function, "function names"),
+    color("code_operator", |p| &mut p.code_operator, "+, !=, ->"),
+    color(
+        "code_punctuation",
+        |p| &mut p.code_punctuation,
+        "brackets, commas, semicolons",
+    ),
+    color("code_gutter", |p| &mut p.code_gutter, "the line numbers"),
+    color("code_guide", |p| &mut p.code_guide, "the indent rules"),
 ];
 
 const fn color(
@@ -126,8 +150,8 @@ const fn color(
 }
 
 /// Just the names, derived from `COLORS`.
-pub const COLOR_KEYS: [&str; 18] = {
-    let mut keys = [""; 18];
+pub const COLOR_KEYS: [&str; 23] = {
+    let mut keys = [""; 23];
     let mut i = 0;
     while i < keys.len() {
         keys[i] = COLORS[i].name;
@@ -166,7 +190,7 @@ pub const DARK: Palette = Palette {
     dim: Color::Rgb(0x82, 0x82, 0x82),
     link: Color::Rgb(0xb4, 0xb4, 0xb4),
     code: Color::Rgb(0xd9, 0xa2, 0x7a),
-    code_bg: Color::Rgb(0x1c, 0x1c, 0x1c),
+    code_bg: Color::Rgb(0x1e, 0x1e, 0x22),
     code_fg: Color::Rgb(0xe1, 0xe1, 0xe1),
     border: Color::Rgb(0x32, 0x32, 0x37),
     danger: Color::Rgb(0xf7, 0x76, 0x8e),
@@ -177,6 +201,11 @@ pub const DARK: Palette = Palette {
     code_number: Color::Rgb(0xff, 0x9e, 0x64),
     code_comment: Color::Rgb(0x5c, 0x63, 0x70),
     code_type: Color::Rgb(0xe5, 0xc0, 0x7b),
+    code_function: Color::Rgb(0x8f, 0xb4, 0xd9),
+    code_operator: Color::Rgb(0xa0, 0xa0, 0xa0),
+    code_punctuation: Color::Rgb(0xa0, 0xa0, 0xa0),
+    code_gutter: Color::Rgb(0x4a, 0x4a, 0x4a),
+    code_guide: Color::Rgb(0x2c, 0x2c, 0x30),
 };
 
 pub const LIGHT: Palette = Palette {
@@ -187,7 +216,7 @@ pub const LIGHT: Palette = Palette {
     dim: Color::Rgb(0x8d, 0x8d, 0x8d),
     link: Color::Rgb(0x5a, 0x58, 0x52),
     code: Color::Rgb(0x8a, 0x4a, 0x14),
-    code_bg: Color::Rgb(0xe2, 0xe2, 0xe2),
+    code_bg: Color::Rgb(0xe6, 0xe6, 0xea),
     code_fg: Color::Rgb(0x26, 0x26, 0x26),
     border: Color::Rgb(0xc8, 0xc8, 0xcd),
     danger: Color::Rgb(0xcd, 0x30, 0x48),
@@ -198,6 +227,11 @@ pub const LIGHT: Palette = Palette {
     code_number: Color::Rgb(0xb8, 0x5c, 0x18),
     code_comment: Color::Rgb(0x5f, 0x6a, 0x75),
     code_type: Color::Rgb(0x7a, 0x5f, 0x14),
+    code_function: Color::Rgb(0x3d, 0x6a, 0x99),
+    code_operator: Color::Rgb(0x6a, 0x6a, 0x6e),
+    code_punctuation: Color::Rgb(0x6a, 0x6a, 0x6e),
+    code_gutter: Color::Rgb(0xb0, 0xb0, 0xb4),
+    code_guide: Color::Rgb(0xd8, 0xd8, 0xdc),
 };
 
 /// The palette in force. A lock rather than a `OnceLock`: settings are
@@ -338,6 +372,15 @@ pub fn inline_code() -> Style {
 /// the signal. It states its foreground anyway: see `code_fg`.
 pub fn code() -> Style {
     Style::new().fg(palette().code_fg).bg(palette().code_bg)
+}
+/// The line number beside a row of a fence on the page, on the block's own
+/// ground so the band behind it is unbroken.
+pub fn code_gutter() -> Style {
+    Style::new().fg(palette().code_gutter).bg(palette().code_bg)
+}
+/// The indent rule inside a fence, on that same ground.
+pub fn code_guide() -> Style {
+    Style::new().fg(palette().code_guide).bg(palette().code_bg)
 }
 /// The colour a callout of `kind` is drawn in, following Obsidian's
 /// families: notes blue, tips green, warnings orange, dangers red.
@@ -508,6 +551,9 @@ pub const FOLDED: &str = "\u{25b8} ";
 /// In front of an open callout that can fold.
 pub const UNFOLDED: &str = "\u{25be} ";
 pub const QUOTE_BAR: &str = "\u{258c}";
+/// The indent rule inside a fenced block, standing in for the space it
+/// replaces. Thin, so a column of them reads as ruling and not as text.
+pub const CODE_GUIDE: char = '\u{2502}';
 /// A hard line break, in place of its trailing space or backslash.
 pub const HARD_BREAK: &str = "\u{21b5}";
 
@@ -540,14 +586,18 @@ mod tests {
     }
 
     #[test]
-    fn the_five_code_roles_are_told_apart_at_both_polarities() {
+    fn the_code_roles_are_told_apart_at_both_polarities() {
         for p in [DARK, LIGHT] {
+            // operator and punctuation are left out: they are one grey on
+            // purpose, the chrome of code rather than two roles to tell apart
             let roles = [
                 p.code_keyword,
                 p.code_string,
                 p.code_number,
                 p.code_comment,
                 p.code_type,
+                p.code_function,
+                p.code_operator,
             ];
             for (i, a) in roles.iter().enumerate() {
                 for b in &roles[i + 1..] {
@@ -557,6 +607,10 @@ mod tests {
                 // token with no role keeps
                 assert_ne!(*a, p.code_fg);
             }
+            assert_eq!(p.code_operator, p.code_punctuation);
+            // the ruling is quieter than anything it rules
+            assert_ne!(p.code_gutter, p.code_fg);
+            assert_ne!(p.code_guide, p.code_bg);
         }
     }
 

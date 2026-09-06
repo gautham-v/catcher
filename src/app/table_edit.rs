@@ -863,11 +863,13 @@ mod tests {
 
     #[test]
     fn preview_clicks_map_through_the_rendered_row() {
-        // a code block: the preview indents by two, the source does not
+        // a code block: the preview pads by two and rules a gutter, the
+        // source does neither
         let r = crate::render::render("```\nlet x = 1;\n```\n");
         let row = r.lines.iter().find(|l| l.text().contains("let x")).unwrap();
-        // display column 6 is "x" — source line 1, column 4
-        assert_eq!(cell_source(&row.cells, 6), Some((1, 4)));
+        // "  " + "1  " + the line, so display column 9 is "x" — source line
+        // 1, column 4
+        assert_eq!(cell_source(&row.cells, 9), Some((1, 4)));
 
         // a bulleted item: the "• " is ours, the text is the file's
         let r = crate::render::render("- hello\n");

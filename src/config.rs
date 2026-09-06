@@ -274,6 +274,10 @@ pub struct Config {
     /// Off draws a fence exactly as it always did, and no syntax set is ever
     /// loaded.
     pub code_colors: bool,
+    /// Whether the reading view rules a fence with line numbers and indent
+    /// guides. The editor never does: its rows are the file's rows, and a
+    /// number beside them would be a second, disagreeing count.
+    pub code_numbers: bool,
     /// Whether the reading view lists the notes that link to this one. It
     /// costs a pass over every note body, so it is a setting and not simply
     /// how the app behaves.
@@ -334,6 +338,7 @@ impl Default for Config {
             wikilinks: true,
             tags: true,
             code_colors: true,
+            code_numbers: true,
             linked_mentions: true,
             autocomplete: true,
             quick_open_recursive: true,
@@ -426,6 +431,7 @@ impl Config {
         crate::md::links::set_enabled(self.wikilinks);
         crate::md::tags::set_enabled(self.tags);
         crate::highlight::set_enabled(self.code_colors);
+        crate::highlight::set_numbers(self.code_numbers);
     }
 
     /// The file plus the environment: `CATCHER_DIR` wins over `notes_dir`,
@@ -615,6 +621,7 @@ impl Config {
         c.wikilinks = flag(text, "wikilinks", c.wikilinks);
         c.tags = flag(text, "tags", c.tags);
         c.code_colors = flag(text, "code_colors", c.code_colors);
+        c.code_numbers = flag(text, "code_numbers", c.code_numbers);
         c.quick_open_recursive = match value(text, "quick_open").as_deref() {
             Some("folder") => false,
             Some("recursive") => true,
@@ -762,6 +769,11 @@ impl Config {
             "code_colors",
             yn(self.code_colors),
             "colour words in fenced code by language",
+        );
+        d.row(
+            "code_numbers",
+            yn(self.code_numbers),
+            "line numbers beside fenced code on the page",
         );
         d.row("status_bar", yn(self.status_bar), "the bottom line at all");
         d.row("key_hints", yn(self.key_hints), "the shortcuts in it");
@@ -1353,9 +1365,11 @@ mod tests {
     }
 
     #[test]
-    fn code_colours_are_on_by_default_and_the_five_roles_round_trip() {
+    fn code_colours_are_on_by_default_and_every_role_round_trips() {
         assert!(Config::default().code_colors);
         assert!(!Config::from_str("- code_colors: no\n").code_colors);
+        assert!(Config::default().code_numbers);
+        assert!(!Config::from_str("- code_numbers: no\n").code_numbers);
         let c = Config {
             code_colors: false,
             ..Default::default()
@@ -1367,9 +1381,13 @@ mod tests {
         let doc = c.to_document();
         assert!(doc.contains("- code_keyword: #00ff88"));
         assert!(doc.contains("- code_string: theme"));
+        assert!(doc.contains("- code_function: theme"));
+        assert!(doc.contains("- code_operator: theme"));
+        assert!(doc.contains("- code_punctuation: theme"));
         let back = Config::from_str(&doc);
         assert_eq!(back.palette.code_keyword, c.palette.code_keyword);
         assert_eq!(back.palette.code_comment, theme::DARK.code_comment);
+        assert_eq!(back.palette.code_function, theme::DARK.code_function);
     }
 
     #[test]
