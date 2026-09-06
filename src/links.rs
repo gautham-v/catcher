@@ -319,6 +319,22 @@ fn notes_under(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
     out
 }
 
+/// One walked file as the resolver sees it. The fields a walk of the vault
+/// cannot answer cheaply — when the note was touched, which folder ^O files
+/// it under — are not what resolving reads.
+fn entry_at(path: &Path, rel: &str) -> Entry {
+    let (title, aliases) = index::head_at(path);
+    Entry {
+        path: path.to_path_buf(),
+        title,
+        rel: rel.to_string(),
+        folder: String::new(),
+        modified: std::time::SystemTime::UNIX_EPOCH,
+        aliases,
+        name: Entry::name_of(path),
+    }
+}
+
 /// The vault as the resolver has to see it, before and after the rename. The
 /// note keeps its title across a rename, so the one entry that moves is the
 /// same entry at a different path.
@@ -326,16 +342,7 @@ fn views(found: &[(PathBuf, String)], old: &Path, new: &Path) -> (Vec<Entry>, Ve
     let mut before = Vec::new();
     let mut after = Vec::new();
     for (path, rel) in found {
-        let (title, aliases) = index::head_at(path);
-        let entry = Entry {
-            path: path.clone(),
-            title,
-            rel: rel.clone(),
-            folder: String::new(),
-            modified: std::time::SystemTime::UNIX_EPOCH,
-            aliases,
-            name: Entry::name_of(path),
-        };
+        let entry = entry_at(path, rel);
         if path == new {
             let mut moved = entry.clone();
             moved.path = old.to_path_buf();
@@ -401,6 +408,148 @@ pub fn retarget(old: &Path, new: &Path, roots: &[PathBuf]) -> Report {
             continue;
         };
         if write_atomic(&path, &rewritten).is_ok() {
+            report.links += n;
+            report.notes.push(path);
+        } else {
+            report.skipped.push(path);
+        }
+    }
+    report
+}
+
+/// One merge, as the resolver has to see it: the note at `old` folded into
+/// the note at `into`, where it is now a section called `heading`.
+///
+/// A link that reached the old note has to reach that section instead, so the
+/// target is rewritten and the heading becomes the fragment — unless the link
+/// already named a place, which travelled into the target with the rest of
+/// the note and is still called what it was called.
+struct Merge {
+    old: PathBuf,
+    heading: String,
+    /// What a link should say to reach the target: its stem, or its path when
+    /// the stem alone would land somewhere else. `None` when nothing reaches
+    /// it, and then there is nothing to rewrite.
+    target: Option<String>,
+    before: Vec<Entry>,
+}
+
+impl Merge {
+    /// Did `raw` reach the merged note, the way a click on it would have?
+    /// Read by name and not by alias, for the reason [`Rename::retarget`]
+    /// leaves an alias alone: the target carries the aliases now, so a link
+    /// written to one still lands.
+    fn reached_old(&self, raw: &str) -> bool {
+        index::resolve_by_name(&self.before, raw).is_some_and(|e| e.path == self.old)
+    }
+
+    /// One line with every link to the merged note pointed at its section,
+    /// and how many were.
+    fn rewrite_line(&self, line: &str) -> (String, usize) {
+        let Some(target) = self.target.as_deref() else {
+            return (line.to_string(), 0);
+        };
+        let src: Vec<char> = line.chars().collect();
+        let mut edits: Vec<(usize, usize, String)> = Vec::new();
+        for w in crate::md::wikilinks(line) {
+            let (from, to) = target_span(&src, &w);
+            let raw: String = src[from..to].iter().collect();
+            if raw.is_empty() || !self.reached_old(&raw) {
+                continue;
+            }
+            let text = match w.fragment {
+                Some(_) => target.to_string(),
+                None => format!("{target}#{}", self.heading),
+            };
+            edits.push((from, to, text));
+        }
+        for l in crate::md::md_links(line) {
+            if let Some(href) = self.retarget_href(&l.href(&src)) {
+                edits.push((l.href_start, l.href_end, href));
+            }
+        }
+        edits.sort_by_key(|e| e.0);
+        let mut out = String::new();
+        let mut at = 0;
+        for (from, to, text) in &edits {
+            out.extend(&src[at..*from]);
+            out.push_str(text);
+            at = *to;
+        }
+        out.extend(&src[at..]);
+        (out, edits.len())
+    }
+
+    /// The href a `[text](href)` should become: the target's file, and the
+    /// section as its fragment when the link named no other place.
+    fn retarget_href(&self, href: &str) -> Option<String> {
+        let target = self.target.as_deref()?;
+        let path = crate::md::note_href(href)?;
+        let (name, fragment) = crate::md::split_fragment(&path);
+        if !self.reached_old(name) {
+            return None;
+        }
+        let fragment = fragment.unwrap_or(&self.heading);
+        Some(crate::md::percent_encode_spaces(&format!(
+            "{target}.md#{fragment}"
+        )))
+    }
+}
+
+/// The note at `old` has been folded into the note at `into` under a heading
+/// called `heading`: point every link under `roots` that reached it at that
+/// section. The merged note itself is left alone — it is on its way to the
+/// trash, and its body is already in the target.
+pub fn retarget_merged(old: &Path, into: &Path, heading: &str, roots: &[PathBuf]) -> Report {
+    merge_pass(old, into, heading, roots, true)
+}
+
+/// What [`retarget_merged`] would do, without touching a file: how many links
+/// stand in how many notes. What the confirmation counts before anything moves.
+pub fn merged_links(old: &Path, into: &Path, heading: &str, roots: &[PathBuf]) -> (usize, usize) {
+    let report = merge_pass(old, into, heading, roots, false);
+    (report.links, report.notes.len())
+}
+
+/// The pass both of those are: walk the vault, rewrite what points at the
+/// merged note, and write it back only when asked to.
+fn merge_pass(old: &Path, into: &Path, heading: &str, roots: &[PathBuf], write: bool) -> Report {
+    let into = fs::canonicalize(into).unwrap_or_else(|_| into.to_path_buf());
+    let old = fs::canonicalize(old).unwrap_or_else(|_| old.to_path_buf());
+    let found = notes_under(roots);
+    let before: Vec<Entry> = found.iter().map(|(p, rel)| entry_at(p, rel)).collect();
+    // the vault as it will stand: the merged note gone, and the target left
+    // to answer for it
+    let after: Vec<Entry> = before.iter().filter(|e| e.path != old).cloned().collect();
+    let names = [
+        into.file_stem().map(|s| s.to_string_lossy().into_owned()),
+        found
+            .iter()
+            .find(|(p, _)| *p == into)
+            .map(|(_, rel)| rel.trim_end_matches(".md").to_string()),
+    ];
+    let merge = Merge {
+        target: names
+            .into_iter()
+            .flatten()
+            .find(|t| index::resolve_by_name(&after, t).is_some_and(|e| e.path == into)),
+        old,
+        heading: heading.trim().to_string(),
+        before,
+    };
+    let mut report = Report::default();
+    for (path, _) in found {
+        if path == merge.old {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(&path) else {
+            report.skipped.push(path);
+            continue;
+        };
+        let Some((rewritten, n)) = rewrite_body(&body, |line| merge.rewrite_line(line)) else {
+            continue;
+        };
+        if !write || write_atomic(&path, &rewritten).is_ok() {
             report.links += n;
             report.notes.push(path);
         } else {
@@ -751,6 +900,46 @@ mod tests {
         let (same, none) = rewrite_fragment_line("plain text [[spec#Else]]", "Old", "New", here);
         assert_eq!(same, "plain text [[spec#Else]]");
         assert_eq!(none, 0);
+    }
+
+    #[test]
+    fn a_merge_points_every_link_at_the_section_the_note_became() {
+        let dir = tmpdir("merge");
+        let spec = write(&dir, "spec.md", "# Spec\n");
+        let plan = write(&dir, "plan.md", "# Plan\n");
+        let other = write(
+            &dir,
+            "other.md",
+            "[[spec]] [[spec|the spec]] [[spec#Method]] ![[spec]] [[spec#^abc]] [[plan]] [S](spec.md)\n",
+        );
+        let (links, notes) = merged_links(&spec, &plan, "Spec", std::slice::from_ref(&dir));
+        assert_eq!((links, notes), (6, 1));
+        // the count was a dry run: nothing moved until the merge did
+        assert!(read(&other).starts_with("[[spec]] "));
+        let r = retarget_merged(&spec, &plan, "Spec", std::slice::from_ref(&dir));
+        assert_eq!(
+            read(&other),
+            "[[plan#Spec]] [[plan#Spec|the spec]] [[plan#Method]] ![[plan#Spec]] [[plan#^abc]] [[plan]] [S](plan.md#Spec)\n"
+        );
+        assert_eq!(r.links, 6);
+        assert_eq!(r.notes, vec![other]);
+        // the merged note is left alone; its body is already in the target
+        assert_eq!(read(&spec), "# Spec\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_merge_across_folders_names_the_target_by_the_path_that_reaches_it() {
+        let dir = tmpdir("merge-path");
+        let spec = write(&dir, "spec.md", "# Spec\n");
+        // a bare [[plan]] would open the one at the top, so the link has to
+        // say where the target it means actually lives
+        write(&dir, "plan.md", "# Plan\n");
+        let target = write(&dir, "work/plan.md", "# Work Plan\n");
+        let other = write(&dir, "other.md", "[[spec]]\n");
+        retarget_merged(&spec, &target, "Spec", std::slice::from_ref(&dir));
+        assert_eq!(read(&other), "[[work/plan#Spec]]\n");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
