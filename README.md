@@ -37,6 +37,7 @@ or `cargo install catcher`. Then run `catcher`.
 - **Unresolved links** in the palette lists every `[[link]]` to a note that is not there; **⏎** goes to it. **Bookmark note** keeps the note in the bookmarks tab of **^O** (seeded from the vault's `.obsidian/bookmarks.json`). **Open vault…** switches to another folder for the session.
 - **Delete note** moves the file to `.trash` at the top of the vault, Obsidian's own folder, rather than off the disk; the confirmation says how many notes link here first. **Trash** in the palette lists what is in there, most recently deleted first: **⏎** puts one back in the folder it came from and opens it, **⌥⌫** deletes it for good. Attachments are never moved, and a trashed note is out of everything else — ^O, the tree, the mentions, the recents — with the `[[links]]` to it grey like any other missing note.
 - A ` ```mermaid ` fence is drawn as text: flowcharts and sequence diagrams, in box-drawing characters, no images and no network. Other kinds keep their source under a label.
+- A fence that names a language — ` ```rust `, ` ```sh `, ` ```python ` — has its keywords, strings, numbers, comments and type names coloured in both views; a language nothing knows, or none at all, reads as it always did, and `code_colors: no` turns the whole thing off.
 - Callouts, front matter, tables wider than the page (they pan sideways), checkboxes and `==highlights==` all render. Callouts fold (`> [!kind]- Title` starts folded, **⌥←** / **⌥→** or a click toggles) and nest. The reading view draws front matter as a properties box, tags clickable and dates with a relative hint; a click on the box's edge folds it to one line and a click on the line opens it again. **Toggle properties** in the palette cycles box, line and hidden, and **Hide properties** goes straight to hidden (`properties: box · line · hide` in the settings); in the editor they flip `front_matter` between dim and hide.
 - Tasks: `1. [ ]` numbered tasks get a checkbox, and the `[/]` in progress, `[-]` cancelled, `[>]` forwarded and `[?]` question states draw as glyphs. Nested bullets alternate `•`, `◦`, `▪`.
 - Also rendered, both views: `%% comments %%` (dimmed in the editor, gone from the page), inline footnotes `^[text]` numbered with `[^n]` references, and the HTML notes actually use — `<kbd>`, `<sub>`, `<sup>`, `<u>`, `<mark>`, `<br>`, `<!-- comments -->`. The editor shows backslash escapes literally, a dim `↵` for a hard line break, setext headings and indented code.
@@ -84,7 +85,7 @@ Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, 
 
 ## Settings
 
-**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes, attachments and templates folders, the daily note's folder, file name format and template, theme (`auto`, `dark`, `light`) and colours, page width, borders, status bar (`status_words` adds a word and character count), the start-up animation (`opener`), autosave delay, tab width, front matter, table style, wikilinks, whether a rename updates links, linked mentions, autocomplete, how far **^O** looks, and every key binding (`key_fold`, `key_unfold`, and the unbound `key_fold_all` / `key_unfold_all` among them). Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
+**^,** opens `~/.config/catcher/settings.md` as a note; **^S** applies it. It covers the notes, attachments and templates folders, the daily note's folder, file name format and template, theme (`auto`, `dark`, `light`) and colours, syntax colour in fenced code (`code_colors`, and `code_keyword`, `code_string`, `code_number`, `code_comment`, `code_type`), page width, borders, status bar (`status_words` adds a word and character count), the start-up animation (`opener`), autosave delay, tab width, front matter, table style, wikilinks, whether a rename updates links, linked mentions, autocomplete, how far **^O** looks, and every key binding (`key_fold`, `key_unfold`, and the unbound `key_fold_all` / `key_unfold_all` among them). Each line has a one-line hint beside it. `CATCHER_DIR` overrides the notes folder.
 
 ## Development
 
@@ -94,7 +95,7 @@ cargo test
 cargo clippy
 ```
 
-Rust, ratatui + crossterm. `src/editor.rs` is the buffer, `src/app.rs` the app state and key/mouse handling (with table editing in `src/app/table_edit.rs` and link peeks in `src/app/peek.rs`), `src/md.rs` live-preview styling, `src/render.rs` the reading view, `src/mermaid/` the diagram renderer, `src/config.rs` the settings note. Every colour lives in the `theme` module at the top of `src/md.rs`.
+Rust, ratatui + crossterm. `src/editor.rs` is the buffer, `src/app.rs` the app state and key/mouse handling (with table editing in `src/app/table_edit.rs` and link peeks in `src/app/peek.rs`), `src/md.rs` live-preview styling, `src/render.rs` the reading view, `src/highlight.rs` the syntect pass over a fence, `src/mermaid/` the diagram renderer, `src/config.rs` the settings note. Every colour lives in the `theme` module at the top of `src/md.rs`.
 
 ## License
 

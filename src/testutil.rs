@@ -15,6 +15,13 @@ pub fn tmpdir(prefix: &str, name: &str) -> PathBuf {
     fs::canonicalize(&dir).unwrap()
 }
 
+/// tests that flip a global setting take this first: the flag is shared by
+/// the whole process, and a parallel test must not read it mid-flip
+pub fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// `body` written to `rel` under `dir`, creating any missing parents
 pub fn write(dir: &Path, rel: &str, body: &str) -> PathBuf {
     let path = dir.join(rel);
