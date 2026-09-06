@@ -266,6 +266,10 @@ pub struct Config {
     pub wikilinks: bool,
     /// Whether `#tags` are coloured and followable. Off leaves them as text.
     pub tags: bool,
+    /// Whether a fence that names a language has its words coloured by role.
+    /// Off draws a fence exactly as it always did, and no syntax set is ever
+    /// loaded.
+    pub code_colors: bool,
     /// Whether the reading view lists the notes that link to this one. It
     /// costs a pass over every note body, so it is a setting and not simply
     /// how the app behaves.
@@ -324,6 +328,7 @@ impl Default for Config {
             properties: Properties::Box,
             wikilinks: true,
             tags: true,
+            code_colors: true,
             linked_mentions: true,
             autocomplete: true,
             quick_open_recursive: true,
@@ -415,6 +420,7 @@ impl Config {
         theme::set_bold_headings(self.bold_headings);
         crate::md::links::set_enabled(self.wikilinks);
         crate::md::tags::set_enabled(self.tags);
+        crate::highlight::set_enabled(self.code_colors);
     }
 
     /// The file plus the environment: `CATCHER_DIR` wins over `notes_dir`,
@@ -547,6 +553,7 @@ impl Config {
         c.status_words = flag(text, "status_words", c.status_words);
         c.wikilinks = flag(text, "wikilinks", c.wikilinks);
         c.tags = flag(text, "tags", c.tags);
+        c.code_colors = flag(text, "code_colors", c.code_colors);
         c.quick_open_recursive = match value(text, "quick_open").as_deref() {
             Some("folder") => false,
             Some("recursive") => true,
@@ -677,6 +684,11 @@ impl Config {
         );
         d.row("borders", self.borders.name(), "rounded · square · none");
         d.row("bold_headings", yn(self.bold_headings), "yes · no");
+        d.row(
+            "code_colors",
+            yn(self.code_colors),
+            "colour words in fenced code by language",
+        );
         d.row("status_bar", yn(self.status_bar), "the bottom line at all");
         d.row("key_hints", yn(self.key_hints), "the shortcuts in it");
         d.row(
@@ -1253,6 +1265,26 @@ mod tests {
             ..Default::default()
         };
         assert!(!Config::from_str(&c.to_document()).tags);
+    }
+
+    #[test]
+    fn code_colours_are_on_by_default_and_the_five_roles_round_trip() {
+        assert!(Config::default().code_colors);
+        assert!(!Config::from_str("- code_colors: no\n").code_colors);
+        let c = Config {
+            code_colors: false,
+            ..Default::default()
+        };
+        assert!(!Config::from_str(&c.to_document()).code_colors);
+        // and each role is a colour row like any other, pinned or deferred
+        let mut c = Config::default();
+        c.palette.code_keyword = theme::parse_color("#00ff88").unwrap();
+        let doc = c.to_document();
+        assert!(doc.contains("- code_keyword: #00ff88"));
+        assert!(doc.contains("- code_string: theme"));
+        let back = Config::from_str(&doc);
+        assert_eq!(back.palette.code_keyword, c.palette.code_keyword);
+        assert_eq!(back.palette.code_comment, theme::DARK.code_comment);
     }
 
     #[test]
