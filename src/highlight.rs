@@ -78,7 +78,7 @@ pub fn numbers() -> bool {
 static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
 
 fn syntaxes() -> &'static SyntaxSet {
-    SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines)
+    SYNTAXES.get_or_init(two_face::syntax::extra_newlines)
 }
 
 /// The language a fence's info string names, when colour is on and syntect
@@ -379,9 +379,7 @@ mod tests {
         // a name is a name whether it is being declared or called
         assert_eq!(role_of(&r, "wikilink_at"), Some(Role::Function));
         assert_eq!(role_of(&r, "+"), Some(Role::Operator));
-        // the grammar hands `!=` back a character at a time; both halves are
-        // the one operator
-        assert_eq!(role_of(&r, "!"), Some(Role::Operator));
+        assert_eq!(role_of(&r, "!="), Some(Role::Operator));
         assert_eq!(role_of(&r, "("), Some(Role::Punctuation));
         assert_eq!(role_of(&r, "{"), Some(Role::Punctuation));
         // and every run together is the source back again
@@ -406,6 +404,23 @@ mod tests {
         // a call's argument is not its name: only the innermost `meta.` scope
         // being the call itself makes a bare word a function
         assert_eq!(role_of(&r, "a"), None);
+    }
+
+    #[test]
+    fn typescript_is_a_language_too() {
+        // syntect's own set stops at javascript; bat's, through two-face,
+        // knows the languages people actually paste into notes
+        set_enabled(true);
+        assert_eq!(language("ts"), Some("ts"));
+        assert_eq!(language("tsx"), Some("tsx"));
+        let r = roles(
+            "ts",
+            "interface Roster { owner: string }\nexport async function load(id: string): Promise<Roster[]> {\n  return await fetch(id);\n}\n",
+        );
+        assert_eq!(role_of(&r, "interface"), Some(Role::Keyword));
+        assert_eq!(role_of(&r, "load"), Some(Role::Function));
+        assert_eq!(role_of(&r, "fetch"), Some(Role::Function));
+        assert!(matches!(role_of(&r, "string"), Some(Role::Type | Role::Keyword)));
     }
 
     #[test]

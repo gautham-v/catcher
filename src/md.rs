@@ -167,6 +167,12 @@ pub fn table_rule(widths: &[usize]) -> String {
         .join("─┼─")
 }
 
+/// A cell of ours rather than the source's: a code band's side padding, its
+/// line numbers, and the ground painted out to the page edge. The mapping
+/// treats it as no column at all — a click on one lands on the code beside it,
+/// the cursor never sits on one, and a selection never picks the numbers up.
+pub const PAD: usize = usize::MAX;
+
 /// One rendered character plus the source column it maps back to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cell {
@@ -294,10 +300,19 @@ impl Seg {
     pub fn display_to_source(&self, col: usize) -> usize {
         let col = col.saturating_sub(self.indent);
         let mut x = 0;
-        for c in &self.cells {
+        for (i, c) in self.cells.iter().enumerate() {
             let w = char_width(c.ch);
             if col < x + w {
-                return c.src;
+                if c.src != PAD {
+                    return c.src;
+                }
+                // a band's gutter stands for the code beside it; padding past
+                // the code stands for the end of the row
+                return self.cells[i..]
+                    .iter()
+                    .map(|c| c.src)
+                    .find(|s| *s != PAD)
+                    .unwrap_or(self.end_src);
             }
             x += w;
         }
@@ -322,7 +337,9 @@ impl Seg {
     pub fn source_to_display(&self, col: usize) -> usize {
         let mut x = 0;
         for c in &self.cells {
-            if c.src >= col {
+            // padding is nobody's column, so the cursor walks past the gutter
+            // rather than landing on it
+            if c.src != PAD && c.src >= col {
                 return self.indent + x;
             }
             x += char_width(c.ch);
@@ -358,16 +375,46 @@ pub fn wrap_rline(line: &RLine, width: usize) -> Vec<Seg> {
     if width == 0 {
         return vec![line.one_row()];
     }
+    // a code band's gutter is ours, not the line's: it comes off the front,
+    // the code is wrapped in what is left, and it goes back — blank — on every
+    // continuation row, so the band's left edge stays one straight line
+    let gutter = line.cells.iter().take_while(|c| c.src == PAD).count();
+    let (head, rest) = line.cells.split_at(gutter);
+    let head_w: usize = head.iter().map(|c| char_width(c.ch)).sum();
     // a hanging indent that ate half the page would be worse than none
-    let indent = hanging_indent(&line.cells).min(width / 2);
-    let chars: Vec<char> = line.cells.iter().map(|c| c.ch).collect();
-    wrap_breaks(&chars, width, width - indent)
+    let indent = if gutter == 0 {
+        hanging_indent(rest).min(width / 2)
+    } else {
+        0
+    };
+    let avail = width.saturating_sub(head_w).max(1);
+    let blank: Vec<Cell> = head.iter().map(|c| Cell { ch: ' ', ..*c }).collect();
+    let chars: Vec<char> = rest.iter().map(|c| c.ch).collect();
+    wrap_breaks(&chars, avail, avail - indent)
         .into_iter()
         .enumerate()
-        .map(|(i, (s, e))| Seg {
-            cells: line.cells[s..e].to_vec(),
-            indent: if i == 0 { 0 } else { indent },
-            end_src: line.cells.get(e).map_or(line.src_len, |c| c.src),
+        .map(|(i, (s, e))| {
+            let mut cells = if i == 0 { head.to_vec() } else { blank.clone() };
+            cells.extend_from_slice(&rest[s..e]);
+            // the band is painted to the page edge, so a short line of code is
+            // still a row of ground rather than a stripe
+            if gutter > 0 {
+                let used: usize = cells.iter().map(|c| char_width(c.ch)).sum();
+                let style = theme::code();
+                cells.extend(std::iter::repeat_n(
+                    Cell {
+                        ch: ' ',
+                        style,
+                        src: PAD,
+                    },
+                    width.saturating_sub(used),
+                ));
+            }
+            Seg {
+                cells,
+                indent: if i == 0 { 0 } else { indent },
+                end_src: rest.get(e).map_or(line.src_len, |c| c.src),
+            }
         })
         .collect()
 }
@@ -3588,9 +3635,10 @@ fn fence_line(src: &str, cap: bool) -> RLine {
     done(cells, src)
 }
 
-/// One line of a ``` fence, `i` counted from the fence's opening line. The
-/// caps are drawn as they always were; a body line takes its words' colours
-/// when the fence names a language syntect knows and `code_colors` is on.
+/// One line of a ``` fence, `i` counted from the fence's opening line: a row
+/// of the band the reading view draws, gutter and indent rules and all. A body
+/// line takes its words' colours when the fence names a language syntect knows
+/// and `code_colors` is on.
 ///
 /// The whole fence is highlighted at once even though the editor draws a line
 /// at a time — a comment or a string opened three lines up decides what this
@@ -3598,13 +3646,98 @@ fn fence_line(src: &str, cap: bool) -> RLine {
 /// rows of a fence parses it once and an edit inside it simply misses.
 fn code_fence_line(rows: &[String], i: usize) -> RLine {
     let src = rows.get(i).map(String::as_str).unwrap_or("");
-    if i == 0 || i + 1 == rows.len() {
-        return fence_line(src, true);
+    let cap = i == 0 || i + 1 == rows.len();
+    let mut line = if cap {
+        fence_cap_line(src)
+    } else {
+        let mut line = match fence_runs(rows).as_ref().and_then(|r| r.get(i - 1)) {
+            Some(runs) => code_line(src, runs),
+            None => fence_line(src, false),
+        };
+        line.cells = code_guides(line.cells);
+        line
+    };
+    // the ``` rows are the band's top and bottom — an editor row is a file
+    // row, so there is nowhere to put a padding row of its own — and they
+    // carry a blank gutter so the left edge lines up with the code above it
+    let number = (!cap).then_some(i);
+    line.cells
+        .splice(0..0, band_gutter(gutter_width(rows), number));
+    line
+}
+
+/// How wide a fence's gutter is: the digits its last line number needs, plus
+/// the two columns of air between the numbers and the code. Zero when
+/// `code_numbers` is off, which leaves the band and nothing else.
+fn gutter_width(rows: &[String]) -> usize {
+    if !crate::highlight::numbers() {
+        return 0;
     }
-    match fence_runs(rows).as_ref().and_then(|r| r.get(i - 1)) {
-        Some(runs) => code_line(src, runs),
-        None => fence_line(src, false),
+    // the caps are the fence, not the code
+    let body = rows.len().saturating_sub(2).max(1);
+    body.to_string().len() + 2
+}
+
+/// The band's left edge for one row: two columns of side padding, then the
+/// gutter with `number` right-aligned in it — blank on a cap and on a wrapped
+/// continuation row, both of which are rows the source never numbered.
+///
+/// None of it is the source's, so every cell is [`PAD`]: a click lands on the
+/// code beside it, the cursor steps over it, and a selection leaves it be.
+fn band_gutter(width: usize, number: Option<usize>) -> Vec<Cell> {
+    let mut cells = at("  ", theme::code(), PAD);
+    if width > 0 {
+        let label = number.map(|n| n.to_string()).unwrap_or_default();
+        cells.extend(at(
+            &format!("{label:>w$}  ", w = width - 2),
+            theme::code_gutter(),
+            PAD,
+        ));
     }
+    cells
+}
+
+/// A code row's leading whitespace ruled every fourth column, so depth is
+/// countable at a glance instead of measurable with a finger — the page's
+/// indent guides, cell for cell. A tab counts four columns wide but stays one
+/// cell, because the editor's mapping rests on one cell per source character.
+///
+/// Only the leading run: a rule struck through the middle of a string would be
+/// reading the text, not ruling it.
+fn code_guides(mut cells: Vec<Cell>) -> Vec<Cell> {
+    if !crate::highlight::numbers() {
+        return cells;
+    }
+    let mut col: usize = 0;
+    for c in cells.iter_mut() {
+        let width = match c.ch {
+            '\t' => 4,
+            ' ' => 1,
+            _ => break,
+        };
+        if c.ch == ' ' && col.is_multiple_of(4) {
+            c.ch = theme::CODE_GUIDE;
+            c.style = theme::code_guide();
+        }
+        col += width;
+    }
+    cells
+}
+
+/// A fence's own ``` row on the band: kept as typed, language word and all,
+/// only dim — the band's edge is what says "code" now, so there is nothing
+/// left for a hidden marker to say.
+fn fence_cap_line(src: &str) -> RLine {
+    let cells = src
+        .chars()
+        .enumerate()
+        .map(|(i, ch)| Cell {
+            ch,
+            style: theme::code_gutter(),
+            src: i,
+        })
+        .collect();
+    done(cells, src)
 }
 
 /// The highlighter's runs for a whole fence, one `Vec` per body line: `None`
@@ -5825,20 +5958,25 @@ mod tests {
         let lines = buf("```rust\n// why\nlet n = 12;\n```\n");
         let bs = blocks(&lines);
         assert_eq!(bs[0].kind, BlockKind::Fence);
-        // the label row is the language name, dim, as it always was
+        // the cap row is the fence as typed, dim on the band
         let cap = style_block_line(&lines, &bs[0], 0, 80);
-        assert_eq!(text(&cap), "rust");
-        assert!(cap.cells.iter().all(|c| c.style == theme::marker()));
-        // and a body line is coloured by role, one cell per source column
+        assert_eq!(text(&cap), "     ```rust");
+        assert!(cap
+            .cells
+            .iter()
+            .all(|c| c.style.bg == Some(theme::DARK.code_bg)));
+        // and a body line is coloured by role, one cell per source column,
+        // behind the band's gutter
         let l = style_block_line(&lines, &bs[0], 2, 80);
-        assert_eq!(text(&l), "let n = 12;");
-        assert_eq!(l.cells[0].style.fg, Some(theme::DARK.code_keyword));
-        assert_eq!(l.cells[8].style.fg, Some(theme::DARK.code_number));
-        assert_eq!(l.cells[4].style, theme::code());
-        assert_eq!(l.one_row().display_to_source(4), 4);
+        assert_eq!(text(&l), "  2  let n = 12;");
+        let code = &l.cells[5..];
+        assert_eq!(code[0].style.fg, Some(theme::DARK.code_keyword));
+        assert_eq!(code[8].style.fg, Some(theme::DARK.code_number));
+        assert_eq!(code[4].style, theme::code());
+        assert_eq!(l.one_row().display_to_source(9), 4);
         // a comment leans, and it is the line above that says so
         let c = style_block_line(&lines, &bs[0], 1, 80);
-        assert_eq!(c.cells[0].style.fg, Some(theme::DARK.code_comment));
+        assert_eq!(c.cells[5].style.fg, Some(theme::DARK.code_comment));
 
         // a fence that names nothing catcher knows is drawn as it always was
         for src in [
@@ -5847,12 +5985,15 @@ mod tests {
         ] {
             let lines = buf(src);
             let l = style_block_line(&lines, &blocks(&lines)[0], 1, 80);
-            assert!(l.cells.iter().all(|c| c.style == theme::code()), "{src}");
+            assert!(
+                l.cells[5..].iter().all(|c| c.style == theme::code()),
+                "{src}"
+            );
         }
         // nor is one with colour turned off
         crate::highlight::set_enabled(false);
         let l = style_block_line(&lines, &bs[0], 2, 80);
-        assert!(l.cells.iter().all(|c| c.style == theme::code()));
+        assert!(l.cells[5..].iter().all(|c| c.style == theme::code()));
         crate::highlight::set_enabled(true);
     }
 
@@ -5982,6 +6123,63 @@ mod tests {
         assert_eq!(l.one_row().display_to_source(0), 0);
         // past the source's own three characters, clicks clamp to its end
         assert_eq!(l.one_row().display_to_source(9), 3);
+    }
+
+    #[test]
+    fn a_fence_in_the_editor_is_a_band_with_a_gutter_down_its_left() {
+        let _lock = crate::testutil::serial();
+        theme::set_palette(theme::DARK);
+        crate::highlight::set_numbers(true);
+        let lines = buf("```\nlet n = 1;\n    deep\n```\n");
+        let bs = blocks(&lines);
+        // a body row: two columns of side padding, then the number in the
+        // gutter's colour, then the code
+        let body = style_block_line(&lines, &bs[0], 1, 40);
+        assert_eq!(text(&body), "  1  let n = 1;");
+        assert_eq!(&text(&body)[..5], "  1  ");
+        assert!(body.cells[..5].iter().all(|c| c.src == PAD));
+        assert_eq!(body.cells[2].style, theme::code_gutter());
+        assert_eq!(body.cells[2].ch, '1');
+        // the ``` row sits on the same ground, markers and all
+        let cap = style_block_line(&lines, &bs[0], 0, 40);
+        assert_eq!(text(&cap), "     ```");
+        assert!(cap
+            .cells
+            .iter()
+            .all(|c| c.style.bg == Some(theme::DARK.code_bg)));
+        // leading whitespace is ruled every fourth column
+        let deep = style_block_line(&lines, &bs[0], 2, 40);
+        assert_eq!(text(&deep), "  2  │   deep");
+        assert_eq!(deep.cells[5].style, theme::code_guide());
+        // a click in the gutter lands at the start of the line, and the
+        // cursor's own column sits past the gutter rather than on it
+        let row = body.one_row();
+        assert_eq!(row.display_to_source(0), 0);
+        assert_eq!(row.display_to_source(2), 0);
+        assert_eq!(row.source_to_display(0), 5);
+        assert_eq!(row.source_to_display(4), 9);
+
+        // wrapped: the band is painted to the page edge and the continuation
+        // row keeps a blank gutter, so the left edge is one straight line
+        let rows = wrap_rline(&body, 12);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].cells.iter().map(|c| c.ch).collect::<String>(),
+            "  1  let n ="
+        );
+        assert_eq!(
+            rows[1].cells.iter().map(|c| c.ch).collect::<String>(),
+            "     1;     "
+        );
+        assert!(rows[1].cells[..5].iter().all(|c| c.src == PAD));
+
+        // numbers off: the band and its two-column inset, nothing more
+        crate::highlight::set_numbers(false);
+        let plain = style_block_line(&lines, &bs[0], 2, 40);
+        assert_eq!(text(&plain), "      deep");
+        assert!(plain.cells[..2].iter().all(|c| c.src == PAD));
+        assert!(plain.cells[2..].iter().all(|c| c.style == theme::code()));
+        crate::highlight::set_numbers(true);
     }
 
     #[test]

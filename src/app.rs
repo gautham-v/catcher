@@ -5491,6 +5491,13 @@ fn view_line(
             }
             return with_gutter(line, grip_row == Some(row));
         }
+        // a fence stays a band with the cursor in it, Obsidian's way: its
+        // ``` rows are already shown as typed, and every cell of a code row
+        // stands for one source character, so there is nothing a raw view
+        // would reveal that the band hides
+        if block.kind == md::BlockKind::Fence {
+            return md::style_block_line(lines, block, row, width);
+        }
         return if revealed_by(block, cursor_row, selection) {
             md::RLine::raw(src)
         } else {
@@ -5845,15 +5852,15 @@ mod tests {
             .map(|c| c.ch)
             .collect::<String>()
         };
-        // cursor outside the fence: the caps are drawn, the body is code
-        assert_eq!(view(2, 0), "let x = 1;");
-        // the caps are quiet: no backticks while the cursor is outside
-        assert_eq!(view(1, 0), "");
-        assert_eq!(view(3, 0), "");
-        // cursor on any line of the fence reveals the whole block raw
-        assert_eq!(view(1, 2), "```");
-        assert_eq!(view(2, 2), "let x = 1;");
-        // and every line of the block is raw, not just the cursor's own
+        // cursor outside the fence: the block is a band, numbered down the
+        // left, its caps kept as typed but quiet
+        assert_eq!(view(2, 0), "  1  let x = 1;");
+        assert_eq!(view(1, 0), "     ```");
+        assert_eq!(view(3, 0), "     ```");
+        // cursor inside the fence: still the band, Obsidian's way
+        assert_eq!(view(1, 2), "     ```");
+        assert_eq!(view(2, 2), "  1  let x = 1;");
+        // a table, though, goes raw, and every line of it, not just the cursor's own
         let table: Vec<String> = "| a | bbbb |\n| --- | --- |\n| 1 | 2 |"
             .lines()
             .map(String::from)
