@@ -1636,6 +1636,7 @@ mod tests {
             "key_split_right",
             "key_split_down",
             "key_new_tab",
+            "key_extract",
         ] {
             assert!(doc.contains(&format!("- {key}: none")), "{key}");
         }

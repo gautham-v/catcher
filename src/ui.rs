@@ -94,10 +94,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Overlay::Palette
         | Overlay::QuickOpen
         | Overlay::MoveFile
+        | Overlay::MergeInto
         | Overlay::Outline
         | Overlay::OpenVault => draw_palette(f, app),
         Overlay::ConfirmDelete => draw_confirm(f, app),
+        Overlay::ConfirmMerge => draw_merge(f, app),
         Overlay::RenameFile => draw_rename(f, app),
+        Overlay::Extract => draw_extract(f, app),
         Overlay::Find => draw_find(f, app),
         Overlay::Help => draw_help(f, app),
         Overlay::None => {}
@@ -1311,6 +1314,8 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             "open a note — any folder, most recent first"
         } else if app.overlay == Overlay::MoveFile {
             "move this note to a folder"
+        } else if app.overlay == Overlay::MergeInto {
+            "merge this note into another — type to narrow"
         } else if outline {
             "jump to a heading in this note"
         } else {
@@ -1764,6 +1769,18 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
             };
             (format!("#{tag}"), detail, "tag")
         }
+        // the merge picker lists notes the way ^O does: the filename, and
+        // the folder it is filed under
+        Item::MergeTo(path) => match app.open_index.iter().find(|e| e.path == *path) {
+            Some(e) => (e.name(), folder_or_root(e.folder.clone(), app), "note"),
+            None => (
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                String::new(),
+                "note",
+            ),
+        },
         Item::MoveTo(dir) => {
             let notes = std::fs::read_dir(dir)
                 .map(|rd| {
@@ -1982,6 +1999,85 @@ fn draw_confirm(f: &mut Frame, app: &mut App) {
         )),
     ];
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The merge confirmation: the same box as the delete one, saying what the
+/// merge would do before it does any of it.
+fn draw_merge(f: &mut Frame, app: &mut App) {
+    let Some(plan) = app.merge_plan.as_ref() else {
+        return;
+    };
+    let rect = overlay_rect(f, 6);
+    let width = rect.width.saturating_sub(4) as usize;
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" merge into \u{201c}{}\u{201d}?", truncate(&plan.into, 40)),
+            theme::state().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            truncate(
+                &format!(
+                    " appends under \u{201c}{} {}\u{201d}, rewrites {} in {},",
+                    plan.marker,
+                    plan.heading,
+                    plural(plan.links, "link"),
+                    plural(plan.notes, "note"),
+                ),
+                width,
+            ),
+            dim(),
+        )),
+        Line::from(Span::styled(" and moves this file to .trash.", dim())),
+        Line::from(Span::styled(" enter merges, esc keeps this note.", dim())),
+    ];
+    let inner = open_panel(f, rect, panel(app));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The extract prompt: how many lines are going, what the note they become is
+/// called, and what stays where they were.
+fn draw_extract(f: &mut Frame, app: &mut App) {
+    let rect = overlay_rect(f, 6);
+    let inner = open_panel(f, rect, panel(app));
+    let mut choice = vec![Span::styled(" leave  ", dim())];
+    for (leave, word) in crate::composer::LEAVES {
+        let on = leave == app.extract_leave;
+        let style = if on {
+            Style::new().add_modifier(Modifier::BOLD)
+        } else {
+            dim()
+        };
+        choice.push(Span::styled(format!("{word}  "), style));
+    }
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" extract {} to", plural(app.extract_lines(), "line")),
+            dim(),
+        )),
+        Line::from(Span::styled(
+            format!(" {}", app.extract_input),
+            Style::new().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(choice),
+        Line::from(Span::styled(
+            " tab changes what stays here · enter extracts, esc cancels.",
+            dim(),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+    f.set_cursor_position((
+        inner.x + 1 + crate::md::str_width(&app.extract_input) as u16,
+        inner.y + 1,
+    ));
+}
+
+/// `1 line`, `3 lines`: a count with the word it counts.
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("1 {word}")
+    } else {
+        format!("{n} {word}s")
+    }
 }
 
 /// The inline rename prompt: the same box as the delete confirmation, with an

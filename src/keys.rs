@@ -55,6 +55,7 @@ pub enum Action {
     ToggleOpener,
     Tags,
     Find,
+    ExtractNote,
 }
 
 /// Every action: its settings key, its default binding, and what it does.
@@ -295,6 +296,12 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_find",
         None,
         "find in note — step through matches, or replace them",
+    ),
+    (
+        Action::ExtractNote,
+        "key_extract",
+        None,
+        "extract the selection, or the section under the cursor, into a note of its own",
     ),
 ];
 
