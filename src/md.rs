@@ -5961,6 +5961,9 @@ mod tests {
         let _lock = crate::testutil::serial();
         crate::highlight::set_enabled(true);
         theme::set_palette(theme::DARK);
+        // parsed here rather than waited for: a test has no loop to poll the
+        // highlighter's worker from
+        crate::highlight::runs_now("rust", "// why\nlet n = 12;\n");
         let lines = buf("```rust\n// why\nlet n = 12;\n```\n");
         let bs = blocks(&lines);
         assert_eq!(bs[0].kind, BlockKind::Fence);

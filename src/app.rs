@@ -1404,6 +1404,8 @@ impl App {
         changed |= self.poll_tags_scan();
         changed |= self.poll_contents_scan();
         changed |= self.poll_unresolved_scan();
+        // a fence's colours coming back from the highlighter's worker
+        changed |= crate::highlight::poll();
         changed |= self.maybe_peek();
         // a filename that followed its title on save; the title is the
         // terminal's, not the frame's

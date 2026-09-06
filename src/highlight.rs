@@ -14,12 +14,20 @@
 //! syntect knows is about to be drawn: a note without one never pays for it.
 //! What comes out is remembered per fence, because both views ask for the
 //! same fence once per row per pass and scrolling must never re-parse.
+//!
+//! The parse itself happens on a worker thread, because the first fence in a
+//! language pays for that grammar's regexes being compiled — a second in a
+//! debug build, and a note with four fences used to hold the very first frame
+//! for long enough that the opener never played. So [`runs`] answers from the
+//! cache or answers `None` and asks the worker; the fence draws in the plain
+//! code colour for a frame or two and [`poll`] fills the colour in.
 
 use crate::theme;
 use ratatui::style::Style;
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{OnceLock, RwLock};
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 
@@ -89,7 +97,18 @@ pub fn language(info: &str) -> Option<&str> {
         return None;
     }
     let token = info.split_whitespace().next()?;
-    syntaxes().find_syntax_by_token(token).map(|_| token)
+    // the lookup itself is cheap — a grammar's regexes compile later, on the
+    // worker — but loading the set is not, and the load is the worker's job
+    // from `warm` on. So a thread with a worker takes the set only if it is
+    // already there and draws the fence plain until it is; a thread without
+    // one (a test) loads it here, as this always did.
+    let loaded = WORKER.with(|w| w.borrow().is_none());
+    let set = if loaded {
+        Some(syntaxes())
+    } else {
+        SYNTAXES.get()
+    };
+    set?.find_syntax_by_token(token).map(|_| token)
 }
 
 /// The style a role is drawn in: the code block's own foreground and ground,
@@ -246,20 +265,78 @@ fn declares(scope: &str, text: &str) -> bool {
 /// One remembered fence: the language, a hash of its body, and the runs.
 type Cached = (String, u64, Rc<Vec<Vec<Run>>>);
 
+/// One finished parse on its way back from the worker: the key it was asked
+/// for, and what came out — `None` when syntect had no grammar after all.
+type Answer = (String, u64, Option<Vec<Vec<Run>>>);
+
+/// The language of the answer the worker sends once the syntax set is loaded
+/// and before it has parsed anything. No fence is named the empty string, so
+/// it cannot be mistaken for one; what it buys is the redraw that lets the
+/// fences on screen ask for a language now that asking is free.
+const READY: &str = "";
+
+/// The worker thread's two ends, owned by the thread that asked for a fence.
+struct Worker {
+    tx: Sender<(String, String, u64)>,
+    rx: Receiver<Answer>,
+}
+
 thread_local! {
     /// The fences drawn most recently. A handful is plenty: a page holds few
     /// fences, and both views walk them back to back, row by row.
     static CACHE: RefCell<Vec<Cached>> = const { RefCell::new(Vec::new()) };
+    /// Fences asked for and not yet answered, so a fence on screen is only
+    /// ever sent once however many times a frame asks about it.
+    static PENDING: RefCell<Vec<(String, u64)>> = const { RefCell::new(Vec::new()) };
+    /// Languages the worker came back empty on. Without this a fence syntect
+    /// cannot parse would be sent again every frame, for ever.
+    static UNKNOWN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Started on the first request, one per thread that asks. In the app
+    /// that is the main thread and nothing else.
+    static WORKER: RefCell<Option<Worker>> = const { RefCell::new(None) };
 }
 
 const CACHE_MAX: usize = 8;
 
+/// Start the worker and have it load the syntax set, so the load is paid off
+/// the main thread rather than inside the first frame. Called once at start.
+pub fn warm() {
+    WORKER.with(|w| {
+        with_worker(&mut w.borrow_mut());
+    });
+}
+
+/// The worker, started if this thread has not started it yet.
+fn with_worker(slot: &mut Option<Worker>) -> &Worker {
+    slot.get_or_insert_with(|| {
+        let (tx, jobs) = std::sync::mpsc::channel::<(String, String, u64)>();
+        let (done, rx) = std::sync::mpsc::channel::<Answer>();
+        std::thread::spawn(move || {
+            // touching the set here is the point of `warm`: the packdump
+            // load, and every grammar's regexes after it, are the worker's
+            let _ = syntaxes();
+            if done.send((READY.to_string(), 0, None)).is_err() {
+                return;
+            }
+            while let Ok((lang, body, key)) = jobs.recv() {
+                if done.send((lang.clone(), key, parse(&lang, &body))).is_err() {
+                    break;
+                }
+            }
+        });
+        Worker { tx, rx }
+    })
+}
+
 /// The style runs for every line of `body`, parsed as `lang` — one `Vec<Run>`
-/// per line, in order, the line ending left out. `None` when syntect has no
-/// grammar for the language.
+/// per line, in order, the line ending left out. `None` when the parse has
+/// not landed yet, and `None` for good when syntect has no grammar for the
+/// language.
 ///
 /// Keyed by language and a hash of the body, so an edit inside a fence simply
-/// misses and reparses, and a scroll over one never does.
+/// misses and reparses, and a scroll over one never does. A miss is a request
+/// to the worker and nothing more: the caller draws the fence plain, and the
+/// colours arrive through [`poll`] a frame or two later.
 pub fn runs(lang: &str, body: &str) -> Option<Rc<Vec<Vec<Run>>>> {
     let key = hash(body);
     let hit = CACHE.with(|c| {
@@ -271,12 +348,92 @@ pub fn runs(lang: &str, body: &str) -> Option<Rc<Vec<Vec<Run>>>> {
     if hit.is_some() {
         return hit;
     }
-    let runs = Rc::new(parse(lang, body)?);
+    if UNKNOWN.with(|u| u.borrow().iter().any(|l| l == lang)) {
+        return None;
+    }
+    let fresh = PENDING.with(|p| {
+        let mut p = p.borrow_mut();
+        let fresh = !p.iter().any(|(l, h)| l == lang && *h == key);
+        if fresh {
+            p.push((lang.to_string(), key));
+        }
+        fresh
+    });
+    if fresh {
+        WORKER.with(|w| {
+            let mut w = w.borrow_mut();
+            let sent = with_worker(&mut w)
+                .tx
+                .send((lang.to_string(), body.to_string(), key))
+                .is_ok();
+            if !sent {
+                // the worker died; drop the claim so a later frame retries
+                *w = None;
+                PENDING.with(|p| p.borrow_mut().retain(|(_, h)| *h != key));
+            }
+        });
+    }
+    None
+}
+
+/// Whether a fence is still out with the worker. The event loop asks so it
+/// can wait a frame rather than a tenth of a second while colours are coming.
+pub fn pending() -> bool {
+    PENDING.with(|p| !p.borrow().is_empty())
+}
+
+/// Take every parse the worker has finished into the cache. Returns whether
+/// anything arrived, which is what makes the frame redraw with the colours in
+/// it. Called from `App::tick` like the other polls.
+pub fn poll() -> bool {
+    let mut any = false;
+    WORKER.with(|w| {
+        let w = w.borrow();
+        let Some(worker) = w.as_ref() else {
+            return;
+        };
+        // everything waiting, not one a frame: a page of fences comes back
+        // together and the redraw shows all of it at once
+        while let Ok((lang, key, parsed)) = worker.rx.try_recv() {
+            PENDING.with(|p| p.borrow_mut().retain(|(l, h)| !(*l == lang && *h == key)));
+            match parsed {
+                Some(runs) => remember(&lang, key, Rc::new(runs)),
+                // no grammar after all: never ask for this one again
+                None if lang != READY => UNKNOWN.with(|u| u.borrow_mut().push(lang)),
+                // the set is loaded; the redraw this returns is what puts the
+                // languages on screen back in front of `language`
+                None => {}
+            }
+            any = true;
+        }
+    });
+    any
+}
+
+fn remember(lang: &str, key: u64, runs: Rc<Vec<Vec<Run>>>) {
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
-        c.insert(0, (lang.to_string(), key, runs.clone()));
+        c.insert(0, (lang.to_string(), key, runs));
         c.truncate(CACHE_MAX);
     });
+}
+
+/// [`runs`], parsed here and now rather than asked of the worker. Only the
+/// tests use it: they assert on colours a frame at a time, with no loop to
+/// poll for them.
+#[cfg(test)]
+pub fn runs_now(lang: &str, body: &str) -> Option<Rc<Vec<Vec<Run>>>> {
+    let key = hash(body);
+    if let Some(hit) = CACHE.with(|c| {
+        c.borrow()
+            .iter()
+            .find(|(l, h, _)| l == lang && *h == key)
+            .map(|(_, _, runs)| runs.clone())
+    }) {
+        return Some(hit);
+    }
+    let runs = Rc::new(parse(lang, body)?);
+    remember(lang, key, runs.clone());
     Some(runs)
 }
 
@@ -337,10 +494,16 @@ fn run(text: &str, stack: &ScopeStack) -> Run {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// every run of `body`, as the text it covers and the role it took
     fn roles(lang: &str, body: &str) -> Vec<(String, Option<Role>)> {
-        let runs = runs(lang, body).expect("a language syntect knows");
+        let runs = runs_now(lang, body).expect("a language syntect knows");
+        pairs(body, &runs)
+    }
+
+    /// the runs of `body` spelt out as the text each covers and its role
+    fn pairs(body: &str, runs: &[Vec<Run>]) -> Vec<(String, Option<Role>)> {
         let mut out = Vec::new();
         for (raw, line_runs) in body.split_inclusive('\n').zip(runs.iter()) {
             let line = raw.trim_end_matches('\n');
@@ -420,7 +583,10 @@ mod tests {
         assert_eq!(role_of(&r, "interface"), Some(Role::Keyword));
         assert_eq!(role_of(&r, "load"), Some(Role::Function));
         assert_eq!(role_of(&r, "fetch"), Some(Role::Function));
-        assert!(matches!(role_of(&r, "string"), Some(Role::Type | Role::Keyword)));
+        assert!(matches!(
+            role_of(&r, "string"),
+            Some(Role::Type | Role::Keyword)
+        ));
     }
 
     #[test]
@@ -501,7 +667,7 @@ mod tests {
         assert_eq!(language("python {highlight: 2}"), Some("python"));
         assert_eq!(language("gibberish"), None);
         assert_eq!(language(""), None);
-        assert!(runs("gibberish", "x\n").is_none());
+        assert!(runs_now("gibberish", "x\n").is_none());
     }
 
     #[test]
@@ -517,12 +683,37 @@ mod tests {
     fn a_fence_is_parsed_once_and_answered_from_the_cache_after() {
         set_enabled(true);
         let body = "fn main() {}\n";
-        let first = runs("rust", body).unwrap();
-        let again = runs("rust", body).unwrap();
+        let first = runs_now("rust", body).unwrap();
+        let again = runs_now("rust", body).unwrap();
         assert!(Rc::ptr_eq(&first, &again));
         // an edit changes the hash and so misses
-        let edited = runs("rust", "fn other() {}\n").unwrap();
+        let edited = runs_now("rust", "fn other() {}\n").unwrap();
         assert!(!Rc::ptr_eq(&first, &edited));
+    }
+
+    #[test]
+    fn a_miss_is_answered_by_the_worker_and_only_asked_for_once() {
+        set_enabled(true);
+        let body = "fn worker_test() {}\n";
+        // nothing in the cache: the fence is drawn plain and the worker asked
+        assert!(runs("rust", body).is_none());
+        assert!(pending());
+        // asking again while it is out sends nothing more
+        assert!(runs("rust", body).is_none());
+        // the worker has a grammar to compile the first time round, so this
+        // waits for it rather than assuming a frame is long enough
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while pending() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never answered"
+            );
+            poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let hit = runs("rust", body).expect("the parse landed in the cache");
+        assert_eq!(hit.len(), 1);
+        assert_eq!(role_of(&pairs(body, &hit), "fn"), Some(Role::Keyword));
     }
 
     #[test]

@@ -316,6 +316,9 @@ fn tui(launch: cli::Launch) -> Result<()> {
     app.start_opener();
     push_title();
     let mut terminal = ratatui::init();
+    // the syntax set loads on the highlighter's own thread from here, so no
+    // fence can hold the first frame
+    highlight::warm();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     push_keyboard();
     // ratatui's panic hook puts back raw mode and the alternate screen, but
@@ -369,8 +372,14 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Resu
         }
         let mut handled = false;
         // while the opener runs the screen is a film, so frames come every
-        // 16 ms; idle, ten a second is plenty
-        let wait = if app.opener_running() { 16 } else { 100 };
+        // 16 ms; a fence still out with the highlighter is worth the same
+        // rate, so its colours land the frame after they are parsed rather
+        // than a tenth of a second later. Idle, ten a second is plenty.
+        let wait = if app.opener_running() || highlight::pending() {
+            16
+        } else {
+            100
+        };
         if event::poll(Duration::from_millis(wait))? {
             handle(app, event::read()?);
             handled = true;

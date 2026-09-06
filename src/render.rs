@@ -3836,6 +3836,9 @@ mod tests {
         let _lock = crate::testutil::serial();
         crate::highlight::set_enabled(true);
         theme::set_palette(theme::DARK);
+        // the highlighter answers a miss from a worker thread; a test draws
+        // one frame and has nowhere to poll, so the fence is parsed up front
+        crate::highlight::runs_now("rust", "// why\nfn add() -> u32 { 12 }\n");
         let r = render("```rust\n// why\nfn add() -> u32 { 12 }\n```\n");
         // the source is on the page exactly as it was typed
         assert!(flat(&r).contains("fn add() -> u32 { 12 }"));
