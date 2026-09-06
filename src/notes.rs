@@ -420,6 +420,31 @@ pub fn delete(note: &Note) -> Result<()> {
     Ok(())
 }
 
+/// Move the note at `path` into the vault's `.trash`, the way Obsidian's own
+/// trash works: the file leaves the notes without leaving the disk, so a
+/// merge is undoable by hand. A name already taken there takes a number, so
+/// nothing that was thrown away is written over. Where it landed.
+pub fn trash_note(root: &Path, path: &Path) -> std::io::Result<PathBuf> {
+    let dir = root.join(".trash");
+    fs::create_dir_all(&dir)?;
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled".to_string());
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let mut target = dir.join(format!("{stem}{ext}"));
+    let mut n = 2;
+    while target.exists() {
+        target = dir.join(format!("{stem}-{n}{ext}"));
+        n += 1;
+    }
+    fs::rename(path, &target)?;
+    Ok(target)
+}
+
 pub fn create(dir: &Path) -> Result<Note> {
     create_with(dir, String::new())
 }
@@ -620,6 +645,22 @@ mod tests {
         n.content = "# Anything Else\n".into();
         save(&dir, &mut n, true).unwrap();
         assert_eq!(n.path, dir.join("keep-this-name.md"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_trashed_note_moves_under_dot_trash_and_never_lands_on_another() {
+        let dir = tmpdir("trash");
+        let first = crate::testutil::write(&dir, "spec.md", "# Spec\n");
+        let landed = trash_note(&dir, &first).unwrap();
+        assert_eq!(landed, dir.join(".trash/spec.md"));
+        assert!(!first.exists());
+        assert_eq!(fs::read_to_string(&landed).unwrap(), "# Spec\n");
+        // another note by the same name is thrown away beside it, not over it
+        let second = crate::testutil::write(&dir, "work/spec.md", "# Other Spec\n");
+        let landed = trash_note(&dir, &second).unwrap();
+        assert_eq!(landed, dir.join(".trash/spec-2.md"));
+        assert_eq!(fs::read_to_string(&landed).unwrap(), "# Other Spec\n");
         let _ = fs::remove_dir_all(&dir);
     }
 
