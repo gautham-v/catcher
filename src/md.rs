@@ -335,11 +335,17 @@ impl Seg {
 
     /// Source column → display column within this row.
     pub fn source_to_display(&self, col: usize) -> usize {
+        // the band's fill past the code is nobody's column either: the end of
+        // the line is just after its last real cell, not the page edge
+        let last = self.cells.iter().rposition(|c| c.src != PAD);
         let mut x = 0;
-        for c in &self.cells {
+        for (i, c) in self.cells.iter().enumerate() {
             // padding is nobody's column, so the cursor walks past the gutter
             // rather than landing on it
             if c.src != PAD && c.src >= col {
+                return self.indent + x;
+            }
+            if last.is_some_and(|l| i > l) {
                 return self.indent + x;
             }
             x += char_width(c.ch);
@@ -6158,6 +6164,13 @@ mod tests {
         assert_eq!(row.display_to_source(2), 0);
         assert_eq!(row.source_to_display(0), 5);
         assert_eq!(row.source_to_display(4), 9);
+        // and the end of the line is just after the code, not past the fill
+        // that paints the band to the page edge — on a ``` row too
+        let full = wrap_rline(&body, 40).remove(0);
+        assert_eq!(full.cells.len(), 40);
+        assert_eq!(full.source_to_display(10), 15);
+        let cap_row = wrap_rline(&cap, 40).remove(0);
+        assert_eq!(cap_row.source_to_display(3), 8);
 
         // wrapped: the band is painted to the page edge and the continuation
         // row keeps a blank gutter, so the left edge is one straight line
