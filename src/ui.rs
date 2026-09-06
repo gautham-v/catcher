@@ -95,6 +95,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         | Overlay::QuickOpen
         | Overlay::MoveFile
         | Overlay::Outline
+        | Overlay::Templates
         | Overlay::OpenVault => draw_palette(f, app),
         Overlay::ConfirmDelete => draw_confirm(f, app),
         Overlay::RenameFile => draw_rename(f, app),
@@ -1249,6 +1250,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let bookmarks = quick && app.tab == QuickTab::Bookmarks;
     let unresolved = quick && app.tab == QuickTab::Unresolved;
     let outline = app.overlay == Overlay::Outline;
+    let templates = app.overlay == Overlay::Templates;
     // the box is at most 100 wide and inset 2 from each side of the frame,
     // less the border: what a snippet has to fit in, known before the box is
     let width = overlay_rect_wide(f, 1, 100).width.saturating_sub(2) as usize;
@@ -1256,7 +1258,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     // two border rows, the prompt, the rule under it, and the footer hint ^O
     // carries. Derived from the box's own budget rather than guessed at, so
     // the tree scrolls inside the rows it actually has on an 80x24 terminal.
-    let chrome = if quick || outline { 5 } else { 4 };
+    let chrome = if quick || outline || templates { 5 } else { 4 };
     // more rows on a taller window, since there is nothing else to use the
     // space for while the palette is open
     let room = overlay_budget(f).saturating_sub(chrome).clamp(1, 16) as usize;
@@ -1272,7 +1274,10 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     }
     let inner = open_panel(f, rect, block);
 
-    let rows = vec![Constraint::Length(1); shown as usize + 2 + usize::from(quick || outline)];
+    let rows = vec![
+        Constraint::Length(1);
+        shown as usize + 2 + usize::from(quick || outline || templates)
+    ];
     let chunks = Layout::vertical(rows).split(inner);
 
     // ❯ marks where you type, so the prompt reads as an input and not as the
@@ -1280,6 +1285,12 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     // chrome over the note, and a hue here would compete with the one the
     // note itself uses for headings.
     let caret = Span::styled(" ❯ ", theme::bright());
+    // an empty templates folder names itself, so the answer is "put a file
+    // there" and not "this list is broken"
+    let no_templates = format!(
+        "no templates yet — put a .md in {}/",
+        app.config.templates_dir.display()
+    );
     let prompt = if app.query.is_empty() {
         let hint = if browse {
             "browse folders — tab for contents"
@@ -1313,6 +1324,12 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             "move this note to a folder"
         } else if outline {
             "jump to a heading in this note"
+        } else if templates && app.templates.is_empty() {
+            no_templates.as_str()
+        } else if templates && app.template_new {
+            "a new note from a template — type to narrow"
+        } else if templates {
+            "insert a template at the cursor — type to narrow"
         } else {
             "run a command"
         };
@@ -1471,8 +1488,14 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             Paragraph::new(Span::styled(format!("  {hint}"), dim())),
             chunks[chunks.len() - 1],
         );
-    } else if outline {
-        let hint = "↵ go to heading  ⌥↵ fold or unfold  esc close";
+    } else if outline || templates {
+        let hint = if templates && app.template_new {
+            "↵ new note from it  esc close"
+        } else if templates {
+            "↵ insert at the cursor  esc close"
+        } else {
+            "↵ go to heading  ⌥↵ fold or unfold  esc close"
+        };
         f.render_widget(
             Paragraph::new(Span::styled(format!("  {hint}"), dim())),
             chunks[chunks.len() - 1],
@@ -1749,6 +1772,7 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
         Item::Folder(_) | Item::Line(..) | Item::At(..) | Item::Notice | Item::Heading(_) => {
             (String::new(), String::new(), "")
         }
+        Item::Template(path) => (crate::templates::name(path), String::new(), ""),
         Item::Vault(root) => {
             let detail = if *root == app.dir {
                 "this session's vault".to_string()
