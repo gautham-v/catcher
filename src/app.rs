@@ -665,7 +665,7 @@ pub struct App {
     /// is up, and which of them is the current one.
     find_matches: Vec<crate::find::Match>,
     pub find_at: Option<usize>,
-    /// Where you have been, for ^B and ^F.
+    /// Where you have been, for ⌥[ and ⌥].
     pub history: crate::history::History,
     /// What has been typed into the shortcuts card, which filters its rows.
     pub help_query: String,
@@ -1495,7 +1495,7 @@ impl App {
         index::push_recent(&mut self.recents, &path);
     }
 
-    /// ^B / ^F: the note before or after this one in the history. Opening
+    /// ⌥[ / ⌥]: the note before or after this one in the history. Opening
     /// goes through `open_path`, which saves first and pushes the landing —
     /// a push of the entry just made current is a no-op, so the stack stays
     /// where it is.
@@ -4123,7 +4123,7 @@ impl App {
     }
 
     /// The rows hung under `row` when it is a `![[note]]` embed drawn as a
-    /// card: the first lines of the embedded note. None while the cursor is
+    /// card: the embedded note itself. None while the cursor is
     /// on it, which is when the line shows its syntax instead.
     pub fn embed_rows(&self, blocks: &[md::Block], row: usize, width: usize) -> Vec<md::RLine> {
         let Some(block) = md::block_at(blocks, row) else {
@@ -4138,7 +4138,7 @@ impl App {
             .get(row)
             .map(String::as_str)
             .unwrap_or("");
-        md::embed_rows(src, width, &self.config.keys.label(Action::FollowLink))
+        md::embed_rows(src, width)
     }
 
     /// Put `with` at the cursor as a paragraph of its own: an empty line

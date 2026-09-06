@@ -21,7 +21,7 @@ or `cargo install catcher`. Then run `catcher`.
 - **^K** is the command palette: new, new from template, set templates folder, set attachments folder, insert template, open, delete, rename, move to folder, trash, extract to new note, merge into note, reading view, find in note, bookmark, open vault, help, settings, quit.
 - **^O** opens a note: every folder, most recently opened first, fuzzy-searched by filename. **Tab** steps through its tabs: recent, a folder tree, contents, tags and bookmarks.
 - **⇧^F** searches in all files: every line that has every word you type, grouped by note. **⏎** opens the note at that line. Obsidian's operators work: `"a phrase"`, `/regex/`, `-not`, `path:journal`, `file:plan`, `tag:work`, `line:(a b)`.
-- **Find in note** in the palette (unbound, `key_find`) is find and replace within the open note: **⏎** steps forward, **⇧⏎** back, **Tab** moves to the replace field, where **⏎** replaces the match and **⌥⏎** replaces all.
+- **^F** is find and replace within the open note: **⏎** steps forward, **⇧⏎** back, **Tab** moves to the replace field, where **⏎** replaces the match and **⌥⏎** replaces all.
 - **⌥⏎** on a row in **^O** or **⇧^F** opens that note in a terminal split to the right and leaves this one where it is; **⌥⇧⏎** splits below, **⌘⏎** opens a tab, and **⌥click** does the same as **⌥⏎**. The palette has *open in split right / down / new tab* for the note you are in. Catcher asks the terminal: Ghostty 1.3+ (through AppleScript; macOS asks once whether catcher may control it), tmux, kitty and WezTerm. Elsewhere the status bar says so.
 - **^N** makes a note. The filename follows its first line until you rename the file yourself. Either way, `[[links]]` to the old name in other notes are rewritten to the new one.
 - **⌥D** opens today's note, `journal/2026-09-01.md`, made from `journal/template.md` the first time (`{{title}}`, `{{date}}`, `{{date:FMT}}`, `{{time}}`, `{{yesterday}}`, `{{tomorrow}}`) and never rewritten after. `daily_format` names the file with Obsidian's tokens (`YYYY`, `MM`, `DD`, `MMMM`, `ddd`, `Do`, `HH`, `mm`, `A`, `[literal]`); a `/` in it is a subfolder.
@@ -29,8 +29,8 @@ or `cargo install catcher`. Then run `catcher`.
 - Typing `[[` suggests notes, `[[note#` its headings, `[[^` this note's paragraphs and list items and `[[note#^` another's (a block without an id gets one written onto it, Obsidian's way), and `#` the vault's tags; **⏎** or **Tab** takes one, **Esc** dismisses. `autocomplete: no` turns it off.
 - The palette also has editing commands, unbound until you give them a key: toggle checkbox (`- item` → `- [ ]` → `- [x]` → `- item`, numbered lists too), move line up / down, toggle heading (`#`, `##`, `###`, none), insert today's date, copy path, reveal in Finder. Each takes the selection when there is one, and undoes as one step.
 - **^P** flips between the live-preview editor and the rendered page. Images draw inline in Ghostty, kitty and iTerm2, whether written `![alt](path)` or as an Obsidian embed, `![[path]]`, `![[path|alt]]` or `![[path|300]]` for a width in pixels. A picture or attachment is looked for beside the note, in its attachments folder, in `attachments_dir`, then anywhere in the vault by name; a vault's `.obsidian/app.json` sets the attachments folder when the settings do not, and **Set attachments folder…** in the palette picks one out of the vault and writes it to `attachments_dir`. A folder either names is only taken if it is there; the default stands when it is not. In the reading view a click on a picture takes the whole terminal with it; **←** / **→** step between the note's pictures, and any other key or a click puts the page back.
-- `[[wikilinks]]` work like Obsidian's. **⌥⏎** follows one, **⌥P** peeks at it, **^B** / **^F** go back and forward. A link to a note that does not exist yet is grey; following it makes the note beside the one you are in. `[[Note#Heading]]` reads as `Note › Heading` and lands on that heading; `[[Note#^id]]` lands on the line ending in ` ^id`; `[[#Heading]]` jumps within the note. `[text](note.md)` links open, count and get rewritten the same way. Renaming a heading fixes the `[[Note#Heading]]` links to it. `[[report.pdf]]` opens the file with the desktop. Links resolve through a note's front matter `aliases:` (or `alias:`) too. The reading view lists the notes that link here at the bottom, and the notes that mention this one's title without linking it.
-- `![[Note]]`, `![[Note#Heading]]`, `![[Note#^id]]` or `![[Note|label]]` on a line of its own embeds the note: a card with its title, the first lines of its body or of that section, and how many more there are. In a sentence it is a link.
+- `[[wikilinks]]` work like Obsidian's. **⌥⏎** follows one, **⌥P** peeks at it, **⌥[** / **⌥]** go back and forward. A link to a note that does not exist yet is grey; following it makes the note beside the one you are in. `[[Note#Heading]]` reads as `Note › Heading` and lands on that heading; `[[Note#^id]]` lands on the line ending in ` ^id`; `[[#Heading]]` jumps within the note. `[text](note.md)` links open, count and get rewritten the same way. Renaming a heading fixes the `[[Note#Heading]]` links to it. `[[report.pdf]]` opens the file with the desktop. Links resolve through a note's front matter `aliases:` (or `alias:`) too. The reading view lists the notes that link here at the bottom, and the notes that mention this one's title without linking it.
+- `![[Note]]`, `![[Note#Heading]]`, `![[Note#^id]]` or `![[Note|label]]` on a line of its own embeds the note: a card with its title and the note itself — the whole body, or the section or block it names — drawn as markdown behind the card's rail. In a sentence it is a link.
 - `#tags` are coloured, inline or as front matter `tags:` (or `tag:`). **⌥⏎** or a click on one opens **^O** cut to the notes that carry it; `#work` lists the `#work/projects` notes too. **Tags** in the palette (`key_tags`) lists every tag in the vault with its note count.
 - **Unresolved links** in the palette lists every `[[link]]` to a note that is not there; **⏎** goes to it. **Bookmark note** keeps the note in the bookmarks tab of **^O** (seeded from the vault's `.obsidian/bookmarks.json`). **Open vault…** switches to another folder for the session.
 - **Extract to new note** in the palette (unbound, `key_extract`) takes the selection, or the section under the cursor's heading, out into a note beside this one. The prompt offers the first heading in it as the name and **Tab** picks what stays behind — a `[[link]]`, an `![[embed]]` or nothing; **⏎** makes it, as one undo step.
@@ -67,6 +67,7 @@ catcher --version        print the version
 | --- | --- |
 | `^K` | Command palette |
 | `^O` | Open a note (`Tab` for the folder tree, again for contents) |
+| `^F` | Find in note |
 | `⇧^F` | Search in all files |
 | `^N` | New note |
 | `⌥D` | Today's note |
@@ -75,13 +76,13 @@ catcher --version        print the version
 | `^Z` / `^Y` | Undo / redo |
 | `^C` `^X` `^V` | Copy / cut / paste |
 | `⌥⏎` / `⌥P` | Follow / peek at the `[[wikilink]]` under the cursor (a missing note is created; `⌥⏎` follows a `#tag` too) |
-| `^B` / `^F` | Back / forward |
+| `⌥[` / `⌥]` | Back / forward |
 | `⌥←` / `⌥→` | On a heading: fold / unfold the section (elsewhere: by word) |
 | `^/` or `F1` | Help card |
 | `^,` | Settings |
 | `^Q` | Quit |
 
-Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, `⇧` to extend a selection, `⌘A` select all. Every key is rebindable in the settings; `^K` answers to ctrl or cmd. `⇧^F` needs a terminal that tells shift+ctrl apart (Ghostty, kitty, WezTerm); elsewhere it arrives as `^F` and the palette is the way in. The editing commands ship with no key: `key_checkbox`, `key_line_up`, `key_line_down`, `key_heading`, `key_date`, `key_copy_path`, `key_reveal`, `key_outline`, `key_tags`, `key_find`, `key_properties`, `key_hide_properties`, `key_opener`, `key_template`, `key_extract` bind them, and `key_split_right`, `key_split_down`, `key_new_tab` the open-beside ones.
+Editing is macOS-style: `⌘←`/`⌘→` line ends, `⌥←`/`⌥→` by word, `⇧` to extend a selection, `⌘A` select all. Every key is rebindable in the settings; `^K` answers to ctrl or cmd. `⇧^F` needs a terminal that tells shift+ctrl apart (Ghostty, kitty, WezTerm); elsewhere it arrives as `^F`, which is find in note, and the palette is the way in. The editing commands ship with no key: `key_checkbox`, `key_line_up`, `key_line_down`, `key_heading`, `key_date`, `key_copy_path`, `key_reveal`, `key_outline`, `key_tags`, `key_properties`, `key_hide_properties`, `key_opener`, `key_template`, `key_extract` bind them, and `key_split_right`, `key_split_down`, `key_new_tab` the open-beside ones.
 
 ## Settings
 

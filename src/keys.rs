@@ -131,17 +131,18 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "open the [[wikilink]] or #tag under the cursor, or make the note a link names",
     ),
     // every modifier + arrow already moves the cursor (or, with ^⌥, the
-    // window), so the browser keys are letters: back and forward.
+    // window), and ^B and ^F mean bold and find to most hands. So the
+    // browser keys are the brackets on the alt layer, beside ⌥P and ⌥D.
     (
         Action::NavBack,
         "key_back",
-        Some("^B"),
+        Some("alt+["),
         "back to the note you came from",
     ),
     (
         Action::NavForward,
         "key_forward",
-        Some("^F"),
+        Some("alt+]"),
         "forward again",
     ),
     (
@@ -153,8 +154,8 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "peek at the [[wikilink]] under the cursor",
     ),
     // ⇧^F, so it sits beside ^F and ^O. A terminal without the kitty
-    // protocol sends ⇧^F as plain ^F, which is forward; there the palette
-    // is the way in.
+    // protocol sends ⇧^F as plain ^F, which is find in note; there the
+    // palette is the way in.
     (
         Action::SearchAll,
         "key_search",
@@ -295,7 +296,7 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
     (
         Action::Find,
         "key_find",
-        None,
+        Some("^F"),
         "find in note — step through matches, or replace them",
     ),
     (
@@ -323,10 +324,13 @@ const ALIASES: &[(&str, &str)] = &[("key_help", "key_shortcuts")];
 /// as "never set" and follows the current default instead.
 const SUPERSEDED: &[(&str, &[&str])] = &[
     ("key_help", &["^G"]),
-    ("key_back", &["⌥←", "alt+left", "ctrl+⌥←", "ctrl+alt+left"]),
+    (
+        "key_back",
+        &["⌥←", "alt+left", "ctrl+⌥←", "ctrl+alt+left", "^B"],
+    ),
     (
         "key_forward",
-        &["⌥→", "alt+right", "ctrl+⌥→", "ctrl+alt+right"],
+        &["⌥→", "alt+right", "ctrl+⌥→", "ctrl+alt+right", "^F"],
     ),
 ];
 
@@ -783,7 +787,7 @@ mod tests {
             None
         );
         assert_eq!(
-            map.action(&ev(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            map.action(&ev(KeyCode::Char('['), KeyModifiers::ALT)),
             Some(Action::NavBack)
         );
         // a key the user chose on purpose still wins
@@ -846,12 +850,31 @@ mod tests {
         assert_eq!(Binding::parse(&b.label()), Some(b));
         let map = Keymap::default();
         assert_eq!(
-            map.action(&ev(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            map.action(&ev(KeyCode::Char('['), KeyModifiers::ALT)),
             Some(Action::NavBack)
         );
         assert_eq!(
-            map.action(&ev(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            map.action(&ev(KeyCode::Char(']'), KeyModifiers::ALT)),
             Some(Action::NavForward)
+        );
+        // the bracket labels read back to the same keys
+        let b = Binding::parse("alt+[").unwrap();
+        assert_eq!(b.label(), "⌥[");
+        assert_eq!(Binding::parse(&b.label()), Some(b));
+        // ^B and ^F used to be back and forward; a settings note still
+        // saying so follows the new keys, and ^F is find
+        let map = Keymap::from_settings(|k| match k {
+            "key_back" => Some("^B".to_string()),
+            "key_forward" => Some("^F".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            Some(Action::Find)
         );
         // ⌥← is the fold key, which the app hands back to the editor off a
         // heading; every other modifier + arrow stays with the editor outright
@@ -888,7 +911,7 @@ mod tests {
         );
         assert_eq!(
             map.action(&ev(KeyCode::Char('f'), KeyModifiers::CONTROL)),
-            Some(Action::NavForward)
+            Some(Action::Find)
         );
         // the label reads back to the same key
         let b = Binding::parse("ctrl+shift+F").unwrap();
