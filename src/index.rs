@@ -614,6 +614,27 @@ mod tests {
     }
 
     #[test]
+    fn a_trashed_note_is_not_walked_and_not_offered_by_the_recents_either() {
+        let dir = tmpdir("trashed");
+        fs::write(dir.join("a.md"), "# A\n").unwrap();
+        let trash = dir.join(crate::notes::TRASH);
+        fs::create_dir_all(&trash).unwrap();
+        let gone = trash.join("b.md");
+        fs::write(&gone, "# B\n").unwrap();
+        // the walk skips the folder for being dotted, which is what keeps a
+        // trashed note out of ^O, the tree, the mentions and the link colours
+        let found = scan(std::slice::from_ref(&dir), &[]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].title, "A");
+        // and having opened it before it was trashed is no way back in: it is
+        // not where the recents list says it is
+        let recent = vec![dir.join("b.md")];
+        let found = scan(std::slice::from_ref(&dir), &recent);
+        assert_eq!(found.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_recent_note_that_has_been_deleted_is_dropped_rather_than_offered() {
         let dir = tmpdir("gone");
         fs::write(dir.join("a.md"), "# A\n").unwrap();

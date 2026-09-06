@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -415,9 +416,190 @@ pub fn move_file(note: &mut Note, dir: &Path) -> Result<PathBuf> {
     Ok(note.path.clone())
 }
 
-pub fn delete(note: &Note) -> Result<()> {
-    fs::remove_file(&note.path)?;
+/// Where a deleted note goes: Obsidian's own `.trash` at the top of the
+/// vault, so both apps mean the same folder by it. Every walk skips it for
+/// being dotted, which is what keeps a trashed note out of ^O, the tree, the
+/// mentions and the link colouring without any of them knowing about trash.
+pub const TRASH: &str = ".trash";
+
+/// What the trash remembers about the files in it, one line per file:
+/// `<name>\t<folder it came from, relative to the root>`. A tab separates
+/// them because a folder may hold anything else a name can.
+const ORIGINS: &str = ".origins";
+
+pub fn trash_dir(root: &Path) -> PathBuf {
+    root.join(TRASH)
+}
+
+/// One note in the trash, as the Trash picker lists it.
+pub struct Trashed {
+    pub path: PathBuf,
+    /// When it was put there, which is what the row dates itself by.
+    pub modified: SystemTime,
+    /// The folder it came from, relative to the root. Empty for the root
+    /// itself — and for a file whose origin was never written down.
+    pub origin: String,
+}
+
+/// Move a note into `<root>/.trash`, keeping its filename; a name the trash
+/// already holds takes ` 1`, ` 2` after it, the way Obsidian numbers them.
+/// Where it came from goes into the sidecar so a restore can put it back.
+///
+/// Attachments are left where they are: a picture is as likely to be another
+/// note's too, and a delete that took files with it would be the one delete
+/// nobody could undo.
+pub fn trash_note(root: &Path, path: &Path) -> io::Result<PathBuf> {
+    let dir = trash_dir(root);
+    fs::create_dir_all(&dir)?;
+    let target = free_trash_path(&dir, &file_name(path));
+    fs::rename(path, &target)?;
+    let origin = path
+        .parent()
+        .and_then(|p| p.strip_prefix(root).ok())
+        .map(|rel| rel.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = file_name(&target);
+    let mut rows = read_origins(&dir);
+    rows.retain(|(n, _)| *n != name);
+    rows.push((name, origin));
+    // the file is trashed either way: a sidecar that could not be written
+    // costs a restore its folder, not the note
+    let _ = write_origins(&dir, &rows);
+    Ok(target)
+}
+
+/// Put a trashed note back where it came from — the folder the sidecar
+/// recorded for it, the root when it recorded none — under the nearest free
+/// name, and forget it was ever in the trash.
+pub fn restore_from_trash(root: &Path, trashed: &Path) -> io::Result<PathBuf> {
+    let dir = trash_dir(root);
+    let name = file_name(trashed);
+    let mut rows = read_origins(&dir);
+    let origin = rows
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, folder)| folder.clone())
+        .unwrap_or_default();
+    // the sidecar is a text file like any other and can be edited by hand: a
+    // folder that climbs out of the vault is not one we wrote, and the root
+    // is where a note with nowhere to go belongs anyway
+    let inside = !origin.is_empty()
+        && Path::new(&origin)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+    let into = if inside {
+        root.join(&origin)
+    } else {
+        root.to_path_buf()
+    };
+    fs::create_dir_all(&into)?;
+    let stem = trashed
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled".to_string());
+    let target = free_path(&into, &stem, None);
+    fs::rename(trashed, &target)?;
+    rows.retain(|(n, _)| *n != name);
+    let _ = write_origins(&dir, &rows);
+    Ok(target)
+}
+
+/// Delete a trashed file for good. Nothing else in the app removes a note
+/// from disk: this is the end of the one road that leads there.
+pub fn purge_from_trash(root: &Path, trashed: &Path) -> io::Result<()> {
+    fs::remove_file(trashed)?;
+    let dir = trash_dir(root);
+    let name = file_name(trashed);
+    let mut rows = read_origins(&dir);
+    rows.retain(|(n, _)| *n != name);
+    let _ = write_origins(&dir, &rows);
     Ok(())
+}
+
+/// Every note in the trash, most recently trashed first. The sidecar itself
+/// is dotted, so the same filter that keeps dot-files out of the vault keeps
+/// it out of this list.
+pub fn trashed(root: &Path) -> Vec<Trashed> {
+    let dir = trash_dir(root);
+    let origins = read_origins(&dir);
+    let Ok(read) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Trashed> = read
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?.to_string();
+            if name.starts_with('.') || !name.ends_with(".md") {
+                return None;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let origin = origins
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, folder)| folder.clone())
+                .unwrap_or_default();
+            Some(Trashed {
+                path,
+                modified,
+                origin,
+            })
+        })
+        .collect();
+    out.sort_by_key(|t| std::cmp::Reverse(t.modified));
+    out
+}
+
+/// A path's filename, which is the name the sidecar files it under, and
+/// the name a status line calls the file by.
+pub(crate) fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled.md".to_string())
+}
+
+/// `<name>.md`, then `<name> 1.md`, `<name> 2.md` … Obsidian numbers a name
+/// its trash already holds this way, with a space and no extra extension.
+fn free_trash_path(dir: &Path, name: &str) -> PathBuf {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
+    };
+    let mut n = 0;
+    loop {
+        let candidate = if n == 0 {
+            dir.join(name)
+        } else {
+            dir.join(format!("{stem} {n}{ext}"))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// The sidecar as pairs. A line without a tab is not one of ours — someone
+/// else's file, or a half-written one — and is dropped rather than guessed at.
+fn read_origins(dir: &Path) -> Vec<(String, String)> {
+    let Ok(text) = fs::read_to_string(dir.join(ORIGINS)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(name, folder)| (name.to_string(), folder.to_string()))
+        .collect()
+}
+
+fn write_origins(dir: &Path, rows: &[(String, String)]) -> io::Result<()> {
+    let body: String = rows
+        .iter()
+        .map(|(name, folder)| format!("{name}\t{folder}\n"))
+        .collect();
+    write_atomic(&dir.join(ORIGINS), body)
 }
 
 pub fn create(dir: &Path) -> Result<Note> {
@@ -840,6 +1022,113 @@ mod tests {
         assert_eq!(n.path, dir.join("shopping.md"));
         assert_eq!(n.stamp, stamp_of(&n.path));
         assert_eq!(check_disk(&n), Disk::Unchanged);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deleted_note_moves_to_the_trash_rather_than_off_the_disk() {
+        let dir = tmpdir("trash");
+        let n = note_at(&dir, "groceries.md", "# Groceries\n");
+        let gone = trash_note(&dir, &n.path).unwrap();
+        assert_eq!(gone, dir.join(".trash/groceries.md"));
+        assert!(!n.path.exists());
+        assert_eq!(fs::read_to_string(&gone).unwrap(), "# Groceries\n");
+        // and the trash lists it, with the root as where it came from
+        let listed = trashed(&dir);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, gone);
+        assert_eq!(listed[0].origin, "");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_name_the_trash_already_holds_takes_a_number() {
+        let dir = tmpdir("trash-collide");
+        let a = note_at(&dir, "spec.md", "# One\n");
+        trash_note(&dir, &a.path).unwrap();
+        let b = note_at(&dir, "spec.md", "# Two\n");
+        let second = trash_note(&dir, &b.path).unwrap();
+        assert_eq!(second, dir.join(".trash/spec 1.md"));
+        let c = note_at(&dir, "spec.md", "# Three\n");
+        assert_eq!(
+            trash_note(&dir, &c.path).unwrap(),
+            dir.join(".trash/spec 2.md")
+        );
+        // nothing was clobbered on the way in
+        assert_eq!(
+            fs::read_to_string(dir.join(".trash/spec.md")).unwrap(),
+            "# One\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_restore_puts_the_note_back_in_the_folder_it_came_from() {
+        let dir = tmpdir("trash-restore");
+        let work = dir.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let n = note_at(&work, "spec.md", "# Spec\n");
+        let gone = trash_note(&dir, &n.path).unwrap();
+        assert_eq!(trashed(&dir)[0].origin, "work");
+        let back = restore_from_trash(&dir, &gone).unwrap();
+        assert_eq!(back, work.join("spec.md"));
+        assert_eq!(fs::read_to_string(&back).unwrap(), "# Spec\n");
+        // the trash is empty again, and so is what it remembered
+        assert!(trashed(&dir).is_empty());
+        assert!(!gone.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_restore_dodges_a_name_the_folder_took_meanwhile() {
+        let dir = tmpdir("trash-taken");
+        let n = note_at(&dir, "spec.md", "# Spec\n");
+        let gone = trash_note(&dir, &n.path).unwrap();
+        note_at(&dir, "spec.md", "# Another Spec\n");
+        let back = restore_from_trash(&dir, &gone).unwrap();
+        assert_eq!(back, dir.join("spec-2.md"));
+        assert_eq!(fs::read_to_string(&back).unwrap(), "# Spec\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_with_no_origin_recorded_is_restored_to_the_root() {
+        let dir = tmpdir("trash-unknown");
+        let trash = trash_dir(&dir);
+        fs::create_dir_all(&trash).unwrap();
+        // a file Obsidian trashed, with nothing of ours beside it
+        fs::write(trash.join("old.md"), "# Old\n").unwrap();
+        let back = restore_from_trash(&dir, &trash.join("old.md")).unwrap();
+        assert_eq!(back, dir.join("old.md"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_origin_that_climbs_out_of_the_vault_is_refused_and_the_root_stands_in() {
+        let dir = tmpdir("trash-escape");
+        let trash = trash_dir(&dir);
+        fs::create_dir_all(&trash).unwrap();
+        fs::write(trash.join("a.md"), "# A\n").unwrap();
+        // hand-edited, or written by something that is not us
+        fs::write(trash.join(".origins"), "a.md\t../elsewhere\n").unwrap();
+        let back = restore_from_trash(&dir, &trash.join("a.md")).unwrap();
+        assert_eq!(back, dir.join("a.md"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_purge_takes_the_file_and_what_the_trash_remembered_of_it() {
+        let dir = tmpdir("trash-purge");
+        let a = note_at(&dir, "a.md", "# A\n");
+        let b = note_at(&dir, "b.md", "# B\n");
+        let gone = trash_note(&dir, &a.path).unwrap();
+        trash_note(&dir, &b.path).unwrap();
+        purge_from_trash(&dir, &gone).unwrap();
+        assert!(!gone.exists());
+        let left = trashed(&dir);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].path, dir.join(".trash/b.md"));
+        assert_eq!(read_origins(&trash_dir(&dir)).len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

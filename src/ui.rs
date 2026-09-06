@@ -95,7 +95,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         | Overlay::QuickOpen
         | Overlay::MoveFile
         | Overlay::Outline
-        | Overlay::OpenVault => draw_palette(f, app),
+        | Overlay::OpenVault
+        | Overlay::Trash => draw_palette(f, app),
         Overlay::ConfirmDelete => draw_confirm(f, app),
         Overlay::RenameFile => draw_rename(f, app),
         Overlay::Find => draw_find(f, app),
@@ -1249,6 +1250,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     let bookmarks = quick && app.tab == QuickTab::Bookmarks;
     let unresolved = quick && app.tab == QuickTab::Unresolved;
     let outline = app.overlay == Overlay::Outline;
+    let trash = app.overlay == Overlay::Trash;
     // the box is at most 100 wide and inset 2 from each side of the frame,
     // less the border: what a snippet has to fit in, known before the box is
     let width = overlay_rect_wide(f, 1, 100).width.saturating_sub(2) as usize;
@@ -1256,7 +1258,7 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     // two border rows, the prompt, the rule under it, and the footer hint ^O
     // carries. Derived from the box's own budget rather than guessed at, so
     // the tree scrolls inside the rows it actually has on an 80x24 terminal.
-    let chrome = if quick || outline { 5 } else { 4 };
+    let chrome = if quick || outline || trash { 5 } else { 4 };
     // more rows on a taller window, since there is nothing else to use the
     // space for while the palette is open
     let room = overlay_budget(f).saturating_sub(chrome).clamp(1, 16) as usize;
@@ -1272,7 +1274,8 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
     }
     let inner = open_panel(f, rect, block);
 
-    let rows = vec![Constraint::Length(1); shown as usize + 2 + usize::from(quick || outline)];
+    let rows =
+        vec![Constraint::Length(1); shown as usize + 2 + usize::from(quick || outline || trash)];
     let chunks = Layout::vertical(rows).split(inner);
 
     // ❯ marks where you type, so the prompt reads as an input and not as the
@@ -1301,6 +1304,10 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             "every [[link]] reaches a note"
         } else if unresolved {
             "links to notes that are not there — ⏎ goes to the link"
+        } else if trash && items.is_empty() {
+            "nothing in .trash"
+        } else if trash {
+            "the notes in .trash — ⏎ puts one back where it came from"
         } else if app.overlay == Overlay::OpenVault {
             "open a vault — pick a recent one, or type a folder path"
         } else if quick && app.tag_scanning() {
@@ -1471,8 +1478,12 @@ fn draw_palette(f: &mut Frame, app: &mut App) {
             Paragraph::new(Span::styled(format!("  {hint}"), dim())),
             chunks[chunks.len() - 1],
         );
-    } else if outline {
-        let hint = "↵ go to heading  ⌥↵ fold or unfold  esc close";
+    } else if outline || trash {
+        let hint = if trash {
+            "↵ restore  ⌥⌫ delete for good  esc close"
+        } else {
+            "↵ go to heading  ⌥↵ fold or unfold  esc close"
+        };
         f.render_widget(
             Paragraph::new(Span::styled(format!("  {hint}"), dim())),
             chunks[chunks.len() - 1],
@@ -1749,6 +1760,12 @@ fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
         Item::Folder(_) | Item::Line(..) | Item::At(..) | Item::Notice | Item::Heading(_) => {
             (String::new(), String::new(), "")
         }
+        // the name it goes back under, and how long it has been in the trash
+        Item::Trashed(path) => (
+            crate::index::Entry::name_of(path),
+            app.trash_detail(path),
+            "",
+        ),
         Item::Vault(root) => {
             let detail = if *root == app.dir {
                 "this session's vault".to_string()
@@ -1968,7 +1985,33 @@ fn draw_help(f: &mut Frame, app: &App) {
 }
 
 fn draw_confirm(f: &mut Frame, app: &mut App) {
-    let rect = overlay_rect(f, 4);
+    // a file already in .trash has nowhere further to go, so the box says so
+    // rather than promising it a move it cannot make
+    if let Some(name) = app.purge_name() {
+        let rect = overlay_rect(f, 4);
+        let inner = open_panel(f, rect, panel(app).border_style(theme::danger()));
+        let lines = vec![
+            Line::from(Span::styled(
+                format!(" delete “{name}” for good?"),
+                theme::danger().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                " this takes it off the disk. enter to confirm, esc to cancel.",
+                dim(),
+            )),
+        ];
+        f.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+    // what would be left pointing at nothing. The scan is the reading view's,
+    // so the count fills in a frame after the box opens rather than holding it
+    let links = app.linked_mentions().iter().filter(|m| m.linked).count();
+    let where_to = match links {
+        0 => "moves it to .trash.".to_string(),
+        1 => "moves it to .trash. 1 note links here.".to_string(),
+        n => format!("moves it to .trash. {n} notes link here."),
+    };
+    let rect = overlay_rect(f, 5);
     let inner = open_panel(f, rect, panel(app).border_style(theme::danger()));
     let title = app.active_note().title();
     let lines = vec![
@@ -1976,10 +2019,8 @@ fn draw_confirm(f: &mut Frame, app: &mut App) {
             format!(" delete “{title}”?"),
             theme::danger().add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            " this deletes the file. enter to confirm, esc to cancel.",
-            dim(),
-        )),
+        Line::from(Span::styled(format!(" {where_to}"), dim())),
+        Line::from(Span::styled(" enter to confirm, esc to cancel.", dim())),
     ];
     f.render_widget(Paragraph::new(lines), inner);
 }

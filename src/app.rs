@@ -12,7 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 mod peek;
 mod table_edit;
@@ -98,6 +98,8 @@ pub enum Overlay {
     Outline,
     /// Re-root the session in another folder: recent vaults, or a typed path.
     OpenVault,
+    /// The notes in `.trash`: ⏎ puts one back, ⌥⌫ removes it for good.
+    Trash,
     Help,
 }
 
@@ -123,6 +125,8 @@ pub enum Command {
     Bookmarks,
     /// Re-root the session in another folder.
     OpenVault,
+    /// The notes in `.trash`, in a picker of their own.
+    Trash,
     InsertTable,
     Table(crate::table::Op),
     TableSource,
@@ -151,7 +155,7 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 39] = [
+const COMMANDS: [Command; 40] = [
     Command::Act(Action::NewNote),
     Command::Act(Action::DailyNote),
     Command::Act(Action::QuickOpen),
@@ -164,6 +168,7 @@ const COMMANDS: [Command; 39] = [
     Command::Act(Action::DeleteNote),
     Command::Act(Action::RenameFile),
     Command::MoveFile,
+    Command::Trash,
     Command::Unresolved,
     Command::Bookmark,
     Command::Bookmarks,
@@ -211,7 +216,7 @@ impl Command {
                 Action::DailyNote => ("Today's note", "one note a day, made if missing"),
                 Action::QuickOpen => ("Open note", "any folder, recent first"),
                 Action::SearchAll => ("Search in all files", "type to search note contents"),
-                Action::DeleteNote => ("Delete note", "delete the file on disk"),
+                Action::DeleteNote => ("Delete note", "move the file to .trash"),
                 Action::RenameFile => ("Rename file", "change the name on disk"),
                 Action::Find => ("Find in note", "step through matches in this note, or replace them"),
                 Action::TogglePreview => ("Reading view", "the page, rendered"),
@@ -245,6 +250,7 @@ impl Command {
             Command::Bookmark => ("Bookmark note", "keep this note in the bookmarks list, or take it out"),
             Command::Bookmarks => ("Bookmarks", "the bookmarked notes; ⏎ opens one"),
             Command::OpenVault => ("Open vault…", "another folder as the notes folder for this session"),
+            Command::Trash => ("Trash", "the notes in .trash; ⏎ puts one back, ⌥⌫ removes it for good"),
             Command::InsertTable => ("Table: Insert table", "a 2×2 grid at the cursor"),
             Command::InsertCallout => ("Insert callout", "> [!note] with a title and a body"),
             Command::InsertMath => ("Insert math block", "$$ … $$ on lines of their own"),
@@ -330,6 +336,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
                 "⌥⏎  ⌥⇧⏎  ⌘⏎",
                 "open the note in a split right / below / a new tab (⌥click too)",
             ),
+            ("⌥⌫", "in Trash, delete the note under the cursor for good"),
         ],
     ),
     (
@@ -374,6 +381,8 @@ pub enum Item {
     At(PathBuf, usize),
     /// A folder to re-root the session in, from the vault picker.
     Vault(PathBuf),
+    /// A note in `.trash`, from the trash picker. Choosing it puts it back.
+    Trashed(PathBuf),
     Command(Command),
 }
 
@@ -539,6 +548,13 @@ pub struct App {
     /// Every folder the move picker offers, walked once when it opens rather
     /// than on every frame it is on screen.
     move_targets: Vec<(PathBuf, usize)>,
+    /// The notes in `.trash`, read when the trash picker opens and after
+    /// anything it does changes them.
+    trash: Vec<notes::Trashed>,
+    /// The trashed file a confirmation is standing over, when the delete
+    /// being confirmed is the permanent one. `None` for the ordinary delete,
+    /// which is what tells the two apart in one box.
+    purge: Option<PathBuf>,
     /// A source line the reading view should scroll to on its next draw. Only
     /// the draw knows which page row a line lands on once wrapped.
     pub preview_goto: Option<usize>,
@@ -763,6 +779,8 @@ impl App {
             contents_rx: None,
             contents_cache: std::cell::RefCell::new(None),
             move_targets: Vec::new(),
+            trash: Vec::new(),
+            purge: None,
             preview_goto: None,
             overlay_rect: Rect::default(),
             hover: None,
@@ -2654,6 +2672,7 @@ impl App {
             Overlay::MoveFile => self.move_items(),
             Overlay::OpenVault => self.vault_items(),
             Overlay::Outline => self.outline_items(),
+            Overlay::Trash => self.trash_items(),
             _ => Vec::new(),
         }
     }
@@ -2755,9 +2774,13 @@ impl App {
         }
     }
 
-    fn delete_active(&mut self) {
-        let title = self.active_note().title();
-        if let Err(e) = notes::delete(&self.notes[self.active]) {
+    /// *Delete note*: the file moves to `.trash` rather than off the disk, and
+    /// the session lets it go the way it always did — it is gone from here,
+    /// and getting it back is the Trash picker's job.
+    fn trash_active(&mut self) {
+        let path = self.active_note().path.clone();
+        let name = notes::file_name(&path);
+        if let Err(e) = notes::trash_note(&self.dir, &path) {
             self.flash(format!("delete failed: {e}"));
             return;
         }
@@ -2777,11 +2800,101 @@ impl App {
         self.load_active_into_editor();
         self.view = View::Edit;
         self.history.push(&self.notes[0].path.clone());
-        // the file is gone, and an index that still lists it is worse than no
-        // index at all: `follow_wikilink` would resolve a `[[link]]` against
-        // the entry, open nothing, and never reach the offer to create it
+        // the file is somewhere else now, and an index that still lists it is
+        // worse than no index at all: `follow_wikilink` would resolve a
+        // `[[link]]` against the entry, open nothing, and never reach the
+        // offer to create it
         self.reindex();
-        self.flash(format!("deleted “{title}”"));
+        self.flash(format!("{name} → .trash"));
+    }
+
+    /// *Trash*: the notes in `.trash`, newest first. Read once here rather
+    /// than on every frame the picker is on screen.
+    fn open_trash(&mut self) {
+        self.query.clear();
+        self.selected = 0;
+        self.trash = notes::trashed(&self.dir);
+        self.overlay = Overlay::Trash;
+    }
+
+    /// The trash rows for the current query: fuzzy on the filename, in the
+    /// order they were trashed.
+    pub fn trash_items(&self) -> Vec<Item> {
+        self.trash
+            .iter()
+            .filter(|t| search::fuzzy(&self.query, &index::Entry::name_of(&t.path)).is_some())
+            .map(|t| Item::Trashed(t.path.clone()))
+            .collect()
+    }
+
+    /// What a trash row shows beside the name: how long ago it was trashed,
+    /// and the folder it goes back to when that is not the root.
+    pub fn trash_detail(&self, path: &Path) -> String {
+        let Some(t) = self.trash.iter().find(|t| t.path == path) else {
+            return String::new();
+        };
+        let age = index::age(t.modified, SystemTime::now());
+        if t.origin.is_empty() {
+            age
+        } else {
+            format!("{age}  ·  {}/", t.origin)
+        }
+    }
+
+    /// ⏎ on a trash row: the note goes back to the folder it came from and
+    /// opens, and the vault is walked again so the `[[links]]` to it stop
+    /// being grey.
+    fn restore_trashed(&mut self, path: &Path) {
+        match notes::restore_from_trash(&self.dir, path) {
+            Ok(back) => {
+                let name = notes::file_name(&back);
+                self.open_path(&back);
+                self.view = View::Edit;
+                self.reindex();
+                self.flash(format!("restored {name}"));
+            }
+            Err(e) => self.flash(format!("restore failed: {e}")),
+        }
+    }
+
+    /// ⌥⌫ on a trash row: the same confirmation an ordinary delete gets, for
+    /// a file that has nowhere further to go.
+    fn confirm_purge(&mut self) {
+        let Some(Item::Trashed(path)) = self.overlay_items().get(self.selected).cloned() else {
+            return;
+        };
+        self.purge = Some(path);
+        self.overlay = Overlay::ConfirmDelete;
+    }
+
+    /// The trashed file the confirmation is standing over, when it is the
+    /// permanent delete rather than the ordinary one.
+    pub fn purge_name(&self) -> Option<String> {
+        self.purge.as_deref().map(notes::file_name)
+    }
+
+    /// Take a trashed file off the disk for good and go back to the list,
+    /// which is where it was asked for.
+    fn purge_trashed(&mut self, path: &Path) {
+        match notes::purge_from_trash(&self.dir, path) {
+            Ok(()) => self.flash(format!("{} deleted for good", notes::file_name(path))),
+            Err(e) => self.flash(format!("delete failed: {e}")),
+        }
+        self.trash = notes::trashed(&self.dir);
+        self.selected = self
+            .selected
+            .min(self.trash_items().len().saturating_sub(1));
+        self.overlay = Overlay::Trash;
+    }
+
+    /// Leave the delete confirmation without deleting: back to the trash list
+    /// when that is where it was asked for, otherwise to the note.
+    fn cancel_confirm(&mut self) {
+        self.overlay = if self.purge.take().is_some() {
+            Overlay::Trash
+        } else {
+            Overlay::None
+        };
     }
 
     /// Palette rows for the current query: commands only, best first. Notes
@@ -2891,6 +3004,7 @@ impl App {
             Item::Tag(tag) => self.open_tag(&tag),
             Item::At(path, line) => self.open_path_line(&path, line),
             Item::Vault(root) => self.open_vault(&root),
+            Item::Trashed(path) => self.restore_trashed(&path),
             // handled above, before the overlay was closed
             Item::Folder(_) | Item::Notice => {}
             // palette-only: the one command without a key
@@ -2899,6 +3013,7 @@ impl App {
             Item::Command(Command::Bookmark) => self.toggle_bookmark(),
             Item::Command(Command::Bookmarks) => self.open_bookmarks(),
             Item::Command(Command::OpenVault) => self.open_vault_picker(),
+            Item::Command(Command::Trash) => self.open_trash(),
             Item::Command(Command::InsertTable) => self.insert_table(),
             Item::Command(Command::InsertCallout) => {
                 self.insert_block(vec!["> [!note] ".to_string(), "> ".to_string()], 0, 10);
@@ -3256,13 +3371,17 @@ impl App {
             | Overlay::QuickOpen
             | Overlay::MoveFile
             | Overlay::Outline
-            | Overlay::OpenVault => self.on_palette_key(key),
+            | Overlay::OpenVault
+            | Overlay::Trash => self.on_palette_key(key),
             Overlay::ConfirmDelete => match key.code {
                 KeyCode::Enter => {
                     self.overlay = Overlay::None;
-                    self.delete_active();
+                    match self.purge.take() {
+                        Some(path) => self.purge_trashed(&path),
+                        None => self.trash_active(),
+                    }
                 }
-                KeyCode::Esc => self.overlay = Overlay::None,
+                KeyCode::Esc => self.cancel_confirm(),
                 _ => {}
             },
             Overlay::RenameFile => {
@@ -3718,6 +3837,8 @@ impl App {
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::DeleteNote => {
+                // the note on screen, not a file already in the trash
+                self.purge = None;
                 self.overlay = Overlay::ConfirmDelete;
             }
             Action::RenameFile => self.open_rename(),
@@ -3838,6 +3959,16 @@ impl App {
         // palette has no second view of itself, so it never sees this.
         if key.code == KeyCode::Tab && self.overlay == Overlay::QuickOpen {
             self.next_tab();
+            return;
+        }
+        // ⌥⌫ takes the trash row for good. It has to be caught before the
+        // query's own editing keys, where ⌥⌫ deletes the word behind the
+        // cursor like it does in every other input
+        if self.overlay == Overlay::Trash
+            && key.code == KeyCode::Backspace
+            && key.modifiers.contains(KeyModifiers::ALT)
+        {
+            self.confirm_purge();
             return;
         }
         // the query is a one-line input, and the Mac editing keys have to work
@@ -4647,9 +4778,14 @@ impl App {
     /// otherwise the reading view or the editor.
     fn on_wheel(&mut self, delta: isize) {
         match (self.overlay, self.view) {
-            (Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile | Overlay::Outline, _) => {
-                self.select_step(delta)
-            }
+            (
+                Overlay::Palette
+                | Overlay::QuickOpen
+                | Overlay::MoveFile
+                | Overlay::Outline
+                | Overlay::Trash,
+                _,
+            ) => self.select_step(delta),
             (_, View::Preview) => {
                 let n = delta.unsigned_abs() as u16;
                 self.preview_scroll = if delta < 0 {
@@ -4674,7 +4810,11 @@ impl App {
         self.hover = None;
         if matches!(
             self.overlay,
-            Overlay::Palette | Overlay::QuickOpen | Overlay::MoveFile | Overlay::Outline
+            Overlay::Palette
+                | Overlay::QuickOpen
+                | Overlay::MoveFile
+                | Overlay::Outline
+                | Overlay::Trash
         ) {
             if let Some((_, item)) = self
                 .palette_rows
@@ -4693,7 +4833,9 @@ impl App {
                 // small betrayal
                 self.overlay = Overlay::None;
             }
-        } else if matches!(self.overlay, Overlay::ConfirmDelete | Overlay::RenameFile) {
+        } else if self.overlay == Overlay::ConfirmDelete {
+            self.cancel_confirm();
+        } else if self.overlay == Overlay::RenameFile {
             self.overlay = Overlay::None;
         } else if self.view == View::Preview
             && self
@@ -5067,6 +5209,7 @@ mod tests {
                 "Delete note",
                 "Rename file",
                 "Move to folder",
+                "Trash",
                 "Unresolved links",
                 "Bookmark note",
                 "Bookmarks",
@@ -5584,6 +5727,20 @@ mod tests {
             .settings_rows()
             .iter()
             .any(|(k, v, _)| *k == "key_properties" && v == "none"));
+    }
+
+    #[test]
+    fn the_trash_is_a_palette_row_of_its_own_with_no_key_to_bind() {
+        assert!(COMMANDS.contains(&Command::Trash));
+        // palette-only, like the other pickers that are not a note away
+        assert_eq!(Command::Trash.action(), None);
+        assert_eq!(Command::Trash.label().0, "Trash");
+        assert!(Command::Trash.label().1.contains(".trash"));
+        // and the delete it undoes says where the file goes
+        assert_eq!(
+            Command::Act(Action::DeleteNote).label().1,
+            "move the file to .trash"
+        );
     }
 
     #[test]
