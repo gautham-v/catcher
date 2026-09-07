@@ -395,7 +395,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("↑ ↓  pgup pgdn", "scroll"),
             ("← →", "pan a table too wide for the page"),
-            ("drag", "select text  ·  ⌘C copies it"),
+            ("drag", "select text  ·  ^C copies the markdown"),
             ("click", "a link opens it, a checkbox toggles it"),
             ("^P  esc  ⏎", "back to editing"),
         ],
@@ -4887,9 +4887,8 @@ impl App {
         Some(if a <= b { (a, b) } else { (b, a) })
     }
 
-    /// Copy whatever the preview selection covers, as the rendered text a
-    /// reader is actually looking at — a table comes out as its drawn columns,
-    /// not as pipes.
+    /// Copy whatever the preview selection covers, as the note has it written
+    /// rather than as the page drew it.
     fn copy_preview_selection(&mut self) {
         let Some(text) = self.preview_selected_text() else {
             return;
@@ -4906,10 +4905,17 @@ impl App {
         }
     }
 
-    /// The text the preview selection covers, assembled from the rows the last
-    /// draw recorded. `None` when nothing is selected.
+    /// The text the preview selection covers: the note's own markdown where
+    /// the selection came from the note, and the drawn rows where it did not
+    /// — the properties box, the linked-mentions footer, a picture. `None`
+    /// when nothing is selected.
     pub fn preview_selected_text(&self) -> Option<String> {
-        Some(selected_text(&self.preview_rows, self.preview_span()?))
+        let span = self.preview_span()?;
+        let source = &self.active_note().content;
+        Some(
+            selected_source(&self.preview_rows, span, source)
+                .unwrap_or_else(|| selected_text(&self.preview_rows, span)),
+        )
     }
 
     /// The one door a link goes through, so a `wikilink:` href can never be
@@ -5709,6 +5715,91 @@ fn delete_prev_word(input: &mut String) {
 /// rather than abandoning the whole copy. Blank lines between paragraphs are
 /// already like that, and the linked-mentions footer makes them easy to drag
 /// across.
+/// The note's own text behind a preview selection: the markdown as written,
+/// not the rows the reading view drew from it.
+///
+/// Every drawn character remembers the line and column it was rendered from,
+/// so the two ends of a selection are two positions in the note and what lies
+/// between them is what a paste wants. The soft wrap, the hanging indent under
+/// a list marker and the `·` a `-` is drawn as are all the page's own, and
+/// none of them belong on the clipboard: pasted back into a note they are
+/// three broken lines where there was one bullet. A selection that took the
+/// whole of a line is given the line as written, marker and indent included;
+/// one that took part of a line is cut to the columns it covered.
+///
+/// What lies between the ends is taken from the note, so a fold in the way is
+/// copied along with everything else it hides — the selection ran across it.
+///
+/// `None` when nothing under the selection came from the note at all, where
+/// the drawn text is the only text there is.
+fn selected_source(
+    rows: &[PreviewRow],
+    ((sr, sc), (er, ec)): (PSel, PSel),
+    source: &str,
+) -> Option<String> {
+    let mut lo: Option<(usize, usize)> = None;
+    let mut hi: Option<(usize, usize)> = None;
+    for r in rows {
+        let row = r.page_row;
+        if row < sr || row > er {
+            continue;
+        }
+        let from = if row == sr { sc } else { r.pan };
+        let to = if row == er { ec } else { usize::MAX };
+        let mut col = r.pan;
+        for c in &r.cells {
+            let w = md::char_width(c.ch);
+            if col >= from && col < to {
+                if let Some(p) = c.src {
+                    lo = Some(lo.map_or(p, |q: (usize, usize)| q.min(p)));
+                    hi = Some(hi.map_or(p, |q: (usize, usize)| q.max(p)));
+                }
+            }
+            col += w;
+        }
+    }
+    let (lo, hi) = (lo?, hi?);
+    // how much of a line the page drew from it, whether it ended up selected
+    // or not: that is what tells "all of this line" from "part of it", and a
+    // line is only cut to columns when the pointer really stopped inside it
+    let drawn = |line: usize| {
+        rows.iter()
+            .flat_map(|r| r.cells.iter())
+            .filter_map(|c| c.src)
+            .filter(|(l, _)| *l == line)
+            .fold(None, |acc: Option<(usize, usize)>, (_, col)| {
+                Some(acc.map_or((col, col), |(a, b)| (a.min(col), b.max(col))))
+            })
+    };
+    let lines: Vec<&str> = source.lines().collect();
+    let take = |line: usize, from: usize, to: usize| -> String {
+        lines
+            .get(line)
+            .map(|l| l.chars().skip(from).take(to.saturating_sub(from)).collect())
+            .unwrap_or_default()
+    };
+    let end = |line: usize| lines.get(line).map_or(0, |l| l.chars().count());
+    let start_col = match drawn(lo.0) {
+        Some((first, _)) if lo.1 > first => lo.1,
+        _ => 0,
+    };
+    let end_col = match drawn(hi.0) {
+        Some((_, last)) if hi.1 < last => hi.1 + 1,
+        _ => end(hi.0),
+    };
+    if lo.0 == hi.0 {
+        return Some(take(lo.0, start_col, end_col.max(start_col)));
+    }
+    let mut out = take(lo.0, start_col, end(lo.0));
+    for line in lo.0 + 1..hi.0 {
+        out.push('\n');
+        out.push_str(lines.get(line).copied().unwrap_or_default());
+    }
+    out.push('\n');
+    out.push_str(&take(hi.0, 0, end_col));
+    Some(out)
+}
+
 fn selected_text(rows: &[PreviewRow], ((sr, sc), (er, ec)): (PSel, PSel)) -> String {
     let mut out = String::new();
     for r in rows {
@@ -5751,6 +5842,63 @@ fn beside_place(m: KeyModifiers) -> Option<crate::terminal::Place> {
 
 #[cfg(test)]
 mod tests {
+    /// The reading view's rows for `md` at `width`, laid out the way a draw
+    /// lays them out: rendered, then wrapped, one `PreviewRow` per screen row.
+    fn preview_rows(md: &str, width: usize) -> Vec<super::PreviewRow> {
+        let rendered = crate::render::render_page_at(md, 0, width, Default::default());
+        let mut rows: Vec<super::PreviewRow> = Vec::new();
+        for pline in &rendered.lines {
+            for cells in crate::render::wrap_pline(pline, width) {
+                let row = rows.len();
+                rows.push(super::PreviewRow {
+                    page_row: row,
+                    rect: ratatui::layout::Rect::new(0, row as u16, width as u16, 1),
+                    pan: 0,
+                    src_line: pline.src_line,
+                    cells,
+                });
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn copying_the_reading_view_gives_back_the_markdown_it_was_drawn_from() {
+        // a bullet the page wrapped over three rows, drawn with a `·` and a
+        // hanging indent under it — a copy of all three rows is the one line
+        // the note actually holds, marker and all
+        let md = "- alpha beta gamma delta epsilon\n- second item\n";
+        let rows = preview_rows(md, 16);
+        assert!(rows.len() > 3, "the first item wrapped: {rows:#?}");
+        let last = rows.len() - 1;
+        let span = ((0, 0), (last, usize::MAX));
+        assert_eq!(
+            super::selected_source(&rows, span, md).as_deref(),
+            Some("- alpha beta gamma delta epsilon\n- second item")
+        );
+    }
+
+    #[test]
+    fn a_selection_that_stops_inside_a_line_is_cut_to_what_it_covered() {
+        let md = "- alpha beta\n";
+        let rows = preview_rows(md, 40);
+        // "• alpha beta": columns 2..7 are "alpha"
+        let cut = super::selected_source(&rows, ((0, 4), (0, 7)), md);
+        assert_eq!(cut.as_deref(), Some("pha"));
+        // reaching the row's first drawn character takes the marker too,
+        // because that is the whole of the line the page drew
+        let whole = super::selected_source(&rows, ((0, 2), (0, usize::MAX)), md);
+        assert_eq!(whole.as_deref(), Some("- alpha beta"));
+    }
+
+    #[test]
+    fn a_selection_of_the_page_alone_falls_back_to_what_was_drawn() {
+        // no cell under this one came from the note, so there is no source to
+        // give back and the caller keeps the drawn text
+        let rows = preview_rows("text\n", 20);
+        assert_eq!(super::selected_source(&rows, ((9, 0), (9, 4)), "text\n"), None);
+    }
+
     #[test]
     fn a_paste_into_a_one_line_prompt_comes_out_as_one_line() {
         assert_eq!(super::one_line("a\nb"), "a b");
