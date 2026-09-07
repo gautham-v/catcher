@@ -5517,6 +5517,25 @@ pub fn revealed_by(block: &md::Block, cursor_row: usize, selection: Option<(Pos,
         || selection.is_some_and(|((sr, _), (er, _))| block.contains(sr) || block.contains(er))
 }
 
+/// The source columns of `row` the cursor is asking to see the syntax of: the
+/// cursor's own column as an empty range, widened to whatever a selection
+/// covers on this row.
+///
+/// A selection is included because the markup is what is about to be cut or
+/// replaced: shift-selecting across a link should show the link, not the word
+/// it is drawn as. Only the cursor's own row gets one — the rest of a
+/// selection stays rendered, the way the page reads everywhere else.
+fn reveal_on(row: usize, cursor: Pos, selection: Option<(Pos, Pos)>) -> (usize, usize) {
+    let (mut a, mut b) = (cursor.1, cursor.1);
+    if let Some(((sr, sc), (er, ec))) = selection {
+        if row >= sr && row <= er {
+            a = a.min(if row == sr { sc } else { 0 });
+            b = b.max(if row == er { ec } else { usize::MAX });
+        }
+    }
+    (a, b)
+}
+
 /// How one source line is drawn in the live preview.
 #[allow(clippy::too_many_arguments)]
 fn view_line(
@@ -5578,7 +5597,7 @@ fn view_line(
         };
     }
     if row == cursor_row {
-        md::raw_with_task(src, cursor.1)
+        md::style_line_editing_in(lines, row, reveal_on(row, cursor, selection))
     } else {
         md::style_line_in(lines, row)
     }
@@ -5896,7 +5915,10 @@ mod tests {
         // no cell under this one came from the note, so there is no source to
         // give back and the caller keeps the drawn text
         let rows = preview_rows("text\n", 20);
-        assert_eq!(super::selected_source(&rows, ((9, 0), (9, 4)), "text\n"), None);
+        assert_eq!(
+            super::selected_source(&rows, ((9, 0), (9, 4)), "text\n"),
+            None
+        );
     }
 
     #[test]
@@ -6140,6 +6162,34 @@ mod tests {
         };
         assert_eq!(text(0, 0), "  a │ **b**");
         assert_eq!(text(0, 2), "  a │ b");
+    }
+
+    #[test]
+    fn the_cursors_own_line_reveals_only_the_span_it_is_in() {
+        let lines: Vec<String> = vec!["a **bold** [[note]] #tag".to_string()];
+        let blocks = md::blocks(&lines);
+        let view = |col, sel| {
+            view_line(&lines, &blocks, 0, 40, (0, col), sel, None, None, None)
+                .cells
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+        };
+        // the cursor on the line but in none of its spans: everything drawn
+        assert_eq!(view(0, None), "a bold note #tag");
+        assert_eq!(view(24, None), "a bold note #tag");
+        // in the emphasis: that span alone comes back
+        assert_eq!(view(5, None), "a **bold** note #tag");
+        // in the link: likewise
+        assert_eq!(view(15, None), "a bold [[note]] #tag");
+        // a selection across the link reveals it, cursor or no cursor
+        assert_eq!(view(0, Some(((0, 0), (0, 20)))), "a **bold** [[note]] #tag");
+        // and a line the cursor is not on is drawn, as it always was
+        let elsewhere = view_line(&lines, &blocks, 0, 40, (1, 0), None, None, None, None);
+        assert_eq!(
+            elsewhere.cells.iter().map(|c| c.ch).collect::<String>(),
+            "a bold note #tag"
+        );
     }
 
     #[test]

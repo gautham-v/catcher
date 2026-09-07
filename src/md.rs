@@ -190,7 +190,10 @@ pub struct RLine {
 }
 
 impl RLine {
-    /// Raw, unstyled: what the cursor's own line shows (syntax revealed).
+    /// Raw, unstyled: every character as typed, which is what a block shows
+    /// while the cursor is inside it. A line the cursor is on gets
+    /// [`style_line_editing`] instead — only the span holding the cursor
+    /// reveals there, the rest of the line stays drawn.
     pub fn raw(src: &str) -> RLine {
         let cells = src
             .chars()
@@ -544,9 +547,54 @@ struct Builder<'a> {
     /// `^[note]` is drawn as that number, so a line has to know how many
     /// references came before it in the note.
     note: usize,
+    /// Where the cursor is on this line, as a source-column range: the bare
+    /// cursor's `(col, col)`, or the columns a selection covers here. `None`
+    /// for every line the cursor is not on, which is every line the reading
+    /// view draws.
+    ///
+    /// A span overlapping this range shows its markup instead of hiding it —
+    /// the one thing that separates the line being edited from the rest.
+    reveal: Option<(usize, usize)>,
 }
 
 impl<'a> Builder<'a> {
+    fn new(src: &'a [char], note: usize) -> Builder<'a> {
+        Builder {
+            src,
+            cells: Vec::with_capacity(src.len()),
+            note,
+            reveal: None,
+        }
+    }
+
+    /// Does the span `start..end` hold the cursor, and so show its syntax?
+    ///
+    /// The test is strict at both edges: a cursor sitting exactly where a
+    /// span ends is outside it, which is what makes the markup vanish on the
+    /// keystroke that closes it — type the second `*` of `**bold**` and the
+    /// word is bold before you reach the space bar. One ← steps back inside
+    /// and brings the asterisks back.
+    fn shown(&self, start: usize, end: usize) -> bool {
+        self.reveal.is_some_and(|(a, b)| a < end && b > start)
+    }
+
+    /// Is the cursor on this line at all? Line-wide markers — a heading's
+    /// `## `, a footnote definition's `[^1]:` — answer to this rather than to
+    /// `shown`, because hiding them moves every character after them: the
+    /// text would jump sideways under the cursor as the marker was typed.
+    fn editing(&self) -> bool {
+        self.reveal.is_some()
+    }
+
+    /// Is the cursor in a line's leading marker — a `- [ ] ` box, a bullet —
+    /// which ends at source column `end`? Everything in front of the marker
+    /// is the marker's own indent, so the cursor counts as inside from the
+    /// start of the line: that is the rule the checkbox has always had, and
+    /// it is the one place a span reveals without the cursor being in it.
+    fn editing_box(&self, end: usize) -> bool {
+        self.reveal.is_some_and(|(a, _)| a < end)
+    }
+
     fn keep(&mut self, i: usize, style: Style) {
         self.cells.push(Cell {
             ch: self.src[i],
@@ -576,11 +624,7 @@ fn styled_inline(text: &str, base: Style) -> Vec<Cell> {
 /// editor. Each cell keeps the source column it came from.
 pub fn style_inline(src: &str) -> Vec<Cell> {
     let chars: Vec<char> = src.chars().collect();
-    let mut b = Builder {
-        src: &chars,
-        cells: Vec::with_capacity(chars.len()),
-        note: 1,
-    };
+    let mut b = Builder::new(&chars, 1);
     inline(&mut b, 0, theme::PLAIN);
     b.cells
 }
@@ -590,11 +634,27 @@ pub fn style_line(src: &str) -> RLine {
     style_line_from(src, 1)
 }
 
+/// `style_line` for the line the cursor is on: the same drawing, except that
+/// a construct holding the cursor shows its markup instead of hiding it.
+///
+/// `reveal` is a source-column range — `(col, col)` for a bare cursor, or the
+/// columns a selection covers on this line, so shift-selecting across a link
+/// shows what is about to be cut. Everything else on the line renders, which
+/// is what makes `**bold**` bold on the keystroke that closes it rather than
+/// on the one that leaves the line.
+pub fn style_line_editing(src: &str, reveal: (usize, usize)) -> RLine {
+    style_line_from_reveal(src, 1, Some(reveal))
+}
+
 /// The same, for a line whose first footnote reference is number `note` in
 /// the note: an inline `^[text]` is drawn as that ordinal. `style_line`
 /// starts every line at 1; `style_line_in` counts the lines above.
 pub fn style_line_from(src: &str, note: usize) -> RLine {
-    let mut line = style_line_inner(src, note);
+    style_line_from_reveal(src, note, None)
+}
+
+fn style_line_from_reveal(src: &str, note: usize, reveal: Option<(usize, usize)>) -> RLine {
+    let mut line = style_line_inner(src, note, reveal);
     // a trailing ` ^blockid` is an address, not prose: kept, but dimmed to
     // the weight of a marker, whatever the line around it was styled as
     if let Some((col, _)) = block_id_at(src) {
@@ -605,14 +665,11 @@ pub fn style_line_from(src: &str, note: usize) -> RLine {
     line
 }
 
-fn style_line_inner(src: &str, note: usize) -> RLine {
+fn style_line_inner(src: &str, note: usize, reveal: Option<(usize, usize)>) -> RLine {
     let chars: Vec<char> = src.chars().collect();
     let src_len = chars.len();
-    let mut b = Builder {
-        src: &chars,
-        cells: Vec::with_capacity(src_len),
-        note,
-    };
+    let mut b = Builder::new(&chars, note);
+    b.reveal = reveal;
     let mut i = 0;
 
     // fenced code lines: shown verbatim, dimmed
@@ -723,9 +780,15 @@ fn style_line_inner(src: &str, note: usize) -> RLine {
         if let Some(close) = find(&chars, i + 2, ']') {
             if chars.get(close + 1) == Some(&':') {
                 let label: String = chars[i + 2..close].iter().collect();
-                b.sub(&superscript(&label), theme::state(), i);
-                for k in i + 1..=close + 1 {
-                    b.sub("", theme::state(), k);
+                if b.editing() {
+                    for k in i..=close + 1 {
+                        b.keep(k, theme::state());
+                    }
+                } else {
+                    b.sub(&superscript(&label), theme::state(), i);
+                    for k in i + 1..=close + 1 {
+                        b.sub("", theme::state(), k);
+                    }
                 }
                 let mut t = close + 2;
                 if chars.get(t) == Some(&' ') {
@@ -749,8 +812,15 @@ fn style_line_inner(src: &str, note: usize) -> RLine {
         }
         if h < chars.len() && chars[h] == ' ' {
             base = theme::heading(h - i);
+            // the marker stands its ground while the cursor is on the line:
+            // hiding it there would shift the text sideways under the cursor
+            // on the very keystroke — the space — that makes it a heading
             for k in i..=h {
-                b.sub("", base, k); // hidden marker
+                if b.editing() {
+                    b.keep(k, theme::marker());
+                } else {
+                    b.sub("", base, k); // hidden marker
+                }
             }
             i = h + 1;
             inline(&mut b, i, base);
@@ -763,31 +833,43 @@ fn style_line_inner(src: &str, note: usize) -> RLine {
 
     // task list / bullet
     if let Some((marker, style, width)) = list_marker(&chars, i, depth) {
-        b.sub(marker, style, i);
-        b.sub(" ", style, i + 1);
-        for k in i..i + width {
-            if k >= i + 2 {
-                b.sub("", style, k);
+        if b.editing_box(i + width) {
+            for k in i..i + width {
+                b.keep(k, base);
+            }
+        } else {
+            b.sub(marker, style, i);
+            b.sub(" ", style, i + 1);
+            for k in i..i + width {
+                if k >= i + 2 {
+                    b.sub("", style, k);
+                }
+            }
+            if struck(marker) {
+                base = base.patch(theme::done_text());
             }
         }
         i += width;
-        if struck(marker) {
-            base = base.patch(theme::done_text());
-        }
     } else if let Some((at, marker, style, end)) = ordered_task(&chars, i) {
         // `1. [ ] text`: the number stays, the box becomes a glyph
         for k in i..at {
             b.keep(k, base);
         }
-        b.sub(marker, style, at);
-        b.sub(" ", style, at + 1);
-        for k in at + 2..end {
-            b.sub("", style, k);
+        if b.editing_box(end) {
+            for k in at..end {
+                b.keep(k, base);
+            }
+        } else {
+            b.sub(marker, style, at);
+            b.sub(" ", style, at + 1);
+            for k in at + 2..end {
+                b.sub("", style, k);
+            }
+            if struck(marker) {
+                base = base.patch(theme::done_text());
+            }
         }
         i = end;
-        if struck(marker) {
-            base = base.patch(theme::done_text());
-        }
     }
 
     inline(&mut b, i, base);
@@ -887,41 +969,6 @@ pub fn struck(glyph: &str) -> bool {
     glyph == theme::CHECKED || glyph == theme::CANCELLED
 }
 
-/// The cursor's own line, raw except for its checkbox: the `- [ ] ` stays a
-/// box unless the cursor is inside those six columns, which is when the
-/// syntax is what is being edited. Obsidian's rule.
-pub fn raw_with_task(src: &str, cursor_col: usize) -> RLine {
-    let Some((start, end)) = task_prefix(src) else {
-        return RLine::raw(src);
-    };
-    if cursor_col < end {
-        return RLine::raw(src);
-    }
-    let chars: Vec<char> = src.chars().collect();
-    let src_len = chars.len();
-    let mut b = Builder {
-        src: &chars,
-        cells: Vec::with_capacity(src_len),
-        note: 1,
-    };
-    for k in 0..start {
-        b.keep(k, theme::PLAIN);
-    }
-    let (marker, style) = task_glyph_at(&chars, start).expect("task_prefix said so");
-    b.sub(marker, style, start);
-    b.sub(" ", style, start + 1);
-    for k in start + 2..end {
-        b.sub("", style, k);
-    }
-    for k in end..src_len {
-        b.keep(k, theme::PLAIN);
-    }
-    RLine {
-        cells: b.cells,
-        src_len,
-    }
-}
-
 /// How deeply a list item with this leading whitespace is nested, 1 being
 /// top level. Obsidian's rule, simplified: every tab is one level and every
 /// two spaces are one level, so `- a` is depth 1, `  - b` and `\t- b` are
@@ -948,16 +995,6 @@ fn list_marker(chars: &[char], i: usize, depth: usize) -> Option<(&'static str, 
         };
     }
     Some((theme::bullet(depth), theme::marker(), 2))
-}
-
-/// The glyph and style of the box whose `[` — or whose bullet — sits at
-/// column `at`, as `task_prefix` reports it.
-fn task_glyph_at(chars: &[char], at: usize) -> Option<(&'static str, Style)> {
-    match list_marker(chars, at, 1) {
-        Some((glyph, style, 6)) => Some((glyph, style)),
-        _ if chars.get(at) == Some(&'[') => task_state(*chars.get(at + 1)?),
-        _ => None,
-    }
 }
 
 /// Inline emphasis, code, links and highlights from source column `i` on.
@@ -996,6 +1033,11 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
     {
         if let Some(w) = wikilink_at(b.src, i + 1) {
             let style = wiki_style(base, &w.target);
+            if b.shown(i, w.end) {
+                b.keep(i, theme::marker());
+                raw_wikilink(b, &w, style);
+                return Some(w.end);
+            }
             b.sub("", style, i);
             embed_label(b, &w, style);
             return Some(w.end);
@@ -1007,6 +1049,12 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
     if c == '[' && b.src.get(i + 1) == Some(&'[') && links::enabled() {
         if let Some(w) = wikilink_at(b.src, i) {
             let style = wiki_style(base, &w.target);
+            // with the cursor in it the link is what is being typed: brackets,
+            // target and pipe all come back, and the label keeps its colour
+            if b.shown(w.start, w.end) {
+                raw_wikilink(b, &w, style);
+                return Some(w.end);
+            }
             // `[[note#Heading]]` reads as `note › Heading`: the `#` cell is
             // drawn as the chevron, so every column still has its one cell
             if let Some(h) = w.shown_hash(b.src) {
@@ -1042,9 +1090,15 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
         if let Some(close) = find(b.src, i + 2, ']') {
             let label: String = b.src[i + 2..close].iter().collect();
             if !label.is_empty() && !label.contains(' ') {
-                b.sub(&superscript(&label), theme::state(), i);
-                for k in i + 1..=close {
-                    b.sub("", theme::state(), k);
+                if b.shown(i, close + 1) {
+                    for k in i..=close {
+                        b.keep(k, theme::state());
+                    }
+                } else {
+                    b.sub(&superscript(&label), theme::state(), i);
+                    for k in i + 1..=close {
+                        b.sub("", theme::state(), k);
+                    }
                 }
                 b.note += 1;
                 return Some(close + 1);
@@ -1057,12 +1111,21 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
     if c == '^' && b.src.get(i + 1) == Some(&'[') {
         if let Some(close) = find(b.src, i + 2, ']') {
             if close > i + 2 {
-                b.sub(&superscript(&b.note.to_string()), theme::state(), i);
-                b.sub("", theme::state(), i + 1);
-                for k in i + 2..close {
-                    b.keep(k, theme::marker());
+                if b.shown(i, close + 1) {
+                    b.keep(i, theme::state());
+                    b.keep(i + 1, theme::state());
+                    for k in i + 2..close {
+                        b.keep(k, theme::marker());
+                    }
+                    b.keep(close, theme::state());
+                } else {
+                    b.sub(&superscript(&b.note.to_string()), theme::state(), i);
+                    b.sub("", theme::state(), i + 1);
+                    for k in i + 2..close {
+                        b.keep(k, theme::marker());
+                    }
+                    b.sub("", theme::state(), close);
                 }
-                b.sub("", theme::state(), close);
                 b.note += 1;
                 return Some(close + 1);
             }
@@ -1100,6 +1163,18 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
             if b.src.get(close + 1) == Some(&'(') {
                 if let Some(paren) = find(b.src, close + 2, ')') {
                     let style = base.patch(theme::link());
+                    // the cursor in the span brings the target back: the text
+                    // stays a link, the brackets and the href read as syntax
+                    if b.shown(i, paren + 1) {
+                        b.keep(i, theme::marker());
+                        for k in i + 1..close {
+                            b.keep(k, style);
+                        }
+                        for k in close..=paren {
+                            b.keep(k, theme::marker());
+                        }
+                        return Some(paren + 1);
+                    }
                     b.sub("", style, i);
                     for k in i + 1..close {
                         b.keep(k, style);
@@ -1125,6 +1200,12 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
         if let Some(tag) = html_tag_at(b.src, i) {
             let dim = theme::marker();
             if tag.name == "br" {
+                if b.shown(i, tag.end) {
+                    for k in i..tag.end {
+                        b.keep(k, dim);
+                    }
+                    return Some(tag.end);
+                }
                 b.sub("↵", dim, i);
                 for k in i + 1..tag.end {
                     b.sub("", dim, k);
@@ -1350,6 +1431,17 @@ pub fn strip_comments(markdown: &str) -> (String, Vec<(usize, usize)>) {
 /// The label of an embedded note link, brackets hidden. A label typed after
 /// a pipe is kept as typed; a bare `Note#Heading` shows as `Note › Heading`,
 /// the `#` standing for the three characters so every column still maps.
+/// A wikilink drawn as typed, for when the cursor is inside it: everything
+/// that is syntax — the brackets, the target, the `|` — dimmed to a marker,
+/// and the label still in the link's own colour, so the link reads as a link
+/// while it is being edited.
+fn raw_wikilink(b: &mut Builder, w: &Wikilink, style: Style) {
+    for k in w.start..w.end {
+        let label = k >= w.label_start && k < w.label_end;
+        b.keep(k, if label { style } else { theme::marker() });
+    }
+}
+
 fn embed_label(b: &mut Builder, w: &Wikilink, style: Style) {
     for k in w.start..w.label_start {
         b.sub("", style, k);
@@ -1378,14 +1470,26 @@ fn delimited(
     close_end: usize,
     style: Style,
 ) -> usize {
+    // with the cursor inside the span its delimiters come back, dimmed to the
+    // weight of a marker: the body is still styled, so the emphasis is on the
+    // page while the syntax that makes it is there to edit
+    let shown = b.shown(open, close_end);
     for k in open..body_start {
-        b.sub("", style, k);
+        if shown {
+            b.keep(k, theme::marker());
+        } else {
+            b.sub("", style, k);
+        }
     }
     for k in body_start..body_end {
         b.keep(k, style);
     }
     for k in body_end..close_end {
-        b.sub("", style, k);
+        if shown {
+            b.keep(k, theme::marker());
+        } else {
+            b.sub("", style, k);
+        }
     }
     close_end
 }
@@ -3096,6 +3200,18 @@ pub fn style_line_in(lines: &[String], row: usize) -> RLine {
     }
 }
 
+/// The same for the line the cursor is on: [`style_line_editing`], numbered
+/// in document order. This is what the live preview draws the cursor's line
+/// with, and the only line of a note that is drawn with a `reveal`.
+pub fn style_line_editing_in(lines: &[String], row: usize, reveal: (usize, usize)) -> RLine {
+    let src = lines.get(row).map(String::as_str).unwrap_or("");
+    if src.contains("^[") {
+        style_line_from_reveal(src, footnote_ordinal(lines, row), Some(reveal))
+    } else {
+        style_line_editing(src, reveal)
+    }
+}
+
 /// The glyph a callout type is drawn with in its title row.
 pub fn callout_glyph(kind: &str) -> Option<char> {
     match kind {
@@ -3572,11 +3688,7 @@ pub fn style_block_line(lines: &[String], block: &Block, row: usize, width: usiz
 fn setext_line(src: &str, level: usize, underline: bool) -> RLine {
     let chars: Vec<char> = src.chars().collect();
     let src_len = chars.len();
-    let mut b = Builder {
-        src: &chars,
-        cells: Vec::with_capacity(src_len),
-        note: 1,
-    };
+    let mut b = Builder::new(&chars, 1);
     if underline {
         for k in 0..src_len {
             b.keep(k, theme::marker());
@@ -4474,11 +4586,7 @@ pub(crate) fn align_of(spec: &str) -> Align {
 /// the cell text; the caller offsets them to the row.
 fn styled_cell(text: &str, base: Style) -> Vec<Cell> {
     let chars: Vec<char> = text.chars().collect();
-    let mut b = Builder {
-        src: &chars,
-        cells: Vec::with_capacity(chars.len()),
-        note: 1,
-    };
+    let mut b = Builder::new(&chars, 1);
     inline(&mut b, 0, base);
     b.cells
 }
@@ -5102,10 +5210,10 @@ mod tests {
         assert_eq!(task_prefix("  1. [ ] a"), Some((5, 9)));
         assert_eq!(task_prefix("1. a"), None);
         assert_eq!(
-            text(&raw_with_task("1. [x] **hi**", 8)),
+            text(&style_line_editing("1. [x] **hi**", (8, 8))),
             format!("1. {} **hi**", theme::CHECKED)
         );
-        assert_eq!(text(&raw_with_task("1. [x] hi", 5)), "1. [x] hi");
+        assert_eq!(text(&style_line_editing("1. [x] hi", (5, 5))), "1. [x] hi");
         // wrapped rows hang under the text, past both number and box
         let rows = wrap_rline(&style_line("1. [ ] alpha beta gamma delta"), 12);
         assert_eq!(rows[1].indent, 5);
@@ -5140,7 +5248,7 @@ mod tests {
         );
         assert_eq!(task_prefix("- [>] a"), Some((0, 6)));
         assert_eq!(
-            text(&raw_with_task("- [-] a", 7)),
+            text(&style_line_editing("- [-] a", (7, 7))),
             format!("{} a", theme::CANCELLED)
         );
         // every glyph is one column wide, so the hang stays where it was
@@ -5157,23 +5265,100 @@ mod tests {
     }
 
     #[test]
+    fn emphasis_renders_on_the_keystroke_that_closes_it() {
+        // the cursor sits where the span ends — outside it, so it is drawn
+        assert_eq!(text(&style_line_editing("a **bold**", (10, 10))), "a bold");
+        // and one column back is inside, which brings the asterisks back
+        assert_eq!(
+            text(&style_line_editing("a **bold**", (9, 9))),
+            "a **bold**"
+        );
+        // the opening edge is outside too: typing up to it changes nothing
+        assert_eq!(
+            text(&style_line_editing("a **bold** b", (2, 2))),
+            "a bold b"
+        );
+        // the delimiters read as syntax, the body keeps its emphasis
+        let l = style_line_editing("**bold**", (4, 4));
+        assert_eq!(l.cells[0].style.fg, theme::marker().fg);
+        assert!(l.cells[2].style.add_modifier.contains(Modifier::BOLD));
+        // the same for every other paired marker, and for code
+        assert_eq!(
+            text(&style_line_editing("~~no~~ `c` =m=", (14, 14))),
+            "no c =m="
+        );
+        assert_eq!(text(&style_line_editing("`code`", (3, 3))), "`code`");
+        // an unclosed marker is literal text wherever the cursor is
+        assert_eq!(text(&style_line_editing("**half", (6, 6))), "**half");
+    }
+
+    #[test]
+    fn a_wikilink_renders_once_its_brackets_close() {
+        assert_eq!(
+            text(&style_line_editing("see [[note]]", (12, 12))),
+            "see note"
+        );
+        assert_eq!(
+            text(&style_line_editing("see [[note]]", (8, 8))),
+            "see [[note]]"
+        );
+        // an alias shows its label, and the whole span comes back together
+        assert_eq!(text(&style_line_editing("[[a|b]] x", (7, 7))), "b x");
+        assert_eq!(text(&style_line_editing("[[a|b]] x", (3, 3))), "[[a|b]] x");
+        // a markdown link hides its target the same way
+        assert_eq!(text(&style_line_editing("[a](b) x", (6, 6))), "a x");
+        assert_eq!(text(&style_line_editing("[a](b) x", (3, 3))), "[a](b) x");
+    }
+
+    #[test]
+    fn a_tag_and_a_heading_take_their_colour_as_they_are_typed() {
+        // a tag hides nothing, so it is coloured from its first letter on
+        let l = style_line_editing("#i", (2, 2));
+        assert_eq!(text(&l), "#i");
+        assert_eq!(l.cells[0].style.fg, theme::tag().fg);
+        // `#` alone is not a tag yet
+        assert_eq!(style_line_editing("#", (1, 1)).cells[0].style.fg, None);
+        // a heading is styled at once, but keeps its marker while the cursor
+        // is on the line, so the text does not shift out from under it
+        let l = style_line_editing("## Title", (8, 8));
+        assert_eq!(text(&l), "## Title");
+        assert_eq!(l.cells[0].style.fg, theme::marker().fg);
+        let t = l.cells.iter().find(|c| c.ch == 'T').unwrap();
+        assert_eq!(t.style.fg, theme::heading(2).fg);
+        // and hides it again the moment the cursor leaves
+        assert_eq!(text(&style_line("## Title")), "Title");
+    }
+
+    #[test]
+    fn a_selection_reveals_the_spans_it_covers() {
+        // the whole line selected: every construct on it shows its syntax
+        assert_eq!(text(&style_line_editing("a [[b]] c", (0, 9))), "a [[b]] c");
+        // a selection that stops short of the link leaves it drawn
+        assert_eq!(text(&style_line_editing("a [[b]] c", (0, 2))), "a b c");
+    }
+
+    #[test]
     fn cursor_line_keeps_its_checkbox_unless_the_cursor_is_in_it() {
         let text = |l: &RLine| l.cells.iter().map(|c| c.ch).collect::<String>();
-        // cursor past the marker: drawn as a box, body raw
-        let l = raw_with_task("- [ ] **hi**", 6);
-        assert_eq!(text(&l), format!("{} **hi**", theme::UNCHECKED));
+        // cursor past the marker: drawn as a box, and the emphasis past it
+        // is drawn too — the cursor is in neither span
+        let l = style_line_editing("- [ ] **hi**", (6, 6));
+        assert_eq!(text(&l), format!("{} hi", theme::UNCHECKED));
         assert_eq!(l.src_len, 12);
         // cursor inside the marker: the syntax comes back
-        assert_eq!(text(&raw_with_task("- [ ] hi", 5)), "- [ ] hi");
-        assert_eq!(text(&raw_with_task("- [ ] hi", 0)), "- [ ] hi");
+        assert_eq!(text(&style_line_editing("- [ ] hi", (5, 5))), "- [ ] hi");
+        assert_eq!(text(&style_line_editing("- [ ] hi", (0, 0))), "- [ ] hi");
         // indent is kept, a checked box is checked
         assert_eq!(
-            text(&raw_with_task("  - [x] hi", 10)),
+            text(&style_line_editing("  - [x] hi", (10, 10))),
             format!("  {} hi", theme::CHECKED)
         );
-        // not a task: plain raw
-        assert_eq!(text(&raw_with_task("- [ ]", 5)), "- [ ]");
-        assert_eq!(text(&raw_with_task("hi", 2)), "hi");
+        // not a task: the bullet is a bullet, and `- [ ]` is its text
+        assert_eq!(
+            text(&style_line_editing("- [ ]", (5, 5))),
+            format!("{} [ ]", theme::BULLET)
+        );
+        assert_eq!(text(&style_line_editing("hi", (2, 2))), "hi");
         assert_eq!(task_prefix("  - [ ] a"), Some((2, 8)));
         assert_eq!(task_prefix("- a"), None);
     }
