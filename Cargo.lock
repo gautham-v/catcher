@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "catcher"
-version = "0.21.2"
+version = "0.22.0"
 dependencies = [
  "anyhow",
  "arboard",
