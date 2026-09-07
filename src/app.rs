@@ -5084,20 +5084,86 @@ impl App {
     /// ^V: an image off the clipboard becomes an attachment and a markdown
     /// image link; anything else pastes as text. Failures flash, never panic.
     fn paste(&mut self) {
+        match crate::clipboard::paste() {
+            crate::clipboard::Paste::Image(png) => {
+                if self.view != View::Edit {
+                    self.view = View::Edit;
+                }
+                self.paste_image(&png);
+            }
+            crate::clipboard::Paste::Text(text) => self.paste_text(text),
+            crate::clipboard::Paste::Empty => self.flash("clipboard is empty".to_string()),
+        }
+    }
+
+    /// Text into the note, exactly as it came: a block of cells if a grid
+    /// selection is waiting for one, otherwise straight into the buffer as a
+    /// single undo step. Nothing here goes through the typing path, so a
+    /// pasted `- item` keeps its marker instead of being handed to the
+    /// list-continuation Enter and coming out as `- - item`.
+    fn paste_text(&mut self, text: String) {
         if self.view != View::Edit {
             self.view = View::Edit;
         }
-        match crate::clipboard::paste() {
-            crate::clipboard::Paste::Image(png) => self.paste_image(&png),
-            crate::clipboard::Paste::Text(text) => {
-                if self.paste_cells(&text) {
-                    return;
-                }
-                self.editor.insert_str(&text);
-                self.sync_editor_to_note();
-                self.flash(format!("pasted {} chars", text.chars().count()));
+        if self.paste_cells(&text) {
+            return;
+        }
+        self.editor.insert_str(&text);
+        self.sync_editor_to_note();
+        self.flash(format!("pasted {} chars", text.chars().count()));
+    }
+
+    /// A bracketed paste: the terminal's own ⌘V (and middle-click, and text
+    /// dropped on the window), which never reaches the keymap because the
+    /// terminal binds that key itself.
+    ///
+    /// It arrives whole, so it is treated as text rather than as a burst of
+    /// keystrokes — the difference between a pasted list landing as it was
+    /// written and every line picking up another marker on the way in. A
+    /// prompt is one line and has no room for the rest, so newlines and tabs
+    /// flatten to spaces there.
+    pub fn on_paste(&mut self, text: String) {
+        self.opener = None;
+        self.complete = None;
+        self.hover = None;
+        // a paste is a keystroke as far as the picture viewer and the peek
+        // are concerned: it puts them away
+        if self.zoom.is_some() {
+            self.unzoom();
+            return;
+        }
+        self.peek = None;
+        if text.is_empty() {
+            return;
+        }
+        match self.overlay {
+            Overlay::None => self.paste_text(text),
+            Overlay::Help => self.help_query.push_str(&one_line(&text)),
+            Overlay::Palette
+            | Overlay::QuickOpen
+            | Overlay::MoveFile
+            | Overlay::SetTemplatesDir
+            | Overlay::SetAttachmentsDir
+            | Overlay::MergeInto
+            | Overlay::Outline
+            | Overlay::Templates
+            | Overlay::OpenVault
+            | Overlay::Trash => {
+                self.query.push_str(&one_line(&text));
+                self.selected = 0;
             }
-            crate::clipboard::Paste::Empty => self.flash("clipboard is empty".to_string()),
+            Overlay::RenameFile => self.rename_input.push_str(&one_line(&text)),
+            Overlay::Extract => self.extract_input.push_str(&one_line(&text)),
+            Overlay::Find => {
+                if self.find_replacing {
+                    self.replace_input.push_str(&one_line(&text));
+                } else {
+                    self.find_input.push_str(&one_line(&text));
+                    self.refind(false);
+                }
+            }
+            // a confirmation has nothing to type into
+            Overlay::ConfirmDelete | Overlay::ConfirmMerge => {}
         }
     }
 
@@ -5594,6 +5660,16 @@ pub fn toggle_task(line: &str) -> Option<String> {
 /// full editing, but every way a Mac hand knows to delete works. Ghostty (and
 /// most terminals) rewrite ⌘⌫ to Ctrl-U and ⌥⌫ to Ctrl-W before the app sees
 /// them, so both spellings are taken.
+/// A paste squeezed onto one line, for the prompts that only have one: every
+/// run of newlines and tabs becomes a single space, and the ends are trimmed.
+fn one_line(text: &str) -> String {
+    text.split(['\n', '\r', '\t'])
+        .filter(|part| !part.trim().is_empty())
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn edit_line(input: &mut String, key: &KeyEvent) -> bool {
     let m = key.modifiers;
     let cmd = m.contains(KeyModifiers::SUPER);
@@ -5675,6 +5751,15 @@ fn beside_place(m: KeyModifiers) -> Option<crate::terminal::Place> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_paste_into_a_one_line_prompt_comes_out_as_one_line() {
+        assert_eq!(super::one_line("a\nb"), "a b");
+        assert_eq!(super::one_line("  spaced  "), "spaced");
+        assert_eq!(super::one_line("a\r\n\r\nb\tc"), "a b c");
+        assert_eq!(super::one_line("plain"), "plain");
+        assert_eq!(super::one_line("\n\n"), "");
+    }
+
     #[test]
     fn palette_order_and_labels_are_unchanged() {
         // the palette lists COMMANDS in this order, under these names; a

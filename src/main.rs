@@ -38,8 +38,8 @@ mod unresolved;
 
 use anyhow::Result;
 use crossterm::event::{
-    self, Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use std::time::Duration;
 
@@ -320,6 +320,14 @@ fn tui(launch: cli::Launch) -> Result<()> {
     // fence can hold the first frame
     highlight::warm();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+    // ⌘V is the terminal's key, not ours — Ghostty and iTerm2 paste on it long
+    // before catcher sees a key event. Bracketed paste is how the terminal says
+    // "this is text, not typing": the whole clipboard arrives as one
+    // `Event::Paste` instead of a torrent of keys, so a pasted `- item` is not
+    // fed to the list-continuation Enter handler and mangled on the way in. It
+    // also settles the terminal's own "this looks like commands" paste warning,
+    // which is raised for multi-line pastes only while the mode is off.
+    let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
     push_keyboard();
     // ratatui's panic hook puts back raw mode and the alternate screen, but
     // knows nothing about mouse reporting or the keyboard protocol; without
@@ -328,7 +336,11 @@ fn tui(launch: cli::Launch) -> Result<()> {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         pop_keyboard();
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::DisableMouseCapture,
+            DisableBracketedPaste
+        );
         pop_title();
         hook(info);
     }));
@@ -339,7 +351,11 @@ fn tui(launch: cli::Launch) -> Result<()> {
     let result = run(&mut terminal, &mut app);
 
     pop_keyboard();
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::DisableMouseCapture,
+        DisableBracketedPaste
+    );
     ratatui::restore();
     pop_title();
     result
@@ -400,6 +416,7 @@ fn handle(app: &mut app::App, ev: Event) {
     match ev {
         Event::Key(k) if k.kind != event::KeyEventKind::Release => app.on_key(k),
         Event::Mouse(m) => app.on_mouse(m),
+        Event::Paste(text) => app.on_paste(text),
         _ => {}
     }
 }

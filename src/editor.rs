@@ -1264,6 +1264,20 @@ mod tests {
     }
 
     #[test]
+    fn a_pasted_list_keeps_its_markers_rather_than_growing_new_ones() {
+        // what a bracketed paste goes through: every line lands as written,
+        // where typing the same keys would have Enter continue the list and
+        // put a second marker in front of each one
+        let mut e = Editor::new("- one");
+        e.set_cursor((0, 5));
+        e.insert_newline_continuing_list();
+        assert_eq!(e.text(), "- one\n- ", "typing Enter carries the marker");
+        let mut e = Editor::new("");
+        e.insert_str("- one\n- two\n  1. three");
+        assert_eq!(e.text(), "- one\n- two\n  1. three");
+    }
+
+    #[test]
     fn a_new_edit_after_an_undo_drops_the_redo_branch() {
         let mut e = Editor::new("");
         e.insert_str("one");
