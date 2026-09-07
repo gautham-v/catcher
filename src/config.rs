@@ -72,7 +72,7 @@ impl Words for TableStyle {
 /// What a plain click in the preview does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PreviewClick {
-    /// Place a selection anchor; dragging selects text and copies it.
+    /// Place a selection anchor; dragging selects text, ⌘C copies it.
     #[default]
     Select,
     /// Drop into the editor at the same spot (how catcher used to behave).

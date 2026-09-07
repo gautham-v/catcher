@@ -360,7 +360,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⌘← ⌘→", "start / end of line"),
             ("⌘↑ ⌘↓", "start / end of note"),
             ("⇧ + any motion", "extend the selection"),
-            ("click, drag", "place the cursor, select (drag copies)"),
+            ("click, drag", "place the cursor, select text"),
             (
                 "⌥click  ^click",
                 "open the link, [[wikilink]] or #tag under the pointer",
@@ -395,7 +395,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("↑ ↓  pgup pgdn", "scroll"),
             ("← →", "pan a table too wide for the page"),
-            ("drag", "select text — it copies on release"),
+            ("drag", "select text  ·  ⌘C copies it"),
             ("click", "a link opens it, a checkbox toggles it"),
             ("^P  esc  ⏎", "back to editing"),
         ],
@@ -5210,12 +5210,14 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) if self.preview_dragging => {
                 self.preview_dragging = false;
-                match self.preview_span() {
-                    // a plain click, not a drag: nothing to copy, and the
-                    // stray one-cell selection would only be visual noise
-                    Some((a, b)) if a == b => self.preview_sel = None,
-                    Some(_) => self.copy_preview_selection(),
-                    None => {}
+                // a plain click, not a drag: the stray one-cell selection
+                // would only be visual noise. A real selection stays put and
+                // waits for ⌘C — releasing the mouse must not overwrite what
+                // is on the clipboard.
+                if let Some((a, b)) = self.preview_span() {
+                    if a == b {
+                        self.preview_sel = None;
+                    }
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
@@ -5229,13 +5231,10 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) if self.dragging => {
                 self.dragging = false;
                 self.table_drag = None;
-                if self.cell_sel.is_some() {
-                    // a block of cells stays selected, and is not copied
-                    // until asked for
-                    self.editor.clear_selection();
-                } else if self.editor.selection().is_some() {
-                    self.copy_selection();
-                } else {
+                // a selection — cells or text — stays selected, and is not
+                // copied until asked for: a drag is as often the start of
+                // typing over the text, or pasting over it, as it is a copy
+                if self.cell_sel.is_some() || self.editor.selection().is_none() {
                     self.editor.clear_selection();
                 }
             }
