@@ -529,6 +529,13 @@ pub struct App {
     /// seed its scatter is drawn from. See `opener`.
     pub opener: Option<(Instant, u64)>,
     pub quit: bool,
+    /// Set when something outside the drawing may have written to the terminal,
+    /// so the next frame is painted whole rather than as a diff against a
+    /// screen that is no longer what we think it is. The clipboard is the one
+    /// that does it: a library reaching for the system pasteboard can log, and
+    /// a log line in a TUI lands on the page and then stays there, because
+    /// every cell it covered is a cell the diff believes is already right.
+    pub repaint: bool,
     dirty: bool,
     last_edit: Instant,
     /// When the open note's file was last compared with what is on disk.
@@ -820,6 +827,7 @@ impl App {
             status: None,
             opener: None,
             quit: false,
+            repaint: false,
             last_title: None,
             dirty: false,
             disk_checked: Instant::now(),
@@ -4390,6 +4398,7 @@ impl App {
         self.overlay = Overlay::None;
         let path = self.active_note().path.clone();
         let path = std::fs::canonicalize(&path).unwrap_or(path);
+        self.repaint = true;
         if crate::clipboard::copy(&path.to_string_lossy()) {
             self.flash("path copied".to_string());
         } else {
@@ -4898,6 +4907,7 @@ impl App {
             return;
         }
         let chars = text.chars().count();
+        self.repaint = true;
         if crate::clipboard::copy(&text) {
             self.flash(format!("copied {chars} chars"));
         } else {
@@ -5054,6 +5064,7 @@ impl App {
     }
 
     fn cut_selection(&mut self) {
+        self.repaint = true;
         if self.view != View::Edit {
             self.flash("nothing selected".to_string());
             return;
@@ -5074,6 +5085,7 @@ impl App {
     }
 
     fn copy_selection(&mut self) {
+        self.repaint = true;
         match self.editor.selected_text() {
             Some(text) if !text.is_empty() => {
                 let chars = text.chars().count();
@@ -5090,6 +5102,7 @@ impl App {
     /// ^V: an image off the clipboard becomes an attachment and a markdown
     /// image link; anything else pastes as text. Failures flash, never panic.
     fn paste(&mut self) {
+        self.repaint = true;
         match crate::clipboard::paste() {
             crate::clipboard::Paste::Image(png) => {
                 if self.view != View::Edit {

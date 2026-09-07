@@ -1,6 +1,18 @@
-//! Copying out of the terminal: OSC 52 first (works over ssh, in Ghostty and
-//! inside tmux), with the native clipboard (arboard) as a local fallback and
-//! `pbcopy`/`pbpaste` behind that on macOS.
+//! Copying out of the terminal.
+//!
+//! There are two ways to reach a clipboard from here and they must not both be
+//! taken at once. OSC 52 asks the terminal to set its own clipboard, which is
+//! the only thing that works over ssh. The native route (`pbcopy` on macOS,
+//! arboard elsewhere) sets the clipboard of the machine this process runs on,
+//! which is the right one whenever the session is local.
+//!
+//! Doing both used to be the belt-and-braces answer, and it is what put a line
+//! of AppKit's log across the middle of the page: the terminal answering OSC 52
+//! and this process writing the pasteboard land on the same board a moment
+//! apart, one of the two writes loses, and NSPasteboard says so on stderr —
+//! which in a TUI means straight onto the screen, over whatever was drawn
+//! there. So the session decides: remote takes OSC 52, local takes the native
+//! clipboard, and neither runs unless the other could not.
 
 use std::io::Write;
 #[cfg(target_os = "macos")]
@@ -49,7 +61,7 @@ fn png_bytes(img: &arboard::ImageData) -> Option<Vec<u8>> {
 /// Text-only fallback for when arboard can't open the pasteboard.
 #[cfg(target_os = "macos")]
 fn pbpaste() -> Paste {
-    match Command::new("pbpaste").output() {
+    match Command::new("pbpaste").stderr(Stdio::null()).output() {
         Ok(o) if o.status.success() => match String::from_utf8(o.stdout) {
             Ok(t) if !t.is_empty() => Paste::Text(t),
             _ => Paste::Empty,
@@ -63,12 +75,26 @@ fn pbpaste() -> Paste {
     Paste::Empty
 }
 
+/// Whether the clipboard that matters is at the other end of an ssh
+/// connection. There the local pasteboard is the wrong machine's, and only the
+/// terminal can be asked.
+fn remote() -> bool {
+    ["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some())
+}
+
 /// Put `text` on the system clipboard. Best effort — returns false only if
 /// every route failed.
 pub fn copy(text: &str) -> bool {
-    let osc = osc52(text).is_ok();
-    let native = native_copy(text) || pbcopy(text);
-    osc || native
+    if remote() {
+        return osc52(text).is_ok() || native_copy(text) || pbcopy(text);
+    }
+    // one writer at a time; see the module note
+    if pbcopy(text) || native_copy(text) {
+        return true;
+    }
+    osc52(text).is_ok()
 }
 
 /// The native clipboard through arboard. On Linux the selection lives in the
@@ -110,9 +136,18 @@ fn osc52(text: &str) -> std::io::Result<()> {
     out.flush()
 }
 
+/// The macOS pasteboard, through the tool Apple ships for it. A child process
+/// is the point as much as the write is: whatever AppKit decides to log about
+/// the pasteboard goes to the child's nulled stderr rather than to the
+/// terminal this program is drawing on.
 #[cfg(target_os = "macos")]
 fn pbcopy(text: &str) -> bool {
-    let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() else {
+    let Ok(mut child) = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
         return false;
     };
     if let Some(mut stdin) = child.stdin.take() {

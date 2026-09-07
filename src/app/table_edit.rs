@@ -226,6 +226,7 @@ impl App {
         };
         let text = table.tsv(rect);
         let n = (rect.r1 + 1 - rect.r0) * (rect.c1 + 1 - rect.c0);
+        self.repaint = true;
         if crate::clipboard::copy(&text) {
             self.flash(format!("copied {n} cells"));
         } else {
@@ -241,6 +242,7 @@ impl App {
             return false;
         };
         let kind = self.cell_sel.map(|s| s.kind).unwrap_or(SelKind::Cells);
+        self.repaint = true;
         if !crate::clipboard::copy(&table.tsv(rect)) {
             self.flash("copy failed — nothing cut".to_string());
             return true;

@@ -382,6 +382,12 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Resu
             // terminal shows the blank in between, which is the flicker a
             // window drag had
             let _ = crossterm::execute!(std::io::stdout(), BeginSynchronizedUpdate);
+            // something outside ratatui may have written to the screen — see
+            // `App::repaint`; the diff cannot know, so the frame is redrawn
+            // whole. Inside the synchronized update, so the blank never shows.
+            if std::mem::take(&mut app.repaint) {
+                let _ = terminal.clear();
+            }
             let drawn = terminal.draw(|f| ui::draw(f, app));
             let _ = crossterm::execute!(std::io::stdout(), EndSynchronizedUpdate);
             drawn?;
