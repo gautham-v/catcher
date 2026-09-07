@@ -18,6 +18,7 @@ mod images;
 mod index;
 mod keys;
 mod links;
+mod lists;
 mod md;
 mod mentions;
 mod mermaid;

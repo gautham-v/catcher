@@ -5127,7 +5127,7 @@ impl App {
         if self.paste_cells(&text) {
             return;
         }
-        self.editor.insert_str(&text);
+        self.editor.insert_paste(&text);
         self.sync_editor_to_note();
         self.flash(format!("pasted {} chars", text.chars().count()));
     }

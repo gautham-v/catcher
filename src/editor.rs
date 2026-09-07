@@ -425,6 +425,34 @@ impl Editor {
         self.batch -= 1;
     }
 
+    /// A paste: the text in as one edit, and then the ordered lists it landed
+    /// in counted through again. Pasted items arrive with the numbers they had
+    /// where they were copied from, and the file is what the page shows, so
+    /// without this a list picks up a second run of `1. 2. 3.` in its middle.
+    pub fn insert_paste(&mut self, text: &str) {
+        self.record(EditKind::Other);
+        self.batch += 1;
+        let start = self
+            .anchor
+            .map_or(self.cursor.0, |a| a.0.min(self.cursor.0));
+        // the row the paste starts on was already there, so it is part of the
+        // list as it stood; every row after it up to the cursor is new
+        let first_new = start + usize::from(crate::lists::is_item(&self.lines[start]));
+        self.insert_str(text);
+        let end = self.cursor.0;
+        if first_new <= end {
+            for (row, delta) in crate::lists::renumber(&mut self.lines, first_new, end) {
+                // a marker that grew from `9.` to `10.` takes the cursor with it
+                if row == self.cursor.0 && self.cursor.1 > 0 {
+                    self.cursor.1 = self.cursor.1.saturating_add_signed(delta);
+                }
+            }
+        }
+        self.cursor = self.clamp(self.cursor);
+        self.batch -= 1;
+        self.last_kind = None;
+    }
+
     pub fn insert_newline(&mut self) {
         self.record(EditKind::Other);
         self.batch += 1;
@@ -1261,6 +1289,54 @@ mod tests {
         assert!(e.undo());
         assert_eq!(e.text(), "ab");
         assert_eq!(e.cursor, (0, 1));
+    }
+
+    #[test]
+    fn a_pasted_list_joins_the_count_of_the_one_it_lands_in() {
+        let mut e = Editor::new("1. one\n2. two\n");
+        e.cursor = (1, e.line_len(1));
+        e.insert_newline();
+        e.insert_paste("3. three\n1. four\n2. five");
+        assert_eq!(e.text(), "1. one\n2. two\n3. three\n4. four\n5. five\n");
+        // and it is one step, marker fixes included
+        e.undo();
+        assert_eq!(e.text(), "1. one\n2. two\n\n");
+    }
+
+    #[test]
+    fn a_widened_marker_carries_the_cursor_with_it() {
+        let mut e = Editor::new("9. nine\n");
+        e.cursor = (0, e.line_len(0));
+        e.insert_newline();
+        e.insert_paste("1. ten");
+        assert_eq!(e.text(), "9. nine\n10. ten\n");
+        // the cursor sat after "1. ten"; the marker grew a char under it
+        assert_eq!(e.cursor, (1, 7));
+    }
+
+    #[test]
+    fn a_paste_that_is_not_a_list_leaves_the_numbers_alone() {
+        let mut e = Editor::new("1. one\n1. two\n");
+        e.cursor = (1, e.line_len(1));
+        e.insert_paste(" and more");
+        assert_eq!(e.text(), "1. one\n1. two and more\n");
+    }
+
+    #[test]
+    fn five_items_pasted_onto_the_end_of_a_list_carry_on_from_seven() {
+        // the case from the bug: items copied out of another note arrive
+        // numbered 1-5 and have to be dragged to 8-12 by hand
+        let list = "# Passions\n\n1. Basketball\n2. Writing\n3. Reading fast\n\
+                    4. Pull-ups\n5. Drawing\n6. Public speaking\n7. Articulating\n";
+        let mut e = Editor::new(list);
+        e.cursor = (8, e.line_len(8));
+        e.insert_newline();
+        e.insert_paste("1. Hiking\n2. Chatting\n3. SUNSHINE\n4. Feeling productive\n5. Automating");
+        let out = e.text();
+        for (i, line) in out.lines().skip(2).enumerate() {
+            assert!(line.starts_with(&format!("{}. ", i + 1)), "{line}");
+        }
+        assert!(out.ends_with("12. Automating\n"), "{out}");
     }
 
     #[test]
