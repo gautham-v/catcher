@@ -338,6 +338,10 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("tab", "indent (tab_width spaces)"),
             (
                 "tab / ⇧tab",
+                "in a list: nest the item — or every item the selection touches — under the one above, or bring it back out",
+            ),
+            (
+                "tab / ⇧tab",
                 "in a table: next / previous cell; past the last, a new row",
             ),
             ("↵", "in a table: a row below"),

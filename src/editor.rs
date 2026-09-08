@@ -495,6 +495,54 @@ impl Editor {
         self.last_kind = None;
     }
 
+    /// Tab in a list: move the item the cursor is in — or every item the
+    /// selection touches — one level in or out, the way Obsidian does. Each
+    /// item lands under the one above it and takes what is nested under it
+    /// along, so a run of items keeps its shape and nothing moves twice; an
+    /// ordered list that starts where they landed starts at 1. False when
+    /// nothing moved: the first item of a list has nothing to nest under, and
+    /// an item at the margin is as far out as it goes. The cursor and the
+    /// selection keep their place in the text they were on, however far the
+    /// markers moved or however they were renumbered.
+    fn shift_list_rows(&mut self, out: bool) -> bool {
+        let dir = if out {
+            crate::lists::Shift::Out
+        } else {
+            crate::lists::Shift::In
+        };
+        let (from, to) = self.selected_rows();
+        let mut lines = self.lines.clone();
+        let mut moved = false;
+        // the last row that came along with an item already moved: it is
+        // nested under one that has had its level changed, so moving it
+        // again would carry it a second time
+        let mut carried: Option<usize> = None;
+        for row in from..=to {
+            if carried.is_some_and(|end| row <= end) {
+                continue;
+            }
+            if let Some(end) = crate::lists::shift(&mut lines, row, dir) {
+                carried = Some(end);
+                moved = true;
+            }
+        }
+        if !moved {
+            return false;
+        }
+        // both ends of the selection are held by what follows them on their
+        // line, which is the one thing a marker moving cannot change
+        let cursor_tail = self.line_len(self.cursor.0).saturating_sub(self.cursor.1);
+        let anchor_tail = self.anchor.map(|(r, c)| self.line_len(r).saturating_sub(c));
+        self.record(EditKind::Other);
+        self.lines = lines;
+        self.cursor.1 = self.line_len(self.cursor.0).saturating_sub(cursor_tail);
+        if let (Some((r, _)), Some(tail)) = (self.anchor, anchor_tail) {
+            self.anchor = Some((r, self.line_len(r).saturating_sub(tail)));
+        }
+        self.last_kind = None;
+        true
+    }
+
     /// Char range of the cluster the char at `col` belongs to, when that
     /// cluster is a ZWJ sequence or a flag; `col..col + 1` otherwise.
     fn cluster_at(&self, row: usize, col: usize) -> (usize, usize) {
@@ -668,7 +716,21 @@ impl Editor {
                 self.delete_forward();
                 return true;
             }
-            KeyCode::Tab => {
+            KeyCode::Tab | KeyCode::BackTab => {
+                let out = key.code == KeyCode::BackTab || select;
+                let (from, to) = self.selected_rows();
+                let in_list = (from..=to).any(|r| crate::lists::is_list_item(&self.lines[r]));
+                if in_list && self.shift_list_rows(out) {
+                    return true;
+                }
+                // in a list ⇥ only ever moves items between levels, so items
+                // with nowhere to go stay as they are rather than being
+                // replaced by stray spaces; outside one ⇥ indents by a tab's
+                // worth of them and ⇧⇥ does nothing
+                if out || in_list {
+                    self.last_kind = None;
+                    return false;
+                }
                 for _ in 0..self.tab_width.max(1) {
                     self.insert_char(' ');
                 }
@@ -934,6 +996,85 @@ mod tests {
             assert_eq!(e.text(), after, "{before:?}");
             assert_eq!(e.cursor, (1, after.len() - before.len() - 1));
         }
+    }
+
+    #[test]
+    fn tab_nests_the_item_the_cursor_is_in() {
+        let mut e = Editor::new("1. one\n2. two");
+        e.set_cursor((1, 6));
+        e.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(e.text(), "1. one\n2. two\n3. ");
+        e.on_key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(e.text(), "1. one\n2. two\n   1. ");
+        assert_eq!(e.cursor, (2, 6));
+        // and back out again, to the number it left
+        e.on_key(key(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(e.text(), "1. one\n2. two\n3. ");
+        assert_eq!(e.cursor, (2, 3));
+    }
+
+    #[test]
+    fn tab_indents_from_anywhere_in_the_item() {
+        let mut e = Editor::new("- a\n- bcd");
+        e.set_cursor((1, 3));
+        e.on_key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(e.text(), "- a\n  - bcd");
+        // the cursor stays on the same char of the text
+        assert_eq!(e.cursor, (1, 5));
+        e.undo();
+        assert_eq!(e.text(), "- a\n- bcd");
+    }
+
+    #[test]
+    fn tab_moves_every_item_a_selection_touches() {
+        let mut e = Editor::new("1. a\n2. b\n3. c\n4. d");
+        e.anchor = Some((1, 0));
+        e.set_cursor((2, 4));
+        e.on_key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(e.text(), "1. a\n   1. b\n   2. c\n2. d");
+        // the selection is kept, on the text it was on, so ⇥ again nests further
+        assert_eq!(e.anchor, Some((1, 3)));
+        assert_eq!(e.cursor, (2, 7));
+        // and ⇧⇥ brings the pair back out, the outer list counting on again
+        e.on_key(key(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(e.text(), "1. a\n2. b\n3. c\n4. d");
+        // each move is one undo step, however many items it carried
+        e.undo();
+        assert_eq!(e.text(), "1. a\n   1. b\n   2. c\n2. d");
+        e.undo();
+        assert_eq!(e.text(), "1. a\n2. b\n3. c\n4. d");
+    }
+
+    #[test]
+    fn a_selected_item_carries_its_children_rather_than_moving_them_twice() {
+        let mut e = Editor::new("- a\n- b\n  - x\n- c");
+        e.anchor = Some((1, 0));
+        e.set_cursor((2, 5));
+        e.on_key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(e.text(), "- a\n  - b\n    - x\n- c");
+    }
+
+    #[test]
+    fn a_selection_with_no_list_in_it_is_replaced_as_before() {
+        let mut e = Editor::new("one\ntwo");
+        e.anchor = Some((0, 0));
+        e.set_cursor((1, 3));
+        e.on_key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(e.text(), "  ");
+    }
+
+    #[test]
+    fn tab_outside_a_list_still_indents_by_spaces() {
+        let mut e = Editor::new("plain");
+        e.set_cursor((0, 0));
+        e.on_key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(e.text(), "  plain");
+        // the first item of a list has nowhere to go, and ⇥ in an item is
+        // never a run of spaces, so it stays exactly as it was
+        let mut e = Editor::new("- only");
+        e.set_cursor((0, 6));
+        assert!(!e.on_key(key(KeyCode::Tab, KeyModifiers::NONE)));
+        assert_eq!(e.text(), "- only");
     }
 
     #[test]

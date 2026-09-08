@@ -11,8 +11,11 @@
 //! and a list written in the lazy `1. 1. 1.` style — where every marker is
 //! deliberately the same and the renderer does the counting — is left exactly
 //! as it was.
+//!
+//! Tab and shift-Tab in the editor move an item between levels, which asks
+//! the same question of the same lists, so [`shift`] lives here too.
 
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 /// The marker an ordered item starts with: `12. ` or `3) `.
 struct Marker {
@@ -169,15 +172,26 @@ fn plan(lines: &[String]) -> Vec<Item> {
 /// every other list in the note alone. Returns each rewritten row and how many
 /// chars it grew by, so a caller holding a cursor on one can follow it.
 pub fn renumber(lines: &mut [String], from: usize, to: usize) -> Vec<(usize, isize)> {
+    fix(lines, from..=to, from..=to)
+}
+
+/// Renumber every run with an item in `touched`. `fresh` is the rows the edit
+/// itself wrote: they are left out of the question of whether a list is lazy,
+/// because the list as it stood before the edit is what says its style.
+fn fix(
+    lines: &mut [String],
+    touched: RangeInclusive<usize>,
+    fresh: RangeInclusive<usize>,
+) -> Vec<(usize, isize)> {
     let items = plan(lines);
-    let touched: Vec<usize> = items
+    let runs: Vec<usize> = items
         .iter()
-        .filter(|i| i.row >= from && i.row <= to)
+        .filter(|i| touched.contains(&i.row))
         .map(|i| i.run)
         .collect();
     let mut shifts = Vec::new();
     let mut done: Vec<usize> = Vec::new();
-    for run in touched {
+    for run in runs {
         if done.contains(&run) {
             continue;
         }
@@ -187,10 +201,7 @@ pub fn renumber(lines: &mut [String], from: usize, to: usize) -> Vec<(usize, isi
         // renumbering it would overwrite what the writer meant. The list as it
         // stood before the edit is what says so, so the new lines are left out
         // of the question — they arrived with numbering of their own.
-        let standing: Vec<&&Item> = members
-            .iter()
-            .filter(|i| i.row < from || i.row > to)
-            .collect();
+        let standing: Vec<&&Item> = members.iter().filter(|i| !fresh.contains(&i.row)).collect();
         if standing.len() > 1 && standing.iter().all(|i| i.old == standing[0].old) {
             continue;
         }
@@ -208,9 +219,153 @@ pub fn renumber(lines: &mut [String], from: usize, to: usize) -> Vec<(usize, isi
     shifts
 }
 
+/// Which way [`shift`] moves an item.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Shift {
+    In,
+    Out,
+}
+
+/// Where a list item's marker sits and where its text starts: `- `, `* `,
+/// `+ `, `- [ ] ` and `12. ` all count. A task's box is part of its text, the
+/// way the parser reads it, so a task nests its children two columns in like
+/// any other bullet.
+fn item(line: &str) -> Option<(usize, usize)> {
+    if let Some(m) = marker(line) {
+        return Some((m.indent, m.content));
+    }
+    let indent = indent_of(line);
+    let rest = &line[indent..];
+    // `- ` with nothing after it is still an item: it is where one is starting
+    let bullet = matches!(rest, "-" | "*" | "+")
+        || rest.starts_with("- ")
+        || rest.starts_with("* ")
+        || rest.starts_with("+ ");
+    bullet.then_some((indent, indent + 2))
+}
+
+/// Whether `line` is a list item of any kind: the lines ⇥ moves between
+/// levels rather than pushing along by a tab's worth of spaces.
+pub fn is_list_item(line: &str) -> bool {
+    item(line).is_some()
+}
+
+/// The rows the item on `row` takes with it when it moves: its own, and the
+/// lines nested under it — deeper items and wrapped text alike.
+fn block(lines: &[String], row: usize, indent: usize) -> usize {
+    let mut end = row;
+    for (r, line) in lines.iter().enumerate().skip(row + 1) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if indent_of(line) <= indent {
+            break;
+        }
+        end = r;
+    }
+    end
+}
+
+/// The indent the item on `row` should land at, or `None` when it has nowhere
+/// to go: the first item of a list has nothing to nest under, and an item at
+/// the margin is already as far out as it goes.
+fn target(lines: &[String], row: usize, indent: usize, dir: Shift) -> Option<usize> {
+    for line in lines[..row].iter().rev() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let ind = indent_of(line);
+        // deeper lines are somebody else's children, and the item's own
+        // wrapped text; neither says anything about where this item belongs
+        if ind > indent {
+            continue;
+        }
+        let Some((_, content)) = item(line) else {
+            break;
+        };
+        match dir {
+            // in: under the item above, its text column becoming our indent
+            Shift::In => return (ind == indent).then_some(content),
+            // out: past the siblings above, to the level of the parent
+            Shift::Out if ind < indent => return Some(ind),
+            Shift::Out => continue,
+        }
+    }
+    (dir == Shift::Out && indent > 0).then_some(0)
+}
+
+/// The last row of the list the move happens in, so the numbers can be put
+/// right through to the end of it. `floor` is the shallowest indent still
+/// inside: a paragraph at or outside it has left the list.
+fn list_end(lines: &[String], from: usize, floor: usize) -> usize {
+    let mut end = from;
+    for (r, line) in lines.iter().enumerate().skip(from + 1) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let ind = indent_of(line);
+        if ind < floor || (ind <= floor && item(line).is_none()) {
+            break;
+        }
+        end = r;
+    }
+    end
+}
+
+/// The row each ordered run starts on.
+fn run_starts(lines: &[String]) -> Vec<usize> {
+    let mut runs: Vec<usize> = Vec::new();
+    let mut rows = Vec::new();
+    for it in plan(lines) {
+        if !runs.contains(&it.run) {
+            runs.push(it.run);
+            rows.push(it.row);
+        }
+    }
+    rows
+}
+
+/// Move the list item on `row` one level in or out, taking what is nested
+/// under it along, and leave the ordered lists it left and joined counting
+/// straight. A sublist that only starts because of the move starts at 1 —
+/// the number the item carried counted for the list it came from, and means
+/// nothing where it landed. Returns the last row it moved, so a caller
+/// walking a run of items can skip the ones that came along; `None` when
+/// there was nowhere to move.
+pub fn shift(lines: &mut [String], row: usize, dir: Shift) -> Option<usize> {
+    let (indent, _) = lines.get(row).and_then(|l| item(l))?;
+    let to = target(lines, row, indent, dir)?;
+    if to == indent {
+        return None;
+    }
+    let end = block(lines, row, indent);
+    let bound = list_end(lines, end, indent.min(to));
+    let started = run_starts(lines);
+    for line in lines[row..=end].iter_mut() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if to > indent {
+            line.insert_str(0, &" ".repeat(to - indent));
+        } else {
+            let cut = (indent - to).min(indent_of(line));
+            line.replace_range(..cut, "");
+        }
+    }
+    for start in run_starts(lines) {
+        if start >= row && start <= bound && !started.contains(&start) {
+            if let Some(m) = marker(&lines[start]) {
+                lines[start].replace_range(m.digits, "1");
+            }
+        }
+    }
+    fix(lines, row..=bound, row..=end);
+    Some(end)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::renumber;
+    use super::{renumber, shift, Shift};
 
     fn lines(text: &str) -> Vec<String> {
         text.lines().map(String::from).collect()
@@ -316,5 +471,82 @@ mod tests {
             run("1. a\n1. b\n1. x\n1. c", 2, 2),
             "1. a\n1. b\n1. x\n1. c"
         );
+    }
+
+    fn moved(text: &str, row: usize, dir: Shift) -> String {
+        let mut ls = lines(text);
+        shift(&mut ls, row, dir);
+        ls.join("\n")
+    }
+
+    #[test]
+    fn a_nested_ordered_list_starts_at_one() {
+        // the number it carried counted for the list it came from
+        assert_eq!(
+            moved("1. a\n2. b\n3. c", 1, Shift::In),
+            "1. a\n   1. b\n2. c"
+        );
+    }
+
+    #[test]
+    fn nesting_an_item_joins_the_sublist_already_there() {
+        assert_eq!(
+            moved("1. a\n   1. x\n2. b", 2, Shift::In),
+            "1. a\n   1. x\n   2. b"
+        );
+    }
+
+    #[test]
+    fn an_item_takes_what_is_nested_under_it() {
+        let before = "- a\n- b\n  - x\n    wrapped\n- c";
+        assert_eq!(
+            moved(before, 1, Shift::In),
+            "- a\n  - b\n    - x\n      wrapped\n- c"
+        );
+    }
+
+    #[test]
+    fn the_first_item_of_a_list_has_nothing_to_nest_under() {
+        let before = "para\n\n1. a\n2. b";
+        assert_eq!(moved(before, 2, Shift::In), before);
+        assert_eq!(moved("- a\n- b", 0, Shift::In), "- a\n- b");
+    }
+
+    #[test]
+    fn coming_back_out_rejoins_the_count_and_restarts_what_is_left() {
+        let before = "1. a\n   1. x\n   2. y\n   3. z";
+        assert_eq!(moved(before, 2, Shift::Out), "1. a\n   1. x\n2. y\n   1. z");
+    }
+
+    #[test]
+    fn an_item_at_the_margin_has_nowhere_further_out() {
+        assert_eq!(moved("- a\n- b", 1, Shift::Out), "- a\n- b");
+    }
+
+    #[test]
+    fn a_task_nests_under_the_bullet_not_the_box() {
+        assert_eq!(
+            moved("- [ ] a\n- [x] b", 1, Shift::In),
+            "- [ ] a\n  - [x] b"
+        );
+    }
+
+    #[test]
+    fn a_lazy_list_stays_lazy_when_an_item_is_nested_out_of_it() {
+        assert_eq!(
+            moved("1. a\n1. b\n1. c", 1, Shift::In),
+            "1. a\n   1. b\n1. c"
+        );
+    }
+
+    #[test]
+    fn a_paragraph_below_is_not_part_of_the_list() {
+        let before = "1. a\n2. b\n\npara\n\n5. c";
+        assert_eq!(moved(before, 1, Shift::In), "1. a\n   1. b\n\npara\n\n5. c");
+    }
+
+    #[test]
+    fn a_bullet_between_ordered_items_keeps_its_own_indent() {
+        assert_eq!(moved("- a\n- b\n- c", 2, Shift::In), "- a\n- b\n  - c");
     }
 }
