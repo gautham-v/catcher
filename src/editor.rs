@@ -340,6 +340,9 @@ impl Editor {
         let by = if down { 1 } else { -1 };
         self.cursor.0 = self.cursor.0.wrapping_add_signed(by);
         self.anchor = self.anchor.map(|(r, c)| (r.wrapping_add_signed(by), c));
+        // an item that moved took its number with it and is now out of step
+        // with the ones it passed
+        self.settle_lists(self.cursor.0);
         self.follow_cursor = true;
         true
     }
@@ -451,6 +454,21 @@ impl Editor {
         self.cursor = self.clamp(self.cursor);
         self.batch -= 1;
         self.last_kind = None;
+    }
+
+    /// Put the list an edit landed in back in order. `fresh` is the row the
+    /// edit wrote: its run counts through again, and every other list in the
+    /// note is left alone. The rewriting rides along with the edit's own undo
+    /// step, since the snapshot was taken before either of them.
+    fn settle_lists(&mut self, fresh: usize) {
+        for (row, delta) in crate::lists::renumber(&mut self.lines, fresh, fresh) {
+            // a marker that grew from `9.` to `10.` takes the cursor with it
+            if row == self.cursor.0 && self.cursor.1 > 0 {
+                self.cursor.1 = self.cursor.1.saturating_add_signed(delta);
+            }
+        }
+        self.cursor = self.clamp(self.cursor);
+        self.anchor = self.anchor.map(|a| self.clamp(a));
     }
 
     pub fn insert_newline(&mut self) {
@@ -668,6 +686,20 @@ impl Editor {
 
     /// Handle one key. Returns true if the buffer changed.
     pub fn on_key(&mut self, key: KeyEvent) -> bool {
+        let rows = self.lines.len();
+        let changed = self.on_key_inner(key);
+        // a key that added or removed a line may have added or removed a list
+        // item with it, leaving the rest of that list counting wrong — ⏎ in
+        // the middle of one, or a delete that took an item out. A key that
+        // only changed what a line says is left alone: a number typed over by
+        // hand is a number the writer meant.
+        if changed && self.lines.len() != rows {
+            self.settle_lists(self.cursor.0);
+        }
+        changed
+    }
+
+    fn on_key_inner(&mut self, key: KeyEvent) -> bool {
         self.follow_cursor = true;
         let m = key.modifiers;
         let select = m.contains(KeyModifiers::SHIFT);
@@ -996,6 +1028,47 @@ mod tests {
             assert_eq!(e.text(), after, "{before:?}");
             assert_eq!(e.cursor, (1, after.len() - before.len() - 1));
         }
+    }
+
+    #[test]
+    fn an_item_added_in_the_middle_counts_the_rest_on() {
+        let mut e = Editor::new("1. a\n2. b\n3. c\n4. d");
+        e.set_cursor((1, 4));
+        e.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(e.text(), "1. a\n2. b\n3. \n4. c\n5. d");
+        // and it is the same undo step as the ⏎ that made it
+        e.undo();
+        assert_eq!(e.text(), "1. a\n2. b\n3. c\n4. d");
+    }
+
+    #[test]
+    fn an_item_taken_out_counts_the_rest_back_down() {
+        let mut e = Editor::new("1. a\n2. b\n3. c\n4. d");
+        e.anchor = Some((1, 0));
+        e.set_cursor((2, 0));
+        e.on_key(key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(e.text(), "1. a\n2. c\n3. d");
+        e.undo();
+        assert_eq!(e.text(), "1. a\n2. b\n3. c\n4. d");
+    }
+
+    #[test]
+    fn a_number_typed_over_by_hand_is_left_alone() {
+        // the writer meant it: only an edit that adds or removes a line puts
+        // a list back in order
+        let mut e = Editor::new("1. a\n2. b\n3. c");
+        e.set_cursor((1, 1));
+        e.on_key(key(KeyCode::Backspace, KeyModifiers::NONE));
+        e.on_key(key(KeyCode::Char('7'), KeyModifiers::NONE));
+        assert_eq!(e.text(), "1. a\n7. b\n3. c");
+    }
+
+    #[test]
+    fn a_moved_item_takes_its_place_in_the_count() {
+        let mut e = Editor::new("1. a\n2. b\n3. c");
+        e.set_cursor((2, 4));
+        assert!(e.move_selected_lines(false));
+        assert_eq!(e.text(), "1. a\n2. c\n3. b");
     }
 
     #[test]
