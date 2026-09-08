@@ -53,6 +53,7 @@ pub enum Action {
     ToggleProperties,
     HideProperties,
     ToggleOpener,
+    ToggleListGuides,
     Tags,
     Find,
     InsertTemplate,
@@ -292,6 +293,12 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_opener",
         None,
         "opener — the start-up animation, on or off",
+    ),
+    (
+        Action::ToggleListGuides,
+        "key_list_guides",
+        None,
+        "the rule down a nested list, on or off",
     ),
     (
         Action::Find,

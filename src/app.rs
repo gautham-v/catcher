@@ -190,7 +190,7 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 46] = [
+const COMMANDS: [Command; 47] = [
     Command::Act(Action::NewNote),
     Command::NewFromTemplate,
     Command::SetTemplatesDir,
@@ -203,6 +203,7 @@ const COMMANDS: [Command; 46] = [
     Command::Act(Action::ToggleProperties),
     Command::Act(Action::HideProperties),
     Command::Act(Action::ToggleOpener),
+    Command::Act(Action::ToggleListGuides),
     Command::Act(Action::DeleteNote),
     Command::Act(Action::RenameFile),
     Command::MoveFile,
@@ -284,6 +285,7 @@ impl Command {
                 Action::ToggleProperties => ("Toggle properties (hide / show)", "the front matter: box, line or hidden on the page; dim or hidden in the editor"),
                 Action::HideProperties => ("Hide properties", "the front matter off the page entirely; Toggle properties brings it back"),
                 Action::ToggleOpener => ("Toggle opener", "the decode animation when catcher starts: on or off"),
+                Action::ToggleListGuides => ("Toggle list guides", "the rule down the left of a nested list: on or off"),
                 Action::ExtractNote => ("Extract to new note", "the selection becomes a note beside this one, a [[link]] stays"),
                 // the rest have no palette row; COMMANDS never names them
                 _ => ("", ""),
@@ -4262,6 +4264,15 @@ impl App {
                 let word = if self.config.opener { "yes" } else { "no" };
                 self.save_setting("opener", word);
             }
+            Action::ToggleListGuides => {
+                self.overlay = Overlay::None;
+                self.config.list_guides = !self.config.list_guides;
+                // the page reads this globally, so it takes effect on the
+                // next draw rather than on the next settings save
+                crate::lists::set_guides(self.config.list_guides);
+                let word = if self.config.list_guides { "yes" } else { "no" };
+                self.save_setting("list_guides", word);
+            }
             Action::NewNote => {
                 self.overlay = Overlay::None;
                 self.new_note();
@@ -5967,6 +5978,7 @@ mod tests {
                 "Toggle properties (hide / show)",
                 "Hide properties",
                 "Toggle opener",
+                "Toggle list guides",
                 "Delete note",
                 "Rename file",
                 "Move to folder",

@@ -554,6 +554,9 @@ pub const QUOTE_BAR: &str = "\u{258c}";
 /// The indent rule inside a fenced block, standing in for the space it
 /// replaces. Thin, so a column of them reads as ruling and not as text.
 pub const CODE_GUIDE: char = '\u{2502}';
+/// The rule down the left of a nested list, standing in the text column of
+/// the item the block hangs from.
+pub const LIST_GUIDE: char = '\u{2502}';
 /// A hard line break, in place of its trailing space or backslash.
 pub const HARD_BREAK: &str = "\u{21b5}";
 

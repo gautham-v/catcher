@@ -63,6 +63,23 @@ pub fn wrap_pline(line: &PLine, width: usize) -> Vec<Vec<PCell>> {
         return wrap_pcells(&line.cells, width);
     }
     let rest = width.saturating_sub(line.hang).max(4);
+    // a nested list's rules stand inside the hanging indent, so they are
+    // drawn again on every row the line wraps to and the block's left edge
+    // stays one straight line however the text breaks
+    let hang: Vec<PCell> = (0..line.hang)
+        .map(|col| {
+            let ruled = line
+                .cells
+                .get(col)
+                .is_some_and(|c| c.ch == theme::LIST_GUIDE);
+            PCell {
+                ch: if ruled { theme::LIST_GUIDE } else { ' ' },
+                style: if ruled { theme::marker() } else { theme::PLAIN },
+                link: None,
+                src: None,
+            }
+        })
+        .collect();
     wrap_hang(&line.cells, width, rest)
         .into_iter()
         .enumerate()
@@ -70,7 +87,7 @@ pub fn wrap_pline(line: &PLine, width: usize) -> Vec<Vec<PCell>> {
             if i == 0 {
                 row
             } else {
-                let mut cells = str_cells(&" ".repeat(line.hang), theme::PLAIN);
+                let mut cells = hang.clone();
                 cells.extend(row);
                 cells
             }
@@ -911,6 +928,9 @@ struct Ren {
     /// its marker — a list item wraps under its text, not under its bullet.
     hang: usize,
     list_depth: usize,
+    /// The text column of the item open at each list depth, so a nested one
+    /// can start past its parent's text and stand its rule in it.
+    list_cols: Vec<usize>,
     /// One entry per open list: the next number an ordered list will give its
     /// item, or `None` for a bulleted one.
     list_numbers: Vec<Option<u64>>,
@@ -1003,6 +1023,7 @@ impl Ren {
             quote_blank: false,
             hang: 0,
             list_depth: 0,
+            list_cols: Vec::new(),
             list_numbers: Vec::new(),
             in_code_block: false,
             mermaid: None,
@@ -1398,8 +1419,32 @@ impl Ren {
         });
     }
 
+    /// The text columns of the items this one sits inside, outermost first.
+    fn list_ancestors(&self) -> &[usize] {
+        let n = self.list_depth.saturating_sub(1).min(self.list_cols.len());
+        &self.list_cols[..n]
+    }
+
+    /// What a list item's line begins with: a rule standing in the text column
+    /// of every item it sits inside, and blank to its own column, one step
+    /// past the innermost of them. Top level is the margin and neither.
     fn indent(&self) -> String {
-        "  ".repeat(self.list_depth.saturating_sub(1))
+        let ruled = crate::lists::guides();
+        let mut out = String::new();
+        for col in self.list_ancestors() {
+            while out.chars().count() < *col {
+                out.push(' ');
+            }
+            out.push(if ruled { theme::LIST_GUIDE } else { ' ' });
+        }
+        let want = self
+            .list_ancestors()
+            .last()
+            .map_or(0, |c| c + crate::lists::STEP);
+        while out.chars().count() < want {
+            out.push(' ');
+        }
+        out
     }
 
     /// Draw a task's box in place of the bullet pushed when the item opened
@@ -2141,6 +2186,10 @@ impl Ren {
                 let text = format!("{}{marker} ", self.indent());
                 self.hang = crate::md::str_width(&text);
                 self.push(&text, theme::marker(), None);
+                // where this item's text begins is where its children hang
+                // from — a task's box is text and does not move it
+                self.list_cols.truncate(self.list_depth.saturating_sub(1));
+                self.list_cols.push(self.hang);
                 self.item_fresh = true;
             }
             Event::End(TagEnd::Item) => {
@@ -3198,7 +3247,8 @@ mod tests {
     fn ordered_lists_keep_their_numbers() {
         let r = render("3. three\n4. four\n   - sub\n5. five\n\n- plain\n");
         let f = flat(&r);
-        assert!(f.contains("3. three\n4. four\n  ◦ sub\n5. five"), "{f}");
+        // the sub-item starts past its parent's text, with a rule in it
+        assert!(f.contains("3. three\n4. four\n   │ ◦ sub\n5. five"), "{f}");
         assert!(f.contains("• plain"), "{f}");
     }
 
@@ -3207,7 +3257,9 @@ mod tests {
         let r = render("- one\n  - two\n    - three\n      - four\n  - two again\n- one again\n");
         let f = flat(&r);
         assert!(
-            f.contains("• one\n  ◦ two\n    ▪ three\n      • four\n  ◦ two again\n• one again"),
+            f.contains(
+                "• one\n  │ ◦ two\n  │   │ ▪ three\n  │   │   │ • four\n  │ ◦ two again\n• one again"
+            ),
             "{f}"
         );
     }
@@ -3216,7 +3268,30 @@ mod tests {
     fn nested_task_items_keep_their_boxes() {
         let r = render("- [ ] top\n  - [x] nested\n  - plain\n");
         let f = flat(&r);
-        assert!(f.contains("☐ top\n  ✓ nested\n  ◦ plain"), "{f}");
+        // a task's box is text, so its children hang from the bullet
+        assert!(f.contains("☐ top\n  │ ✓ nested\n  │ ◦ plain"), "{f}");
+    }
+
+    #[test]
+    fn a_nested_item_s_rule_runs_down_the_rows_it_wraps_to() {
+        let r = render_wide("- one\n  - alpha beta gamma delta epsilon\n", 24);
+        let rows: Vec<String> = r
+            .lines
+            .iter()
+            .flat_map(|l| super::wrap_pline(l, 24))
+            .map(|cells| cells.iter().map(|c| c.ch).collect::<String>())
+            .filter(|t| !t.trim().is_empty())
+            .collect();
+        // the item, then its continuation: both stand in the same rule
+        assert!(
+            rows.iter().any(|t| t.starts_with("  │ ◦ alpha")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|t| t.starts_with("  │   ") && t.contains("epsilon")),
+            "{rows:?}"
+        );
     }
 
     #[test]

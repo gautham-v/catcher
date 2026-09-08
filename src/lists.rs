@@ -16,6 +16,22 @@
 //! the same question of the same lists, so [`shift`] lives here too.
 
 use std::ops::{Range, RangeInclusive};
+use std::sync::RwLock;
+
+/// Whether the rules down a nested list are drawn. The nesting itself is not
+/// optional — a nested item has to start clear of its parent's wrapped text
+/// either way — so this is the `│`s and nothing else.
+static GUIDES: RwLock<bool> = RwLock::new(true);
+
+pub fn set_guides(on: bool) {
+    if let Ok(mut w) = GUIDES.write() {
+        *w = on;
+    }
+}
+
+pub fn guides() -> bool {
+    GUIDES.read().map(|b| *b).unwrap_or(true)
+}
 
 /// The marker an ordered item starts with: `12. ` or `3) `.
 struct Marker {
@@ -242,6 +258,98 @@ fn item(line: &str) -> Option<(usize, usize)> {
         || rest.starts_with("* ")
         || rest.starts_with("+ ");
     bullet.then_some((indent, indent + 2))
+}
+
+/// How far in one nesting level draws, past the text column of the item it
+/// sits under. Two columns reads as nested at a glance without pushing a deep
+/// list off the right of the page.
+pub const STEP: usize = 2;
+
+/// Where a line of a list is drawn, which is not where the file puts it: a
+/// nested item sits at its parent's text column plus [`STEP`], so it starts
+/// to the right of the parent's own wrapped lines instead of on top of them,
+/// and a rule stands in each ancestor's text column so the block it belongs
+/// to is countable at a glance rather than measurable with a finger.
+pub struct Nest {
+    /// Display columns the rules stand in, outermost first.
+    pub guides: Vec<usize>,
+    /// Display column the line's own marker — or its text, for the wrapped
+    /// lines of an item — starts at.
+    pub indent: usize,
+    /// How deeply nested the item is, 1 being top level. Counted from the
+    /// items above it rather than guessed from its indent, and unaffected by
+    /// whether the rules are drawn.
+    pub depth: usize,
+}
+
+/// [`Nest`] for the line on `row`, or `None` when it draws exactly as the
+/// file reads it: anything at the margin, and anything outside a list.
+pub fn nest(lines: &[String], row: usize) -> Option<Nest> {
+    nest_at(lines, row, guides())
+}
+
+/// [`nest`], with the rules asked for rather than looked up.
+fn nest_at(lines: &[String], row: usize, ruled: bool) -> Option<Nest> {
+    let line = lines.get(row)?;
+    let ind = indent_of(line);
+    if ind == 0 {
+        return None;
+    }
+    // the items this line sits inside, innermost first: each one is the
+    // nearest line above that starts further out than the last
+    let mut chain: Vec<(usize, usize)> = Vec::new();
+    let mut want = ind;
+    for above in lines[..row].iter().rev() {
+        if above.trim().is_empty() {
+            continue;
+        }
+        let i = indent_of(above);
+        // as far in as us or further is somebody else's item, or our own
+        // wrapped text; either way it says nothing about where we belong
+        if i >= want {
+            continue;
+        }
+        let Some((ai, ac)) = item(above) else {
+            // a paragraph further out than us is where the list ended
+            break;
+        };
+        chain.push((ai, ac));
+        want = ai;
+        if ai == 0 {
+            break;
+        }
+    }
+    // each level draws from the one outside it, so the columns are counted
+    // from the outermost item in rather than from the file's own indents:
+    // whatever a nested list was written with, it is drawn one step past the
+    // text of the item it hangs from
+    let mut guides = Vec::new();
+    let mut depth = chain.len() + 1;
+    let mut indent = chain.last().map_or(0, |(ai, _)| *ai);
+    for (ai, ac) in chain.iter().rev() {
+        let content = indent + (ac - ai);
+        guides.push(content);
+        indent = content + STEP;
+    }
+    if !is_list_item(line) {
+        // the wrapped lines of an item are its own text and not a level of
+        // their own: they sit at its text column, inside the rules it stands
+        // in rather than gaining one
+        let (_, own) = *chain.first()?;
+        indent = guides.pop()? + ind.saturating_sub(own);
+        depth -= 1;
+    }
+    // never draw an item further in than the file puts it: a list written
+    // with more indent than it needs keeps what it was written with
+    indent = indent.max(ind);
+    if !ruled {
+        guides.clear();
+    }
+    (indent != ind || !guides.is_empty()).then_some(Nest {
+        guides,
+        indent,
+        depth,
+    })
 }
 
 /// Whether `line` is a list item of any kind: the lines ⇥ moves between
@@ -471,6 +579,58 @@ mod tests {
             run("1. a\n1. b\n1. x\n1. c", 2, 2),
             "1. a\n1. b\n1. x\n1. c"
         );
+    }
+
+    fn nesting(text: &str, row: usize) -> Option<(Vec<usize>, usize)> {
+        super::nest_at(&lines(text), row, true).map(|n| (n.guides, n.indent))
+    }
+
+    #[test]
+    fn with_the_rules_off_the_nesting_still_stands_clear() {
+        // the rules are furniture; the step past the parent's text is not
+        let ls = lines("1. a\n   1. x");
+        let off = super::nest_at(&ls, 1, false).unwrap();
+        assert_eq!(off.guides, Vec::new());
+        assert_eq!(off.indent, 5);
+        // and a wrapped line, which only ever had rules, draws as it reads
+        let ls = lines("1. a\n   more");
+        assert!(super::nest_at(&ls, 1, false).is_none());
+    }
+
+    #[test]
+    fn a_nested_item_draws_past_its_parent_s_text() {
+        // `1. a` puts its text at column 3, so its children start at 5 and a
+        // rule stands in column 3 — clear of the parent's own wrapped lines
+        let text = "1. a\n   1. x\n      wrapped\n      1. deep\n2. b";
+        assert_eq!(nesting(text, 0), None);
+        assert_eq!(nesting(text, 1), Some((vec![3], 5)));
+        // wrapped text is the item's own, so it keeps its rules and its column
+        assert_eq!(nesting(text, 2), Some((vec![3], 8)));
+        // a third level counts from the second: 5 + 3 = 8, so 8 and 10
+        assert_eq!(nesting(text, 3), Some((vec![3, 8], 10)));
+        assert_eq!(nesting(text, 4), None);
+    }
+
+    #[test]
+    fn bullets_and_tasks_count_from_their_own_text_columns() {
+        assert_eq!(nesting("- a\n  - b\n    - c", 1), Some((vec![2], 4)));
+        assert_eq!(nesting("- a\n  - b\n    - c", 2), Some((vec![2, 6], 8)));
+        // a task's box is text, so its children hang from the bullet
+        assert_eq!(nesting("- [ ] a\n  - b", 1), Some((vec![2], 4)));
+        // and a list under a bullet counts from the bullet's text column
+        assert_eq!(nesting("- a\n  1. x", 1), Some((vec![2], 4)));
+    }
+
+    #[test]
+    fn a_paragraph_outside_the_list_is_not_a_parent() {
+        assert_eq!(nesting("para\n   indented", 1), None);
+        // and a blank line does not break the chain
+        assert_eq!(nesting("1. a\n\n   1. x", 2), Some((vec![3], 5)));
+    }
+
+    #[test]
+    fn a_list_written_with_more_indent_than_it_needs_keeps_it() {
+        assert_eq!(nesting("1. a\n      1. x", 1), Some((vec![3], 6)));
     }
 
     fn moved(text: &str, row: usize, dir: Shift) -> String {

@@ -10,6 +10,7 @@
 use crate::theme;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -216,6 +217,7 @@ impl RLine {
         Seg {
             cells: self.cells.clone(),
             indent: 0,
+            guides: Vec::new(),
             end_src: self.src_len,
         }
     }
@@ -285,6 +287,9 @@ pub struct Seg {
     pub cells: Vec<Cell>,
     /// Blank display columns drawn before `cells` (0 on the first row).
     pub indent: usize,
+    /// Columns of that blank a nested list's rules stand in, so the rule
+    /// runs the height of the block rather than only beside its first row.
+    pub guides: Vec<usize>,
     /// Source column just past this row: the next row's first source column,
     /// or the line's source length for the last row.
     pub end_src: usize,
@@ -371,7 +376,14 @@ impl Seg {
         if self.indent == 0 {
             return inner;
         }
-        let mut spans = vec![Span::raw(" ".repeat(self.indent))];
+        let mut spans = Vec::new();
+        let mut at = 0;
+        for col in self.guides.iter().filter(|c| **c < self.indent) {
+            spans.push(Span::raw(" ".repeat(col - at)));
+            spans.push(Span::styled(theme::LIST_GUIDE.to_string(), theme::marker()));
+            at = col + 1;
+        }
+        spans.push(Span::raw(" ".repeat(self.indent - at)));
         spans.extend(inner.spans);
         Line::from(spans)
     }
@@ -397,6 +409,15 @@ pub fn wrap_rline(line: &RLine, width: usize) -> Vec<Seg> {
         0
     };
     let avail = width.saturating_sub(head_w).max(1);
+    // the rules a nested line stands in are drawn again on every row it wraps
+    // to, so the block's left edge is one straight line however it breaks
+    let guides: Vec<usize> = rest
+        .iter()
+        .take_while(|c| c.ch == ' ' || c.ch == theme::LIST_GUIDE)
+        .enumerate()
+        .filter(|(_, c)| c.ch == theme::LIST_GUIDE)
+        .map(|(i, _)| i)
+        .collect();
     let blank: Vec<Cell> = head.iter().map(|c| Cell { ch: ' ', ..*c }).collect();
     let chars: Vec<char> = rest.iter().map(|c| c.ch).collect();
     wrap_breaks(&chars, avail, avail - indent)
@@ -422,6 +443,7 @@ pub fn wrap_rline(line: &RLine, width: usize) -> Vec<Seg> {
             Seg {
                 cells,
                 indent: if i == 0 { 0 } else { indent },
+                guides: if i == 0 { Vec::new() } else { guides.clone() },
                 end_src: rest.get(e).map_or(line.src_len, |c| c.src),
             }
         })
@@ -435,8 +457,9 @@ fn hanging_indent(cells: &[Cell]) -> usize {
     let ch = |i: usize| cells.get(i).map(|c: &Cell| c.ch);
     let mut i = 0;
     let mut w = 0;
+    // a nested list's rules stand inside its indent, so they are part of it
     let space = |i: &mut usize, w: &mut usize| {
-        while matches!(ch(*i), Some(' ') | Some('\t')) {
+        while matches!(ch(*i), Some(' ') | Some('\t') | Some(theme::LIST_GUIDE)) {
             *w += 1;
             *i += 1;
         }
@@ -634,14 +657,10 @@ pub fn style_line(src: &str) -> RLine {
     style_line_from(src, 1)
 }
 
-/// `style_line` for the line the cursor is on: the same drawing, except that
-/// a construct holding the cursor shows its markup instead of hiding it.
-///
-/// `reveal` is a source-column range — `(col, col)` for a bare cursor, or the
-/// columns a selection covers on this line, so shift-selecting across a link
-/// shows what is about to be cut. Everything else on the line renders, which
-/// is what makes `**bold**` bold on the keystroke that closes it rather than
-/// on the one that leaves the line.
+/// [`style_line`] with the cursor on the line, for the tests that check one
+/// line's drawing without a note around it. The live preview goes through
+/// [`style_line_editing_in`], which also knows what list the line is in.
+#[cfg(test)]
 pub fn style_line_editing(src: &str, reveal: (usize, usize)) -> RLine {
     style_line_from_reveal(src, 1, Some(reveal))
 }
@@ -654,7 +673,18 @@ pub fn style_line_from(src: &str, note: usize) -> RLine {
 }
 
 fn style_line_from_reveal(src: &str, note: usize, reveal: Option<(usize, usize)>) -> RLine {
-    let mut line = style_line_inner(src, note, reveal);
+    style_line_nested(src, note, reveal, None)
+}
+
+/// The same, for a line whose place in a list the document has already been
+/// read for: see [`crate::lists::nest`].
+fn style_line_nested(
+    src: &str,
+    note: usize,
+    reveal: Option<(usize, usize)>,
+    nest: Option<crate::lists::Nest>,
+) -> RLine {
+    let mut line = style_line_inner(src, note, reveal, nest);
     // a trailing ` ^blockid` is an address, not prose: kept, but dimmed to
     // the weight of a marker, whatever the line around it was styled as
     if let Some((col, _)) = block_id_at(src) {
@@ -665,7 +695,12 @@ fn style_line_from_reveal(src: &str, note: usize, reveal: Option<(usize, usize)>
     line
 }
 
-fn style_line_inner(src: &str, note: usize, reveal: Option<(usize, usize)>) -> RLine {
+fn style_line_inner(
+    src: &str,
+    note: usize,
+    reveal: Option<(usize, usize)>,
+    nest: Option<crate::lists::Nest>,
+) -> RLine {
     let chars: Vec<char> = src.chars().collect();
     let src_len = chars.len();
     let mut b = Builder::new(&chars, note);
@@ -741,10 +776,15 @@ fn style_line_inner(src: &str, note: usize, reveal: Option<(usize, usize)>) -> R
     // indentation before a list marker or heading
     let indent_start = i;
     while i < chars.len() && (chars[i] == ' ' || chars[i] == '\t') {
-        b.keep(i, base);
         i += 1;
     }
-    let depth = list_depth(&chars[indent_start..i]);
+    // the document knows how deep the item is; without it, the indent's own
+    // arithmetic is the best guess there is
+    let depth = match &nest {
+        Some(n) => n.depth,
+        None => list_depth(&chars[indent_start..i]),
+    };
+    nested_indent(&mut b, indent_start..i, base, nest);
 
     // a callout's title line: `[!type] Title` becomes the glyph, the type
     // and the title, all in the accent
@@ -3193,23 +3233,31 @@ fn first_footnote(lines: &[String], row: usize, src: &str) -> usize {
 /// in document order rather than from 1.
 pub fn style_line_in(lines: &[String], row: usize) -> RLine {
     let src = lines.get(row).map(String::as_str).unwrap_or("");
-    if src.contains("^[") {
-        style_line_from(src, footnote_ordinal(lines, row))
+    let note = if src.contains("^[") {
+        footnote_ordinal(lines, row)
     } else {
-        style_line(src)
-    }
+        1
+    };
+    style_line_nested(src, note, None, crate::lists::nest(lines, row))
 }
 
-/// The same for the line the cursor is on: [`style_line_editing`], numbered
-/// in document order. This is what the live preview draws the cursor's line
-/// with, and the only line of a note that is drawn with a `reveal`.
+/// The same for the line the cursor is on: a construct holding the cursor
+/// shows its markup instead of hiding it. This is what the live preview draws
+/// the cursor's line with, and the only line of a note drawn with a `reveal`.
+///
+/// `reveal` is a source-column range — `(col, col)` for a bare cursor, or the
+/// columns a selection covers on this line, so shift-selecting across a link
+/// shows what is about to be cut. Everything else on the line renders, which
+/// is what makes `**bold**` bold on the keystroke that closes it rather than
+/// on the one that leaves the line.
 pub fn style_line_editing_in(lines: &[String], row: usize, reveal: (usize, usize)) -> RLine {
     let src = lines.get(row).map(String::as_str).unwrap_or("");
-    if src.contains("^[") {
-        style_line_from_reveal(src, footnote_ordinal(lines, row), Some(reveal))
+    let note = if src.contains("^[") {
+        footnote_ordinal(lines, row)
     } else {
-        style_line_editing(src, reveal)
-    }
+        1
+    };
+    style_line_nested(src, note, Some(reveal), crate::lists::nest(lines, row))
 }
 
 /// The glyph a callout type is drawn with in its title row.
@@ -3840,6 +3888,41 @@ fn code_guides(mut cells: Vec<Cell>) -> Vec<Cell> {
         col += width;
     }
     cells
+}
+
+/// The leading whitespace of a list line, drawn where the page puts it rather
+/// than where the file does: a nested item starts one step past the text of
+/// the item it hangs from, with a rule standing in each ancestor's text column
+/// (see [`crate::lists::nest`]). Without a `nest` — a line outside a list, or
+/// one drawn without the document around it — the indent is kept as typed.
+///
+/// Every column belongs to a source character either way, the extra ones to
+/// the first: a click in the indent lands in the indent, and the cursor walks
+/// it a character at a time.
+fn nested_indent(
+    b: &mut Builder,
+    indent: Range<usize>,
+    base: Style,
+    nest: Option<crate::lists::Nest>,
+) {
+    let len = indent.len();
+    let Some(nest) = nest.filter(|_| len > 0) else {
+        for k in indent {
+            b.keep(k, base);
+        }
+        return;
+    };
+    let width = nest.indent.max(len);
+    let extra = width - len;
+    let guide = theme::marker();
+    for col in 0..width {
+        let ruled = nest.guides.contains(&col);
+        b.cells.push(Cell {
+            ch: if ruled { theme::LIST_GUIDE } else { ' ' },
+            style: if ruled { guide } else { base },
+            src: indent.start + col.saturating_sub(extra),
+        });
+    }
 }
 
 /// A fence's own ``` row on the band: kept as typed, language word and all,
@@ -4911,6 +4994,59 @@ mod tests {
 
     fn text(l: &RLine) -> String {
         l.cells.iter().map(|c| c.ch).collect()
+    }
+
+    fn doc(text: &str) -> Vec<String> {
+        text.lines().map(String::from).collect()
+    }
+
+    #[test]
+    fn a_nested_item_is_drawn_past_its_parent_with_a_rule() {
+        let note = doc("1. a\n   1. x\n      wrapped\n2. b");
+        // the parent draws exactly as the file reads it
+        assert_eq!(text(&style_line_in(&note, 0)), "1. a");
+        // the child starts one step past the parent's text, with a rule
+        // standing in the column that text begins at
+        assert_eq!(text(&style_line_in(&note, 1)), "   │ 1. x");
+        // the child's own wrapped source line keeps its rule and its column
+        assert_eq!(text(&style_line_in(&note, 2)), "   │    wrapped");
+        assert_eq!(text(&style_line_in(&note, 3)), "2. b");
+        // the rule is furniture, drawn in the weight of a marker
+        let rule = style_line_in(&note, 1);
+        assert_eq!(rule.cells[3].ch, theme::LIST_GUIDE);
+        assert_eq!(rule.cells[3].style, theme::marker());
+    }
+
+    #[test]
+    fn every_column_of_a_drawn_indent_still_answers_to_a_source_column() {
+        let note = doc("1. a\n   1. x");
+        let row = style_line_in(&note, 1).one_row();
+        // the marker is at column 5 on the page and column 3 in the file
+        assert_eq!(row.source_to_display(3), 5);
+        assert_eq!(row.display_to_source(5), 3);
+        // and the indent's own columns are the indent's, first to last
+        assert_eq!(row.source_to_display(0), 0);
+        assert_eq!(row.display_to_source(0), 0);
+        assert_eq!(row.display_to_source(4), 2);
+    }
+
+    #[test]
+    fn the_rule_runs_down_every_row_a_nested_item_wraps_to() {
+        let note = doc("1. a\n   1. one two three four");
+        let rows = wrap_rline(&style_line_in(&note, 1), 20);
+        assert!(rows.len() > 1);
+        assert_eq!(rows[0].guides, Vec::new());
+        // the continuation hangs under the item's text, rule and all
+        assert_eq!(rows[1].guides, [3]);
+        assert_eq!(rows[1].indent, 8);
+    }
+
+    #[test]
+    fn a_bullet_nests_from_its_own_text_column() {
+        let note = doc("- a\n  - b\n    - c");
+        assert_eq!(text(&style_line_in(&note, 0)), "• a");
+        assert_eq!(text(&style_line_in(&note, 1)), "  │ ◦ b");
+        assert_eq!(text(&style_line_in(&note, 2)), "  │   │ ▪ c");
     }
 
     #[test]

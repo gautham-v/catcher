@@ -278,6 +278,8 @@ pub struct Config {
     /// guides. The editor never does: its rows are the file's rows, and a
     /// number beside them would be a second, disagreeing count.
     pub code_numbers: bool,
+    /// Draw the rule down the left of a nested list.
+    pub list_guides: bool,
     /// Whether the reading view lists the notes that link to this one. It
     /// costs a pass over every note body, so it is a setting and not simply
     /// how the app behaves.
@@ -339,6 +341,7 @@ impl Default for Config {
             tags: true,
             code_colors: true,
             code_numbers: true,
+            list_guides: true,
             linked_mentions: true,
             autocomplete: true,
             quick_open_recursive: true,
@@ -432,6 +435,7 @@ impl Config {
         crate::md::tags::set_enabled(self.tags);
         crate::highlight::set_enabled(self.code_colors);
         crate::highlight::set_numbers(self.code_numbers);
+        crate::lists::set_guides(self.list_guides);
     }
 
     /// The file plus the environment: `CATCHER_DIR` wins over `notes_dir`,
@@ -622,6 +626,7 @@ impl Config {
         c.tags = flag(text, "tags", c.tags);
         c.code_colors = flag(text, "code_colors", c.code_colors);
         c.code_numbers = flag(text, "code_numbers", c.code_numbers);
+        c.list_guides = flag(text, "list_guides", c.list_guides);
         c.quick_open_recursive = match value(text, "quick_open").as_deref() {
             Some("folder") => false,
             Some("recursive") => true,
@@ -774,6 +779,11 @@ impl Config {
             "code_numbers",
             yn(self.code_numbers),
             "line numbers beside fenced code on the page",
+        );
+        d.row(
+            "list_guides",
+            yn(self.list_guides),
+            "the rule down a nested list; Toggle list guides flips it",
         );
         d.row("status_bar", yn(self.status_bar), "the bottom line at all");
         d.row("key_hints", yn(self.key_hints), "the shortcuts in it");
@@ -1368,6 +1378,8 @@ mod tests {
     fn code_colours_are_on_by_default_and_every_role_round_trips() {
         assert!(Config::default().code_colors);
         assert!(!Config::from_str("- code_colors: no\n").code_colors);
+        assert!(Config::default().list_guides);
+        assert!(!Config::from_str("- list_guides: no\n").list_guides);
         assert!(Config::default().code_numbers);
         assert!(!Config::from_str("- code_numbers: no\n").code_numbers);
         let c = Config {
