@@ -1842,7 +1842,8 @@ impl Ren {
     fn html_tag(&mut self, tag: &crate::md::HtmlTag) {
         if tag.name == "br" {
             if matches!(self.sink, Sink::Table) {
-                self.push(" ", self.style(), self.link);
+                // a cell is one source line, so this is its only line break
+                self.push(&CELL_BREAK.to_string(), self.style(), self.link);
             } else {
                 self.flush();
             }
@@ -2519,7 +2520,7 @@ impl Ren {
         let measured: Vec<Vec<usize>> = t
             .rows
             .iter()
-            .map(|r| r.iter().map(|c| cells_width(c)).collect())
+            .map(|r| r.iter().map(|c| cell_width(c)).collect())
             .collect();
         let natural = crate::md::column_widths(&measured, cols);
         let seps = crate::md::COL_SEP.chars().count() * cols.saturating_sub(1);
@@ -2531,8 +2532,9 @@ impl Ren {
                 self.emit_grid(t, cols, &widths, wrap, false);
             }
             Shape::Scroll => {
-                let widths = self.scroll_widths(&natural);
-                self.emit_grid(t, cols, &widths, true, true);
+                let widths = self.scroll_widths(&natural, seps);
+                let wide = widths.iter().sum::<usize>() + seps > self.width;
+                self.emit_grid(t, cols, &widths, true, wide);
             }
             Shape::Cards => self.emit_cards(t, cols),
         }
@@ -2561,13 +2563,42 @@ impl Ren {
     /// Column widths for a scrolling table: each column as wide as its widest
     /// cell, capped so a single long URL cannot push every other column off
     /// the far side. The cap is a share of the page, not a fixed number, so it
-    /// scales with the window the way Obsidian's does.
-    fn scroll_widths(&self, natural: &[usize]) -> Vec<usize> {
+    /// scales with the window the way Obsidian's does. What the capped
+    /// columns leave of the page goes back to the ones that wanted more, in
+    /// proportion to how much more, so a table of a few long columns fills
+    /// the page and wraps rather than huddling at its left and panning.
+    fn scroll_widths(&self, natural: &[usize], seps: usize) -> Vec<usize> {
         /// Narrowest a column is ever capped to, and the share of the page a
         /// single column may claim before it starts wrapping.
         const FLOOR: usize = 12;
         let cap = (self.width / 3).clamp(FLOOR, 44);
-        natural.iter().map(|w| (*w).min(cap).max(1)).collect()
+        let mut widths: Vec<usize> = natural.iter().map(|w| (*w).min(cap).max(1)).collect();
+        let want: Vec<usize> = natural
+            .iter()
+            .zip(&widths)
+            .map(|(n, w)| n.saturating_sub(*w))
+            .collect();
+        let wanted: usize = want.iter().sum();
+        let room = self
+            .width
+            .saturating_sub(widths.iter().sum::<usize>() + seps)
+            .min(wanted);
+        if room == 0 {
+            return widths;
+        }
+        let mut given = 0;
+        for (w, more) in widths.iter_mut().zip(&want) {
+            let share = more * room / wanted;
+            *w += share;
+            given += share;
+        }
+        // what rounding down left over, a column at a time, hungriest first
+        let mut order: Vec<usize> = (0..widths.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(want[i]));
+        for &i in order.iter().cycle().take(room - given) {
+            widths[i] += 1;
+        }
+        widths
     }
 
     /// Aligned columns with a light rule under the head. `wrap` lets a cell
@@ -2582,9 +2613,13 @@ impl Ren {
                     let cell = row.get(ci).unwrap_or(&empty);
                     let w = widths.get(ci).copied().unwrap_or(0);
                     if wrap {
-                        wrap_pcells(cell, w.max(1))
+                        cell_lines(cell)
+                            .flat_map(|line| wrap_pcells(line, w.max(1)))
+                            .collect()
                     } else {
-                        vec![truncate_cells(cell, w)]
+                        cell_lines(cell)
+                            .map(|line| truncate_cells(line, w))
+                            .collect()
                     }
                 })
                 .collect();
@@ -2640,7 +2675,7 @@ impl Ren {
                 t.rows
                     .first()
                     .and_then(|r| r.get(ci))
-                    .map(|c| c.iter().map(|p| p.ch).collect::<String>())
+                    .map(|c| cell_flat(c).iter().map(|p| p.ch).collect::<String>())
                     .unwrap_or_default()
                     .trim()
                     .to_string()
@@ -2665,7 +2700,10 @@ impl Ren {
             // the heading: the first column, which is nearly always the row's
             // name or date, marked with the same bar a blockquote uses
             let mut title = str_cells(&format!("{} ", theme::QUOTE_BAR), theme::state());
-            let first = truncate_cells(row.first().unwrap_or(&empty), self.width.saturating_sub(2));
+            let first = truncate_cells(
+                &cell_flat(row.first().unwrap_or(&empty)),
+                self.width.saturating_sub(2),
+            );
             title.extend(first.iter().map(|c| {
                 let mut c = c.clone();
                 c.style = c.style.patch(theme::heading(3)).fg(theme::palette().accent);
@@ -2683,7 +2721,8 @@ impl Ren {
                 let pad = labelw.saturating_sub(crate::md::str_width(&label));
                 let indent = 2 + labelw + 2;
                 let avail = self.width.saturating_sub(indent).max(8);
-                for (i, part) in wrap_pcells(value, avail).into_iter().enumerate() {
+                let parts = cell_lines(value).flat_map(|line| wrap_pcells(line, avail));
+                for (i, part) in parts.enumerate() {
                     let mut cells = if i == 0 {
                         let mut c = str_cells("  ", theme::PLAIN);
                         c.extend(str_cells(&label, theme::marker()));
@@ -2714,6 +2753,35 @@ impl Ren {
         self.flush();
         self.out
     }
+}
+
+/// Where a `<br>` breaks a table cell. A cell is one source line, so this is
+/// the only way it has to put text on a line of its own; the cell's lines are
+/// split here when the table is laid out.
+const CELL_BREAK: char = '\n';
+
+/// A table cell's lines, split at its `<br>`s.
+fn cell_lines(cell: &[PCell]) -> impl Iterator<Item = &[PCell]> {
+    cell.split(|c| c.ch == CELL_BREAK)
+}
+
+/// A table cell's width: its widest line.
+fn cell_width(cell: &[PCell]) -> usize {
+    cell_lines(cell).map(cells_width).max().unwrap_or(0)
+}
+
+/// A table cell on one line, for a shape with no room for more: its breaks
+/// become spaces.
+fn cell_flat(cell: &[PCell]) -> Vec<PCell> {
+    cell.iter()
+        .map(|c| match c.ch {
+            CELL_BREAK => PCell {
+                ch: ' ',
+                ..c.clone()
+            },
+            _ => c.clone(),
+        })
+        .collect()
 }
 
 /// The three ways a table can be laid out, once `auto` has made up its mind.
@@ -3211,6 +3279,24 @@ mod tests {
     }
 
     #[test]
+    fn a_table_of_a_few_long_columns_fills_the_page_and_wraps() {
+        let long = "word ".repeat(60);
+        let md = format!("| q | a |\n|---|---|\n| a short question | {long} |\n");
+        let r = render_page(&md, 60, TableStyle::Auto);
+        // nothing to pan: the columns share the page
+        assert!(!r.lines.iter().any(|l| l.wide));
+        let widest = r.lines.iter().map(|l| cells_width(&l.cells)).max();
+        assert_eq!(widest, Some(60));
+        // the long column took the room, the short one kept its own
+        let first = r.lines.iter().find(|l| l.text().contains("short")).unwrap();
+        assert!(
+            first.text().starts_with("a short question │ word"),
+            "{:?}",
+            first.text()
+        );
+    }
+
+    #[test]
     fn tables_get_aligned_columns_and_a_head_rule() {
         let md = "| a | bbbb |\n| --- | ---: |\n| 1 | 2 |\n";
         let r = render(md);
@@ -3699,9 +3785,23 @@ mod tests {
     fn br_breaks_the_line_the_way_a_hard_break_does() {
         let r = render("one<br>two<br/>three");
         assert_eq!(texts(&r), vec!["one", "two", "three"]);
-        // in a table cell it is a space, like a soft break
-        let r = render("| a |\n|---|\n| x<br>y |\n");
-        assert!(flat(&r).contains("x y"), "{:?}", flat(&r));
+        // in a table cell it breaks the cell's line, and the column is as
+        // wide as the longest line rather than the whole cell
+        let r = render("| a |\n|---|\n| xx<br>y |\n");
+        let body: Vec<String> = texts(&r)
+            .iter()
+            .skip(2)
+            .map(|t| t.trim_end().to_string())
+            .collect();
+        assert_eq!(body, vec!["xx", "y"]);
+        // two in a row leave a blank line between, as a page would
+        let r = render("| a |\n|---|\n| x<br><br>y |\n");
+        let body: Vec<String> = texts(&r)
+            .iter()
+            .skip(2)
+            .map(|t| t.trim_end().to_string())
+            .collect();
+        assert_eq!(body, vec!["x", "", "y"]);
     }
 
     #[test]

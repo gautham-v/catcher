@@ -174,6 +174,47 @@ pub fn table_rule(widths: &[usize]) -> String {
 /// the cursor never sits on one, and a selection never picks the numbers up.
 pub const PAD: usize = usize::MAX;
 
+/// A cell that is never drawn: the break between two display rows of one
+/// source line whose rows are laid out already rather than word-wrapped — a
+/// table row whose cells wrap, each within its own column, so its rows are
+/// not runs of the source one after another. [`wrap_rline`] breaks there.
+pub const ROW_BREAK: char = '\n';
+
+/// The row of `segs` — a line laid out with [`ROW_BREAK`]s — that source
+/// column `col` is drawn on. A column can stand on several rows: the end of
+/// a wrapped cell's text is both the padding after its last line and the
+/// blank under it. So the first row wins that draws `col` with the text
+/// before it (or as a character of its own); then the row that draws the
+/// character before it; then any row that draws it; then the row drawing
+/// the nearest column before it.
+pub fn seg_drawing(segs: &[Seg], col: usize) -> usize {
+    let has = |s: &Seg, at: usize| s.cells.iter().any(|c| c.src == at);
+    let before = |s: &Seg| col.checked_sub(1).is_some_and(|b| has(s, b));
+    let own = |s: &Seg| s.cells.iter().any(|c| c.src == col && c.ch != ' ');
+    let tiers: [&dyn Fn(&Seg) -> bool; 3] = [
+        &|s| has(s, col) && (before(s) || own(s)),
+        &|s| before(s),
+        &|s| has(s, col),
+    ];
+    for tier in tiers {
+        if let Some(i) = segs.iter().position(tier) {
+            return i;
+        }
+    }
+    segs.iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            s.cells
+                .iter()
+                .filter(|c| c.src < col)
+                .map(|c| c.src)
+                .max()
+                .map(|m| (m, std::cmp::Reverse(i)))
+        })
+        .max()
+        .map_or(0, |(_, std::cmp::Reverse(i))| i)
+}
+
 /// One rendered character plus the source column it maps back to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cell {
@@ -393,6 +434,20 @@ impl Seg {
 /// Always returns at least one row, so an empty line still has somewhere to
 /// put the cursor.
 pub fn wrap_rline(line: &RLine, width: usize) -> Vec<Seg> {
+    // rows laid out already — a table row whose cells wrap — break where
+    // they say and nowhere else
+    if line.cells.iter().any(|c| c.ch == ROW_BREAK) {
+        return line
+            .cells
+            .split(|c| c.ch == ROW_BREAK)
+            .map(|cells| Seg {
+                cells: cells.to_vec(),
+                indent: 0,
+                guides: Vec::new(),
+                end_src: line.src_len,
+            })
+            .collect();
+    }
     if width == 0 {
         return vec![line.one_row()];
     }
@@ -4655,6 +4710,23 @@ pub(crate) fn split_row(src: &str) -> (Vec<TCell>, Vec<usize>) {
     (cells, pipes)
 }
 
+/// [`split_row`] with the cursor at source column `col`: a cursor in the
+/// whitespace after its cell's text — spaces just typed there — takes that
+/// whitespace into the cell, so the space shows and the cursor has a place
+/// after it.
+pub(crate) fn split_row_typing(src: &str, col: usize) -> (Vec<TCell>, Vec<usize>) {
+    let (mut cells, pipes) = split_row(src);
+    let Some(i) = pipes.windows(2).position(|w| w[0] < col && col <= w[1]) else {
+        return (cells, pipes);
+    };
+    if let Some(c) = cells.get_mut(i) {
+        if col > c.end() && c.start < col {
+            c.text = src.chars().skip(c.start).take(col - c.start).collect();
+        }
+    }
+    (cells, pipes)
+}
+
 pub(crate) fn align_of(spec: &str) -> Align {
     let t = spec.trim();
     match (t.starts_with(':'), t.ends_with(':')) {
@@ -4703,11 +4775,28 @@ struct TableLayout {
     widths: Vec<usize>,
 }
 
-/// Lay a table's rows out in aligned columns. `raw_row` is the row whose
-/// cells are shown as typed, markup and all — the cursor's row while the
-/// grid is being edited — so its columns are measured on the raw text.
-fn table_layout(rows: &[String], width: usize, raw_row: Option<usize>) -> TableLayout {
-    let parsed: Vec<(Vec<TCell>, Vec<usize>)> = rows.iter().map(|r| split_row(r)).collect();
+/// Lay a table's rows out in aligned columns. `raw` is the cursor while the
+/// grid is being edited — its row (block-relative) and source column — whose
+/// row's cells are shown as typed, markup and all, so its columns are
+/// measured on the raw text. Spaces typed at the end of the cursor's cell
+/// count as its text, or they would vanish into the padding until the next
+/// word began. A `wrap` grid breaks its cells at `<br>`, so a column is as
+/// wide as its widest line rather than its widest cell.
+fn table_layout(
+    rows: &[String],
+    width: usize,
+    raw: Option<(usize, usize)>,
+    wrap: bool,
+) -> TableLayout {
+    let raw_row = raw.map(|(r, _)| r);
+    let parsed: Vec<(Vec<TCell>, Vec<usize>)> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| match raw {
+            Some((rr, col)) if rr == i => split_row_typing(r, col),
+            _ => split_row(r),
+        })
+        .collect();
     let rule_row = rows.iter().position(|r| is_table_rule(r));
     let aligns: Vec<Align> = rule_row
         .map(|i| parsed[i].0.iter().map(|c| align_of(&c.text)).collect())
@@ -4720,10 +4809,34 @@ fn table_layout(rows: &[String], width: usize, raw_row: Option<usize>) -> TableL
         .map(|(i, (c, _))| {
             c.iter()
                 .map(|c| {
-                    if Some(i) == raw_row {
-                        str_width(&c.text)
+                    let cells: Vec<Cell> = if Some(i) == raw_row {
+                        c.text
+                            .chars()
+                            .enumerate()
+                            .map(|(k, ch)| Cell {
+                                ch,
+                                style: theme::PLAIN,
+                                src: c.start + k,
+                            })
+                            .collect()
                     } else {
-                        cells_width(&styled_cell(&c.text, theme::PLAIN))
+                        styled_cell(&c.text, theme::PLAIN)
+                            .into_iter()
+                            .map(|x| Cell {
+                                src: c.start + x.src,
+                                ..x
+                            })
+                            .collect()
+                    };
+                    // a wrapping grid breaks at a <br>: as wide as the widest line
+                    if wrap {
+                        cell_lines(&cells, &c.text, c.start)
+                            .iter()
+                            .map(|l| cells_width(l))
+                            .max()
+                            .unwrap_or(0)
+                    } else {
+                        cells_width(&cells)
                     }
                 })
                 .collect()
@@ -4738,8 +4851,15 @@ fn table_layout(rows: &[String], width: usize, raw_row: Option<usize>) -> TableL
     }
 }
 
-/// One remembered table layout: the rows, the width, and what they laid out to.
-type TableMemo = (Vec<String>, usize, Option<usize>, std::rc::Rc<TableLayout>);
+/// One remembered table layout: the rows, the width, the cursor, whether it
+/// wraps, and what they laid out to.
+type TableMemo = (
+    Vec<String>,
+    usize,
+    Option<(usize, usize)>,
+    bool,
+    std::rc::Rc<TableLayout>,
+);
 
 thread_local! {
     /// The last table laid out for the editor.
@@ -4747,63 +4867,72 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// `table_layout(rows, width)`, remembered for the most recent `(rows, width)`
+/// [`table_layout`], remembered for the most recent arguments
 /// so a table is measured once rather than once per row per pass — the same
 /// single slot `rendered_memo` keeps for a diagram, and for the same reason:
 /// the rows of one table are visited back to back, and an edit to any of them
 /// changes the key.
-fn layout_memo(rows: &[String], width: usize, raw_row: Option<usize>) -> std::rc::Rc<TableLayout> {
+fn layout_memo(
+    rows: &[String],
+    width: usize,
+    raw: Option<(usize, usize)>,
+    wrap: bool,
+) -> std::rc::Rc<TableLayout> {
     TABLE_MEMO.with(|memo| {
         let mut memo = memo.borrow_mut();
-        if let Some((r, w, rr, l)) = memo.as_ref() {
-            if r == rows && *w == width && *rr == raw_row {
+        if let Some((r, w, rr, wr, l)) = memo.as_ref() {
+            if r == rows && *w == width && *rr == raw && *wr == wrap {
                 return l.clone();
             }
         }
-        let l = std::rc::Rc::new(table_layout(rows, width, raw_row));
-        *memo = Some((rows.to_vec(), width, raw_row, l.clone()));
+        let l = std::rc::Rc::new(table_layout(rows, width, raw, wrap));
+        *memo = Some((rows.to_vec(), width, raw, wrap, l.clone()));
         l
     })
 }
 
-/// Draw row `row` of a table. Every source row is exactly one display row,
-/// separator included.
+/// Draw row `row` of a table on one display row, separator included: a cell
+/// too long for its column is cut with an ellipsis.
 fn table_line(rows: &[String], row: usize, width: usize) -> RLine {
-    table_row(&layout_memo(rows, width, None), rows, row, false)
+    table_row(
+        &layout_memo(rows, width, None, false),
+        rows,
+        row,
+        false,
+        false,
+    )
 }
 
-/// A table row drawn while the cursor is in the grid: `row` of the block
-/// `lines[block.start..=block.end]`, with the cursor's own row (`raw_row`,
-/// block-relative) shown as typed so every source column has a place on
-/// screen for the cursor to sit.
+/// A table row drawn as the editor's grid: `row` of the block
+/// `lines[block.start..=block.end]`. A cell too long for its column wraps
+/// within it, so the row may take several display rows, [`ROW_BREAK`]
+/// between them. `raw` is the cursor while it is in the table — its row
+/// (block-relative) and source column — and that row is shown as typed so
+/// every source column has a place on screen for the cursor to sit.
 pub fn table_line_editing(
     lines: &[String],
     block: &Block,
     row: usize,
     width: usize,
-    raw_row: usize,
+    raw: Option<(usize, usize)>,
 ) -> RLine {
     let rows = &lines[block.start..=block.end];
     let r = row - block.start;
-    table_row(
-        &layout_memo(rows, width, Some(raw_row)),
-        rows,
-        r,
-        r == raw_row,
-    )
+    let is_raw = raw.is_some_and(|(rr, _)| rr == r);
+    table_row(&layout_memo(rows, width, raw, true), rows, r, is_raw, true)
 }
 
 /// The rule drawn between two body rows of a table in the editor, to the
-/// same column widths as its rows. `raw_row` is the cursor's row, as for
+/// same column widths as its rows. `raw` is the cursor, as for
 /// [`table_line_editing`], so the layout is the one the rows use.
 pub fn table_rule_editing(
     lines: &[String],
     block: &Block,
     width: usize,
-    raw_row: Option<usize>,
+    raw: Option<(usize, usize)>,
 ) -> RLine {
     let rows = &lines[block.start..=block.end];
-    let l = layout_memo(rows, width, raw_row);
+    let l = layout_memo(rows, width, raw, true);
     // each cell says which column it is under, so a selection can tint the
     // rule beneath its cells; a joint belongs to no column
     let mut cells = Vec::new();
@@ -4830,10 +4959,10 @@ pub fn table_column_spans(
     lines: &[String],
     block: &Block,
     width: usize,
-    raw_row: Option<usize>,
+    raw: Option<(usize, usize)>,
 ) -> Vec<(usize, usize)> {
     let rows = &lines[block.start..=block.end];
-    let l = layout_memo(rows, width, raw_row);
+    let l = layout_memo(rows, width, raw, true);
     let mut x = 0;
     l.widths
         .iter()
@@ -4878,8 +5007,10 @@ pub fn tint_table_cells(
 }
 
 /// Row `row` of `rows`, drawn to the layout `l`. A `raw` row keeps every
-/// character of its cells rather than styling their markup.
-fn table_row(l: &TableLayout, rows: &[String], row: usize, raw: bool) -> RLine {
+/// character of its cells rather than styling their markup. A `wrap` row
+/// wraps a cell too long for its column over as many display rows as it
+/// needs; otherwise the cell is cut with an ellipsis.
+fn table_row(l: &TableLayout, rows: &[String], row: usize, raw: bool, wrap: bool) -> RLine {
     let TableLayout {
         parsed,
         rule_row,
@@ -4910,19 +5041,16 @@ fn table_row(l: &TableLayout, rows: &[String], row: usize, raw: bool) -> RLine {
         theme::PLAIN
     };
     let (row_cells, pipes) = &parsed[row];
-    let mut cells: Vec<Cell> = Vec::new();
+    // each column's display lines, padded to its width
+    let mut columns: Vec<(Vec<Vec<Cell>>, usize)> = Vec::new();
     for (ci, w) in widths.iter().enumerate() {
-        if ci > 0 {
-            let pipe = pipes.get(ci).copied().unwrap_or(0);
-            cells.extend(at(COL_SEP, theme::marker(), pipe));
-        }
         let empty = TCell {
             start: pipes.last().copied().unwrap_or(0),
             text: String::new(),
         };
         let cell = row_cells.get(ci).unwrap_or(&empty);
         let align = aligns.get(ci).copied().unwrap_or(Align::Left);
-        let styled = if raw {
+        let styled: Vec<Cell> = if raw {
             cell.text
                 .chars()
                 .enumerate()
@@ -4935,17 +5063,114 @@ fn table_row(l: &TableLayout, rows: &[String], row: usize, raw: bool) -> RLine {
         } else {
             styled_cell(&cell.text, body)
         };
-        let styled = truncate_cells(styled, *w);
-        let (left, right) = pad_for(cells_width(&styled), *w, align);
-        cells.extend(at(&" ".repeat(left), body, cell.start));
-        cells.extend(styled.into_iter().map(|c| Cell {
-            src: cell.start + c.src,
-            ..c
-        }));
+        let styled: Vec<Cell> = styled
+            .into_iter()
+            .map(|c| Cell {
+                src: cell.start + c.src,
+                ..c
+            })
+            .collect();
         let after = cell.start + cell.text.chars().count();
-        cells.extend(at(&" ".repeat(right), body, after));
+        let pieces = if wrap {
+            cell_lines(&styled, &cell.text, cell.start)
+                .iter()
+                .flat_map(|line| wrap_cells(line, *w))
+                .collect()
+        } else {
+            vec![truncate_cells(styled, *w)]
+        };
+        let n = pieces.len();
+        let lines = pieces
+            .into_iter()
+            .enumerate()
+            .map(|(k, piece)| {
+                // padding stands for the text beside it: the start of the
+                // first line, the end of the last, and the space a break
+                // dropped between two
+                let first = if k == 0 {
+                    cell.start
+                } else {
+                    piece.first().map_or(after, |c| c.src)
+                };
+                let last = if k + 1 == n {
+                    after
+                } else {
+                    piece.last().map_or(after, |c| c.src + 1)
+                };
+                let (left, right) = pad_for(cells_width(&piece), *w, align);
+                let mut out = at(&" ".repeat(left), body, first);
+                out.extend(piece);
+                out.extend(at(&" ".repeat(right), body, last));
+                out
+            })
+            .collect();
+        columns.push((lines, after));
+    }
+    let height = columns
+        .iter()
+        .map(|(l, _)| l.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mut cells: Vec<Cell> = Vec::new();
+    for line in 0..height {
+        if line > 0 {
+            cells.push(Cell {
+                ch: ROW_BREAK,
+                style: body,
+                src: PAD,
+            });
+        }
+        for (ci, (lines, after)) in columns.iter().enumerate() {
+            if ci > 0 {
+                let pipe = pipes.get(ci).copied().unwrap_or(0);
+                cells.extend(at(COL_SEP, theme::marker(), pipe));
+            }
+            match lines.get(line) {
+                Some(l) => cells.extend_from_slice(l),
+                // under a cell that ran out of lines: its end, blank
+                None => cells.extend(at(&" ".repeat(widths[ci]), body, *after)),
+            }
+        }
     }
     done(cells, src)
+}
+
+/// A table cell's drawn `cells` split into its lines: a cell is one source
+/// line, so a `<br>` is the only line break it has. Each line ends with the
+/// break that ends it, drawn or typed. `text` is the cell's source text,
+/// starting at source column `start`.
+fn cell_lines(cells: &[Cell], text: &str, start: usize) -> Vec<Vec<Cell>> {
+    let chars: Vec<char> = text.chars().collect();
+    let breaks: Vec<usize> = (0..chars.len())
+        .filter_map(|i| html_tag_at(&chars, i))
+        .filter(|t| t.name == "br")
+        .map(|t| start + t.end)
+        .collect();
+    let mut lines = vec![Vec::new()];
+    let mut next = breaks.iter().peekable();
+    for c in cells {
+        let mut split = false;
+        while next.peek().is_some_and(|b| c.src != PAD && c.src >= **b) {
+            next.next();
+            split = true;
+        }
+        if split {
+            lines.push(Vec::new());
+        }
+        lines.last_mut().expect("one line at least").push(*c);
+    }
+    lines
+}
+
+/// `cells` word-wrapped to `width` display columns, one list per line; a
+/// word longer than the column is cut. The spaces a break falls on go.
+fn wrap_cells(cells: &[Cell], width: usize) -> Vec<Vec<Cell>> {
+    let chars: Vec<char> = cells.iter().map(|c| c.ch).collect();
+    wrap_breaks(&chars, width, width)
+        .into_iter()
+        .map(|(s, e)| cells[s..e].to_vec())
+        .collect()
 }
 
 #[cfg(test)]
@@ -5510,7 +5735,7 @@ mod tests {
             start: 0,
             end: 1,
         };
-        let mut l = table_line_editing(&lines, &block, 0, 40, 0);
+        let mut l = table_line_editing(&lines, &block, 0, 40, Some((0, 0)));
         let tint = Style::new().bg(ratatui::style::Color::Red);
         tint_table_cells(&mut l, &lines[0], &|c| c >= 1, tint);
         let text: String = l.cells.iter().map(|c| c.ch).collect();
@@ -6614,6 +6839,74 @@ mod tests {
         // the runaway column gave up the space, not the short one beside it
         assert_eq!(text(&table_line(&rows, 0, 16)), "a │ bbbbbbbbbbb…");
         assert_eq!(text(&table_line(&rows, 2, 16)), "1 │ 2           ");
+    }
+
+    #[test]
+    fn a_long_cell_wraps_within_its_column_in_the_editor() {
+        let rows = buf("| a | bbb ccc ddd |\n| --- | --- |\n| 1 | 2 |");
+        let block = Block {
+            kind: BlockKind::Table,
+            start: 0,
+            end: 2,
+        };
+        let l = table_line_editing(&rows, &block, 0, 11, None);
+        let segs = wrap_rline(&l, 11);
+        let drawn: Vec<String> = segs
+            .iter()
+            .map(|s| s.cells.iter().map(|c| c.ch).collect())
+            .collect();
+        // the short column stays put, blank under itself
+        assert_eq!(drawn, vec!["a │ bbb ccc", "  │ ddd    "]);
+        // "ddd" is source column 14, drawn on the second row
+        assert_eq!(segs[1].display_to_source(4), 14);
+        assert_eq!(seg_drawing(&segs, 14), 1);
+        assert_eq!(seg_drawing(&segs, 6), 0);
+        // the end of the cell's text is after "ddd"
+        assert_eq!(seg_drawing(&segs, 17), 1);
+        // and the end of "a", which fills its column, is on the first row
+        // rather than the blank under it
+        assert_eq!(seg_drawing(&segs, 3), 0);
+        assert_eq!(segs[1].source_to_display(17), 7);
+        // under "a", a click lands at the end of it
+        assert_eq!(segs[1].display_to_source(0), 3);
+    }
+
+    #[test]
+    fn a_br_breaks_a_cell_in_the_editor_grid() {
+        let rows = buf("| a | x<br>y |\n| --- | --- |");
+        let block = Block {
+            kind: BlockKind::Table,
+            start: 0,
+            end: 1,
+        };
+        let drawn = |raw| -> Vec<String> {
+            wrap_rline(&table_line_editing(&rows, &block, 0, 40, raw), 40)
+                .iter()
+                .map(|s| s.cells.iter().map(|c| c.ch).collect::<String>())
+                .map(|t| t.trim_end().to_string())
+                .collect()
+        };
+        // drawn, the break is a dim return at the end of the line it ends
+        assert_eq!(drawn(None), vec!["a │ x↵", "  │ y"]);
+        // typed, the tag itself ends it
+        assert_eq!(drawn(Some((0, 7))), vec!["a │ x<br>", "  │ y"]);
+    }
+
+    #[test]
+    fn a_space_typed_at_the_end_of_a_cell_is_drawn() {
+        let rows = buf("| ab  | c |\n| --- | --- |");
+        let block = Block {
+            kind: BlockKind::Table,
+            start: 0,
+            end: 1,
+        };
+        // the cursor after "ab " — the space is the cell's, not its padding
+        let l = table_line_editing(&rows, &block, 0, 40, Some((0, 5)));
+        let row = l.one_row();
+        assert_eq!(row.source_to_display(5), 3);
+        // away from the cursor the same space is padding again
+        let l = table_line_editing(&rows, &block, 0, 40, Some((0, 2)));
+        assert_eq!(text(&l), "ab │ c");
     }
 
     #[test]

@@ -429,6 +429,13 @@ pub fn cell_end(line: &str, c: usize) -> usize {
     cell_span(line, c).map_or(0, |(_, e)| e)
 }
 
+/// Is source column `col` between the pipes of one of `line`'s cells — its
+/// text or its padding, never on a pipe or outside the row?
+pub fn in_cell(line: &str, col: usize) -> bool {
+    let (_, pipes) = md::split_row(line);
+    pipes.windows(2).any(|w| w[0] < col && col <= w[1])
+}
+
 /// Where the cursor settles on a grid row: inside the cell it is in, or at
 /// the edge of the nearest one when it has drifted into a pipe or padding.
 /// `forward` says which neighbour wins from a gap.
@@ -453,6 +460,20 @@ mod tests {
 
     fn lines(s: &str) -> Vec<String> {
         s.lines().map(String::from).collect()
+    }
+
+    #[test]
+    fn a_column_between_a_cells_pipes_is_in_it() {
+        let line = "| ab  | c |";
+        // the text, the padding after it, and just before the next pipe
+        assert!(in_cell(line, 2));
+        assert!(in_cell(line, 5));
+        assert!(in_cell(line, 6));
+        // the opening pipe itself, and past the row
+        assert!(!in_cell(line, 0));
+        assert!(!in_cell(line, 12));
+        // the padding is not the cell's text: a cursor there settles back
+        assert_eq!(settle(line, 5, false), 4);
     }
 
     #[test]

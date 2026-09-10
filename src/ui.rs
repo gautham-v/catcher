@@ -208,9 +208,9 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                 let mut h = *h;
                 if app.hovered_table_edge(&blocks, *row, TableEdge::Top) && h > 1 {
                     let block = *crate::md::block_at(&blocks, *row).expect("a table row");
-                    let raw = Some(app.editor.cursor.0)
-                        .filter(|c| block.contains(*c))
-                        .map(|c| c - block.start);
+                    let raw = Some(app.editor.cursor)
+                        .filter(|c| block.contains(c.0))
+                        .map(|(r, c)| (r - block.start, c));
                     let inner = width.saturating_sub(crate::app::TABLE_GUTTER);
                     let spans =
                         crate::md::table_column_spans(app.editor.lines(), &block, inner, raw);
@@ -302,9 +302,9 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                         app.editor.lines(),
                         &block,
                         inner,
-                        Some(app.editor.cursor.0)
-                            .filter(|c| block.contains(*c))
-                            .map(|c| c - block.start),
+                        Some(app.editor.cursor)
+                            .filter(|c| block.contains(c.0))
+                            .map(|(r, c)| (r - block.start, c)),
                     );
                     // under two selected rows the rule is part of the block
                     if let Some(sel) = app.cell_sel.filter(|s| s.start == block.start) {
@@ -345,9 +345,9 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                 if app.hovered_table_edge(&blocks, *row, TableEdge::Bottom) {
                     // centred under the columns, gutter and all
                     let block = *crate::md::block_at(&blocks, *row).expect("a table row");
-                    let raw = Some(app.editor.cursor.0)
-                        .filter(|c| block.contains(*c))
-                        .map(|c| c - block.start);
+                    let raw = Some(app.editor.cursor)
+                        .filter(|c| block.contains(c.0))
+                        .map(|(r, c)| (r - block.start, c));
                     let inner = width.saturating_sub(crate::app::TABLE_GUTTER);
                     let spans =
                         crate::md::table_column_spans(app.editor.lines(), &block, inner, raw);

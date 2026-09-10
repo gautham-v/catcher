@@ -347,6 +347,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
                 "in a table: next / previous cell; past the last, a new row",
             ),
             ("↵", "in a table: a row below"),
+            ("⇧↵", "in a table: a line break within the cell (<br>)"),
             ("esc", "in a table: show its source, and back"),
             (
                 "⇧↑↓←→ / drag",
@@ -3913,20 +3914,22 @@ impl App {
         let select = key.modifiers.contains(KeyModifiers::SHIFT);
         let before = self.editor.cursor;
         if self.table_key(key) {
-            self.settle_table_cursor(before);
+            self.settle_table_cursor(before, false);
             self.leave_folds(before.0);
             return;
         }
+        let mut typed = false;
         match key.code {
             KeyCode::Up if plain => self.move_vertical(false, select),
             KeyCode::Down if plain => self.move_vertical(true, select),
             _ => {
                 if self.editor.on_key(key) {
                     self.sync_editor_to_note();
+                    typed = true;
                 }
             }
         }
-        self.settle_table_cursor(before);
+        self.settle_table_cursor(before, typed);
         self.leave_folds(before.0);
         self.refresh_complete();
     }
@@ -4626,7 +4629,12 @@ impl App {
         let (row, col) = self.editor.cursor;
         let segs = self.wrapped(row, blocks, width);
         let last = segs.len().saturating_sub(1);
-        let i = segs.iter().position(|s| s.owns_src(col)).unwrap_or(last);
+        let i = if self.table_grid_at(blocks, row) {
+            // a wrapped table row's rows interleave its cells' source
+            md::seg_drawing(&segs, col)
+        } else {
+            segs.iter().position(|s| s.owns_src(col)).unwrap_or(last)
+        };
         (i, segs.get(i).map_or(0, |s| s.source_to_display(col)))
     }
 
@@ -4637,38 +4645,62 @@ impl App {
     fn move_vertical(&mut self, down: bool, select: bool) {
         let width = self.editor_area.width.max(1) as usize;
         let blocks = self.blocks();
-        let (row, _) = self.editor.cursor;
-        let (seg, dcol) = self.cursor_seg(&blocks, width);
+        let (row, now) = self.editor.cursor;
+        let (mut seg, dcol) = self.cursor_seg(&blocks, width);
         let segs = self.wrapped(row, &blocks, width);
-        let target = if down && seg + 1 < segs.len() {
-            Some((row, seg + 1))
-        } else if !down && seg > 0 {
-            Some((row, seg - 1))
-        } else if down {
-            // the next line on screen, which is past a fold rather than in it
-            self.visible.next_visible(row + 1).map(|r| (r, 0))
-        } else {
-            row.checked_sub(1)
-                .and_then(|r| self.visible.prev_visible(r))
-                .map(|r| (r, usize::MAX))
-        };
-        let Some((trow, tseg)) = target else {
-            // already on the first/last display row: go to the buffer's edge
-            let to = if down {
-                let last = self.editor.lines().len() - 1;
-                (last, self.editor.lines()[last].chars().count())
+        loop {
+            let target = if down && seg + 1 < segs.len() {
+                Some((row, seg + 1))
+            } else if !down && seg > 0 {
+                Some((row, seg - 1))
+            } else if down {
+                // the next line on screen, which is past a fold rather than in it
+                self.visible.next_visible(row + 1).map(|r| (r, 0))
             } else {
-                (0, 0)
+                row.checked_sub(1)
+                    .and_then(|r| self.visible.prev_visible(r))
+                    .map(|r| (r, usize::MAX))
             };
-            self.editor.move_cursor(to, select);
+            let Some((trow, tseg)) = target else {
+                // already on the first/last display row: go to the buffer's edge
+                let to = if down {
+                    let last = self.editor.lines().len() - 1;
+                    (last, self.editor.lines()[last].chars().count())
+                } else {
+                    (0, 0)
+                };
+                self.editor.move_cursor(to, select);
+                return;
+            };
+            let tsegs = self.wrapped(trow, &blocks, width);
+            let tseg = tseg.min(tsegs.len().saturating_sub(1));
+            let mut col = tsegs
+                .get(tseg)
+                .map_or(0, |s: &md::Seg| s.display_to_source(dcol));
+            // in a grid the cursor keeps to its column: a wrapped cell's
+            // rows are drawn beside its neighbours', and a separator or a
+            // shorter neighbour must not pull it sideways
+            if let Some((_, _, _, c)) = self.table_cell() {
+                let same_table = md::block_at(&blocks, row)
+                    .is_some_and(|b| b.contains(trow) && self.table_grid_at(&blocks, trow));
+                let span = self
+                    .editor
+                    .lines()
+                    .get(trow)
+                    .and_then(|l| crate::table::cell_span(l, c));
+                if let Some((s, e)) = span.filter(|_| same_table) {
+                    col = col.clamp(s, e);
+                }
+            }
+            // under a short cell of a wrapped table row the next row down
+            // stands for where the cursor already is: keep going
+            if trow == row && col == now {
+                seg = tseg;
+                continue;
+            }
+            self.editor.move_cursor((trow, col), select);
             return;
-        };
-        let tsegs = self.wrapped(trow, &blocks, width);
-        let tseg = tseg.min(tsegs.len().saturating_sub(1));
-        let col = tsegs
-            .get(tseg)
-            .map_or(0, |s: &md::Seg| s.display_to_source(dcol));
-        self.editor.move_cursor((trow, col), select);
+        }
     }
 
     /// Every block in the buffer. Cheap enough to recompute per frame.
@@ -5468,7 +5500,7 @@ impl App {
             self.cell_sel = None;
             let before = self.editor.cursor;
             self.editor.set_cursor(pos);
-            self.settle_table_cursor(before);
+            self.settle_table_cursor(before, false);
             self.editor.anchor = Some(self.editor.cursor);
             self.dragging = true;
             // a press in a grid cell may become a drag across cells
@@ -5589,11 +5621,10 @@ fn view_line(
         }
         if block.kind == md::BlockKind::Table && table_source != Some(block.start) {
             let inner = width.saturating_sub(TABLE_GUTTER);
-            let mut line = if block.contains(cursor_row) {
-                md::table_line_editing(lines, block, row, inner, cursor_row - block.start)
-            } else {
-                md::style_block_line(lines, block, row, inner)
-            };
+            let raw = block
+                .contains(cursor_row)
+                .then(|| (cursor_row - block.start, cursor.1));
+            let mut line = md::table_line_editing(lines, block, row, inner, raw);
             if let Some(sel) = cell_sel.filter(|s| s.start == block.start) {
                 if let Some(table) = crate::table::Table::parse(&lines[block.start..=block.end]) {
                     let rect = sel.rect(table.rows.len(), table.cols());
@@ -5641,14 +5672,27 @@ fn fold_key_takes(key: &KeyEvent, on_heading: bool) -> bool {
 /// A table row with its gutter in front: blank, or the grip when the
 /// pointer is beside this row. The gutter stands for source column 0, so a
 /// click on it lands at the row's start and settles into the first cell.
+/// The rows a wrapped cell carries under it get a blank one that stands
+/// for nothing, so a click there lands in the first column beside it.
 fn with_gutter(mut line: md::RLine, grip: bool) -> md::RLine {
     let text = if grip { "⠿ " } else { "  " };
-    let cells = text.chars().map(|ch| md::Cell {
-        ch,
-        style: crate::theme::state(),
-        src: 0,
-    });
-    line.cells.splice(0..0, cells);
+    let gutter = |text: &str, src: usize| {
+        text.chars()
+            .map(|ch| md::Cell {
+                ch,
+                style: crate::theme::state(),
+                src,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut cells = gutter(text, 0);
+    for c in line.cells {
+        cells.push(c);
+        if c.ch == md::ROW_BREAK {
+            cells.extend(gutter("  ", md::PAD));
+        }
+    }
+    line.cells = cells;
     line
 }
 

@@ -401,15 +401,19 @@ impl App {
 
     /// Is the cursor in a table drawn as a grid?
     pub(super) fn in_table_grid(&self) -> bool {
-        let row = self.editor.cursor.0;
-        let blocks = self.blocks();
-        md::block_at(&blocks, row)
+        self.table_grid_at(&self.blocks(), self.editor.cursor.0)
+    }
+
+    /// Is line `row` part of a table drawn as a grid?
+    pub(super) fn table_grid_at(&self, blocks: &[md::Block], row: usize) -> bool {
+        md::block_at(blocks, row)
             .is_some_and(|b| b.kind == md::BlockKind::Table && self.table_source != Some(b.start))
     }
 
     /// The keys that mean something else with the cursor in a grid: tab and
-    /// enter walk and grow the table, esc shows its source, and a delete at a
-    /// cell's edge is refused rather than allowed to eat a pipe. Returns true
+    /// enter walk and grow the table, shift-enter breaks the line within the
+    /// cell, esc shows its source, and a delete at a cell's edge is refused
+    /// rather than allowed to eat a pipe. Returns true
     /// when the key was taken.
     pub(super) fn table_key(&mut self, key: KeyEvent) -> bool {
         let (row, col) = self.editor.cursor;
@@ -505,6 +509,12 @@ impl App {
             }
             KeyCode::BackTab => {
                 self.table_step(false);
+                true
+            }
+            KeyCode::Enter if shift && !modified => {
+                // a cell is one source line, so its line break is markup
+                self.editor.insert_str("<br>");
+                self.sync_editor_to_note();
                 true
             }
             KeyCode::Enter if !modified => {
@@ -664,8 +674,10 @@ impl App {
     /// After any move: a cursor in a grid sits in a cell, never on a pipe,
     /// in the padding or on the separator row; and a table whose source was
     /// showing goes back to a grid once the cursor has left it. `before` is
-    /// where the cursor was, which says which way it was going.
-    pub(super) fn settle_table_cursor(&mut self, before: Pos) {
+    /// where the cursor was, which says which way it was going. `typed` says
+    /// the key changed the text: a space typed at the end of a cell leaves the
+    /// cursor after it, in what would otherwise read as the cell's padding.
+    pub(super) fn settle_table_cursor(&mut self, before: Pos, typed: bool) {
         let (row, col) = self.editor.cursor;
         let blocks = self.blocks();
         let block = md::block_at(&blocks, row)
@@ -701,6 +713,9 @@ impl App {
                 self.editor.set_cursor(before);
                 return;
             }
+        }
+        if typed && row == before.0 && crate::table::in_cell(&self.editor.lines()[row], col) {
+            return;
         }
         let forward = row != before.0 || col > before.1;
         let col = crate::table::settle(&self.editor.lines()[row], col, forward);
