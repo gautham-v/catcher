@@ -4832,7 +4832,7 @@ fn table_layout(
                     if wrap {
                         cell_lines(&cells, &c.text, c.start)
                             .iter()
-                            .map(|l| cells_width(l))
+                            .map(|l| cells_width(&l.cells))
                             .max()
                             .unwrap_or(0)
                     } else {
@@ -5071,32 +5071,34 @@ fn table_row(l: &TableLayout, rows: &[String], row: usize, raw: bool, wrap: bool
             })
             .collect();
         let after = cell.start + cell.text.chars().count();
-        let pieces = if wrap {
+        // each display line of the cell, with the source columns its
+        // padding stands for: the start and end of the line it is part of,
+        // and the space a wrap dropped between two rows of one line
+        let pieces: Vec<(Vec<Cell>, usize, usize)> = if wrap {
             cell_lines(&styled, &cell.text, cell.start)
-                .iter()
-                .flat_map(|line| wrap_cells(line, *w))
+                .into_iter()
+                .flat_map(|line| {
+                    let rows = wrap_cells(&line.cells, *w);
+                    let m = rows.len();
+                    rows.into_iter().enumerate().map(move |(j, piece)| {
+                        let first = match piece.first() {
+                            Some(c) if j > 0 => c.src,
+                            _ => line.start,
+                        };
+                        let last = match piece.last() {
+                            Some(c) if j + 1 < m => c.src + 1,
+                            _ => line.end,
+                        };
+                        (piece, first, last)
+                    })
+                })
                 .collect()
         } else {
-            vec![truncate_cells(styled, *w)]
+            vec![(truncate_cells(styled, *w), cell.start, after)]
         };
-        let n = pieces.len();
         let lines = pieces
             .into_iter()
-            .enumerate()
-            .map(|(k, piece)| {
-                // padding stands for the text beside it: the start of the
-                // first line, the end of the last, and the space a break
-                // dropped between two
-                let first = if k == 0 {
-                    cell.start
-                } else {
-                    piece.first().map_or(after, |c| c.src)
-                };
-                let last = if k + 1 == n {
-                    after
-                } else {
-                    piece.last().map_or(after, |c| c.src + 1)
-                };
+            .map(|(piece, first, last)| {
                 let (left, right) = pad_for(cells_width(&piece), *w, align);
                 let mut out = at(&" ".repeat(left), body, first);
                 out.extend(piece);
@@ -5136,29 +5138,48 @@ fn table_row(l: &TableLayout, rows: &[String], row: usize, raw: bool, wrap: bool
     done(cells, src)
 }
 
-/// A table cell's drawn `cells` split into its lines: a cell is one source
-/// line, so a `<br>` is the only line break it has. Each line ends with the
-/// break that ends it, drawn or typed. `text` is the cell's source text,
-/// starting at source column `start`.
-fn cell_lines(cells: &[Cell], text: &str, start: usize) -> Vec<Vec<Cell>> {
+/// The `<br>` tags on a table row's `text`, as source column ranges offset
+/// by `start`.
+pub(crate) fn br_tags(text: &str, start: usize) -> Vec<(usize, usize)> {
     let chars: Vec<char> = text.chars().collect();
-    let breaks: Vec<usize> = (0..chars.len())
-        .filter_map(|i| html_tag_at(&chars, i))
-        .filter(|t| t.name == "br")
-        .map(|t| start + t.end)
+    (0..chars.len())
+        .filter_map(|i| html_tag_at(&chars, i).map(|t| (i, t)))
+        .filter(|(_, t)| t.name == "br")
+        .map(|(i, t)| (start + i, start + t.end))
+        .collect()
+}
+
+/// One line of a table cell in the editor's grid: its drawn cells, and the
+/// source columns it runs between — from the cell's start or the end of the
+/// `<br>` before it, to the start of the `<br>` after it or the end of the
+/// cell's text.
+struct CellLine {
+    cells: Vec<Cell>,
+    start: usize,
+    end: usize,
+}
+
+/// A table cell's drawn `cells` split into its lines: a cell is one source
+/// line, so a `<br>` is the only line break it has. The tags themselves are
+/// not drawn — typed or not, a break is a new line — and a break at the end
+/// of the cell leaves an empty line for the cursor to stand on. `text` is the
+/// cell's source text, starting at source column `start`.
+fn cell_lines(cells: &[Cell], text: &str, start: usize) -> Vec<CellLine> {
+    let tags = br_tags(text, start);
+    let after = start + text.chars().count();
+    let mut lines: Vec<CellLine> = (0..=tags.len())
+        .map(|i| CellLine {
+            cells: Vec::new(),
+            start: if i == 0 { start } else { tags[i - 1].1 },
+            end: tags.get(i).map_or(after, |t| t.0),
+        })
         .collect();
-    let mut lines = vec![Vec::new()];
-    let mut next = breaks.iter().peekable();
     for c in cells {
-        let mut split = false;
-        while next.peek().is_some_and(|b| c.src != PAD && c.src >= **b) {
-            next.next();
-            split = true;
+        if tags.iter().any(|(s, e)| c.src >= *s && c.src < *e) {
+            continue;
         }
-        if split {
-            lines.push(Vec::new());
-        }
-        lines.last_mut().expect("one line at least").push(*c);
+        let i = tags.iter().filter(|(_, e)| *e <= c.src).count();
+        lines[i].cells.push(*c);
     }
     lines
 }
@@ -6886,10 +6907,20 @@ mod tests {
                 .map(|t| t.trim_end().to_string())
                 .collect()
         };
-        // drawn, the break is a dim return at the end of the line it ends
-        assert_eq!(drawn(None), vec!["a │ x↵", "  │ y"]);
-        // typed, the tag itself ends it
-        assert_eq!(drawn(Some((0, 7))), vec!["a │ x<br>", "  │ y"]);
+        // the tag is not drawn, whether or not the cursor is on the row
+        assert_eq!(drawn(None), vec!["a │ x", "  │ y"]);
+        assert_eq!(drawn(Some((0, 7))), vec!["a │ x", "  │ y"]);
+        // a break that ends the cell leaves an empty line, where the cursor
+        // after it stands
+        let rows = buf("| a | x<br> |\n| --- | --- |");
+        let l = table_line_editing(&rows, &block, 0, 40, Some((0, 11)));
+        let segs = wrap_rline(&l, 40);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(seg_drawing(&segs, 11), 1);
+        assert_eq!(segs[1].source_to_display(11), 4);
+        // and the cursor before it stays at the end of the text
+        assert_eq!(seg_drawing(&segs, 7), 0);
+        assert_eq!(segs[0].source_to_display(7), 5);
     }
 
     #[test]

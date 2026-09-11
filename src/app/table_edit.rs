@@ -530,6 +530,22 @@ impl App {
             }
             KeyCode::Backspace | KeyCode::Delete => {
                 let line = &self.editor.lines()[row];
+                // a line break goes in one piece, the way it was drawn
+                let tag = md::br_tags(line, 0).into_iter().find(|(s, e)| {
+                    if key.code == KeyCode::Backspace {
+                        *e == col
+                    } else {
+                        *s == col
+                    }
+                });
+                if let Some((s, e)) = tag.filter(|_| !modified && self.editor.selection().is_none())
+                {
+                    self.editor.anchor = Some((row, s));
+                    self.editor.set_cursor((row, e));
+                    self.editor.backspace();
+                    self.sync_editor_to_note();
+                    return true;
+                }
                 let Some(i) = crate::table::cell_at(line, col, true) else {
                     return true;
                 };
@@ -718,7 +734,14 @@ impl App {
             return;
         }
         let forward = row != before.0 || col > before.1;
-        let col = crate::table::settle(&self.editor.lines()[row], col, forward);
+        let line = &self.editor.lines()[row];
+        let col = crate::table::settle(line, col, forward);
+        // a <br> is drawn as a line break, not as text: the cursor stands on
+        // one side of it or the other
+        let col = md::br_tags(line, 0)
+            .into_iter()
+            .find(|(s, e)| col > *s && col < *e)
+            .map_or(col, |(s, e)| if forward { e } else { s });
         self.editor.set_cursor((row, col));
     }
 
