@@ -208,7 +208,7 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 47] = [
+const COMMANDS: [Command; 48] = [
     Command::Act(Action::NewNote),
     Command::NewFromTemplate,
     Command::SetTemplatesDir,
@@ -222,6 +222,7 @@ const COMMANDS: [Command; 47] = [
     Command::Act(Action::HideProperties),
     Command::Act(Action::ToggleOpener),
     Command::Act(Action::ToggleListGuides),
+    Command::Act(Action::ToggleMentions),
     Command::Act(Action::DeleteNote),
     Command::Act(Action::RenameFile),
     Command::MoveFile,
@@ -304,6 +305,7 @@ impl Command {
                 Action::HideProperties => ("Hide properties", "the front matter off the page entirely; Toggle properties brings it back"),
                 Action::ToggleOpener => ("Toggle opener", "the decode animation when catcher starts: on or off"),
                 Action::ToggleListGuides => ("Toggle list guides", "the rule down the left of a nested list: on or off"),
+                Action::ToggleMentions => ("Toggle linked mentions (hide / show)", "the notes that link here, at the foot of the page: on or off"),
                 Action::ExtractNote => ("Extract to new note", "the selection becomes a note beside this one, a [[link]] stays"),
                 // the rest have no palette row; COMMANDS never names them
                 _ => ("", ""),
@@ -4547,6 +4549,16 @@ impl App {
                 let word = if self.config.list_guides { "yes" } else { "no" };
                 self.save_setting("list_guides", word);
             }
+            Action::ToggleMentions => {
+                self.overlay = Overlay::None;
+                self.config.linked_mentions = !self.config.linked_mentions;
+                let word = if self.config.linked_mentions {
+                    "yes"
+                } else {
+                    "no"
+                };
+                self.save_setting("linked_mentions", word);
+            }
             Action::NewNote => {
                 self.overlay = Overlay::None;
                 self.new_note();
@@ -6349,6 +6361,7 @@ mod tests {
                 "Hide properties",
                 "Toggle opener",
                 "Toggle list guides",
+                "Toggle linked mentions (hide / show)",
                 "Delete note",
                 "Rename file",
                 "Move to folder",
@@ -6885,6 +6898,21 @@ mod tests {
             assert!(c.action().is_some());
             assert!(!c.label().0.is_empty());
         }
+    }
+
+    #[test]
+    fn toggle_linked_mentions_is_a_palette_command_that_flips_the_setting() {
+        let c = Command::Act(Action::ToggleMentions);
+        assert!(COMMANDS.contains(&c));
+        assert_eq!(c.action(), Some(Action::ToggleMentions));
+        for q in ["mentions", "hide", "linked"] {
+            assert!(crate::search::fuzzy(q, c.label().0).is_some(), "{q}");
+        }
+        let map = crate::keys::Keymap::default();
+        assert!(map
+            .settings_rows()
+            .iter()
+            .any(|(k, v, _)| *k == "key_mentions" && v == "none"));
     }
 
     #[test]

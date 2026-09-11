@@ -54,6 +54,7 @@ pub enum Action {
     HideProperties,
     ToggleOpener,
     ToggleListGuides,
+    ToggleMentions,
     Tags,
     Find,
     InsertTemplate,
@@ -302,6 +303,12 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_list_guides",
         None,
         "the rule down a nested list, on or off",
+    ),
+    (
+        Action::ToggleMentions,
+        "key_mentions",
+        None,
+        "linked mentions — the notes that link here, at the foot, on or off",
     ),
     (
         Action::Find,

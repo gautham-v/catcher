@@ -647,6 +647,8 @@ fn preview_key(app: &mut App, area: Rect) -> u64 {
     app.folded_lines().hash(&mut h);
     // the footer's rows rather than a scan counter: a scan still running
     // answers with no rows, and the rows it lands with are what changes
+    // flipped from the palette, so the generation alone would miss it
+    app.config.linked_mentions.hash(&mut h);
     if app.config.linked_mentions && app.config.wikilinks {
         app.linked_mentions().hash(&mut h);
         app.mention_folds.hash(&mut h);
