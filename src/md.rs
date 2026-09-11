@@ -4344,6 +4344,23 @@ impl EmbedCard {
             None => self.title.clone(),
         }
     }
+
+    /// The title row as it is drawn: what the card shows leads in bright
+    /// bold, and the note a section came from steps back to grey, so
+    /// `Projects › Story Matrix` reads as a heading with its address.
+    pub fn head_spans(&self) -> Vec<(String, Style)> {
+        if self.found == embeds::Found::Missing {
+            return vec![(format!("{} (no such note)", self.head()), theme::grey())];
+        }
+        match &self.heading {
+            Some(h) => vec![
+                (self.title.clone(), theme::grey()),
+                (" › ".to_string(), theme::marker()),
+                (h.clone(), embed_title()),
+            ],
+            None => vec![(self.title.clone(), embed_title())],
+        }
+    }
 }
 
 /// The card for `embed`: the target resolved, the file read, the section
@@ -4540,16 +4557,24 @@ fn read_embed(path: &std::path::Path) -> Option<std::rc::Rc<String>> {
     })
 }
 
-/// The colour an embed card's rail and title are drawn in.
-pub fn embed_style() -> Style {
-    theme::callout("note")
+/// The part of a card's title row that leads: the note, or the section of
+/// it, that the card shows.
+pub fn embed_title() -> Style {
+    theme::bright().add_modifier(Modifier::BOLD)
 }
 
-/// The card's rail: a quote bar and a space.
-fn embed_rail(style: Style, src: usize) -> Vec<Cell> {
-    let mut cells = at(theme::QUOTE_BAR, style, src);
-    cells.extend(at(" ", style, src));
-    cells
+/// An attachment card's one row, in its styles: the file leading when it
+/// is there, grey when it is not.
+pub fn attachment_spans(name: &str, label: Option<&str>) -> Vec<(String, Style)> {
+    match attachment_card(name, label) {
+        (text, true) => vec![(text, embed_title())],
+        (text, false) => vec![(text, theme::grey())],
+    }
+}
+
+/// The card's rail: a thin bar and a space.
+fn embed_rail(src: usize) -> Vec<Cell> {
+    at(&format!("{} ", theme::EMBED_BAR), theme::embed(), src)
 }
 
 /// The source line of a `![[note]]` embed in the editor: the card's title
@@ -4557,37 +4582,30 @@ fn embed_rail(style: Style, src: usize) -> Vec<Cell> {
 /// line, which reveals the syntax.
 fn embed_title_line(src: &str, width: usize) -> RLine {
     let len = src.chars().count();
-    let style = embed_style();
-    let (text, text_style) = if let Some((name, label)) = attachment_embed_line(src) {
-        match attachment_card(&name, label.as_deref()) {
-            (text, true) => (text, style.add_modifier(Modifier::BOLD)),
-            (text, false) => (text, theme::grey()),
-        }
+    let spans = if let Some((name, label)) = attachment_embed_line(src) {
+        attachment_spans(&name, label.as_deref())
     } else if let Some(embed) = note_embed_line(src) {
-        let card = embed_card(&embed);
-        match card.found {
-            embeds::Found::Missing => (format!("{} (no such note)", card.head()), theme::grey()),
-            _ => (card.head(), style.add_modifier(Modifier::BOLD)),
-        }
+        embed_card(&embed).head_spans()
     } else {
         return RLine::raw(src);
     };
-    let mut cells = embed_rail(style, 0);
     let room = if width == usize::MAX {
         usize::MAX
     } else {
         width.saturating_sub(2).max(1)
     };
-    let text = if room == usize::MAX {
-        text
-    } else {
-        truncate(&text, room)
-    };
-    cells.extend(text.chars().enumerate().map(|(i, ch)| Cell {
-        ch,
-        style: text_style,
-        src: (i + 2).min(len),
-    }));
+    let title: Vec<Cell> = spans
+        .iter()
+        .flat_map(|(text, style)| text.chars().map(move |ch| (ch, *style)))
+        .enumerate()
+        .map(|(i, (ch, style))| Cell {
+            ch,
+            style,
+            src: (i + 2).min(len),
+        })
+        .collect();
+    let mut cells = embed_rail(0);
+    cells.extend(truncate_cells(title, room));
     done(cells, src)
 }
 
@@ -4629,7 +4647,6 @@ pub fn embed_rows(src: &str, width: usize) -> Vec<RLine> {
     if !matches!(card.found, embeds::Found::Note(_)) {
         return Vec::new();
     }
-    let style = embed_style();
     let room = if width == usize::MAX {
         usize::MAX
     } else {
@@ -4647,7 +4664,7 @@ pub fn embed_rows(src: &str, width: usize) -> Vec<RLine> {
         wrap_breaks(&chars, room, room)
             .into_iter()
             .map(|(a, b)| {
-                let mut row = embed_rail(style, 0);
+                let mut row = embed_rail(0);
                 row.extend(cells[a..b].iter().cloned());
                 RLine {
                     cells: row,
@@ -4657,15 +4674,23 @@ pub fn embed_rows(src: &str, width: usize) -> Vec<RLine> {
             .collect()
     };
     let lines = card.lines.clone();
+    if lines.is_empty() {
+        return Vec::new();
+    }
     let blocks = blocks(&lines);
-    (0..lines.len())
-        .flat_map(|row| {
+    // a rail-only row first, so the title stands clear of what it heads
+    let gap = RLine {
+        cells: embed_rail(0),
+        src_len: 0,
+    };
+    std::iter::once(gap)
+        .chain((0..lines.len()).flat_map(|row| {
             let line = match block_at(&blocks, row) {
                 Some(b) => style_block_line(&lines, b, row, room),
                 None => style_line(&lines[row]),
             };
             blank(line)
-        })
+        }))
         .collect()
 }
 
@@ -6269,11 +6294,13 @@ mod tests {
         let bs = blocks(&lines);
         assert_eq!(bs[0].kind, BlockKind::Embed);
 
-        // the source line is the title row, in the callout colour
+        // the source line is the title row: a thin rail in the embed grey,
+        // the note stepped back and the section it names leading
         let title = style_block_line(&lines, &bs[0], 0, 40);
-        assert_eq!(text(&title), "▌ Plan › Goals");
-        assert_eq!(title.cells[0].style.fg, theme::callout("note").fg);
-        assert!(title.cells[2].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(text(&title), "│ Plan › Goals");
+        assert_eq!(title.cells[0].style, theme::embed());
+        assert_eq!(title.cells[2].style, theme::grey());
+        assert_eq!(title.cells[9].style, embed_title());
         assert_eq!(title.src_len, "![[plan#Goals]]".chars().count());
         // a click on the title lands on the line
         let row = title.one_row();
@@ -6286,16 +6313,17 @@ mod tests {
         assert_eq!(
             texts,
             vec![
-                "▌ • ship it",
-                "▌ • test it",
-                "▌ ",
-                "▌ • doc it",
-                "▌ • more",
-                "▌ • and more",
+                "│ ",
+                "│ • ship it",
+                "│ • test it",
+                "│ ",
+                "│ • doc it",
+                "│ • more",
+                "│ • and more",
             ]
         );
-        // a section of one line hangs one row
-        assert_eq!(embed_rows("![[plan#Later]]", 40).len(), 1);
+        // a section of one line hangs one row, under the gap
+        assert_eq!(embed_rows("![[plan#Later]]", 40).len(), 2);
         // a narrow page wraps the rows rather than overrunning it, and every
         // row a line wraps into keeps its rail
         let narrow = embed_rows("![[plan#Goals]]", 8);
@@ -6304,14 +6332,14 @@ mod tests {
             "{narrow:?}"
         );
         assert!(
-            narrow.iter().all(|r| text(r).starts_with("▌ ")),
+            narrow.iter().all(|r| text(r).starts_with("│ ")),
             "{narrow:?}"
         );
         assert!(narrow.len() > rows.len(), "{narrow:?}");
 
         // a note that is not there says so, in grey, and hangs nothing
         let gone = style_block_line(&buf("![[gone]]"), &bs[0], 0, 40);
-        assert_eq!(text(&gone), "▌ gone (no such note)");
+        assert_eq!(text(&gone), "│ gone (no such note)");
         assert_eq!(gone.cells[2].style.fg, theme::grey().fg);
         assert!(embed_rows("![[gone]]", 40).is_empty());
 
@@ -6319,7 +6347,7 @@ mod tests {
         embeds::forget();
         assert_eq!(
             text(&style_block_line(&lines, &bs[0], 0, 40)),
-            "▌ plan › Goals"
+            "│ plan › Goals"
         );
         assert!(embed_rows("![[plan#Goals]]", 40).is_empty());
     }

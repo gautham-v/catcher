@@ -90,6 +90,10 @@ pub struct Palette {
     /// The thin rule standing in every fourth column of a line's indent.
     /// Fainter again than the gutter: it is a hint of depth, not a border.
     pub code_guide: Color,
+    /// The thin rail down the left of a `![[note]]` card. Fainter than a
+    /// table's rules, so the rail beside an embedded table never reads as
+    /// the table's own left edge.
+    pub embed: Color,
 }
 
 /// One settable colour: its settings-file name, the field it sets, and the
@@ -103,7 +107,7 @@ pub struct ColorKey {
 /// Every colour the settings file accepts, in the order the settings document
 /// lists them. The single source of truth: a name that isn't here can't be
 /// set and isn't documented.
-pub const COLORS: [ColorKey; 23] = [
+pub const COLORS: [ColorKey; 24] = [
     color(
         "accent",
         |p| &mut p.accent,
@@ -139,6 +143,11 @@ pub const COLORS: [ColorKey; 23] = [
     ),
     color("code_gutter", |p| &mut p.code_gutter, "the line numbers"),
     color("code_guide", |p| &mut p.code_guide, "the indent rules"),
+    color(
+        "embed",
+        |p| &mut p.embed,
+        "the rail beside an embedded note",
+    ),
 ];
 
 const fn color(
@@ -150,8 +159,8 @@ const fn color(
 }
 
 /// Just the names, derived from `COLORS`.
-pub const COLOR_KEYS: [&str; 23] = {
-    let mut keys = [""; 23];
+pub const COLOR_KEYS: [&str; COLORS.len()] = {
+    let mut keys = [""; COLORS.len()];
     let mut i = 0;
     while i < keys.len() {
         keys[i] = COLORS[i].name;
@@ -206,6 +215,7 @@ pub const DARK: Palette = Palette {
     code_punctuation: Color::Rgb(0xa0, 0xa0, 0xa0),
     code_gutter: Color::Rgb(0x4a, 0x4a, 0x4a),
     code_guide: Color::Rgb(0x2c, 0x2c, 0x30),
+    embed: Color::Rgb(0x46, 0x46, 0x4c),
 };
 
 pub const LIGHT: Palette = Palette {
@@ -232,6 +242,7 @@ pub const LIGHT: Palette = Palette {
     code_punctuation: Color::Rgb(0x6a, 0x6a, 0x6e),
     code_gutter: Color::Rgb(0xb0, 0xb0, 0xb4),
     code_guide: Color::Rgb(0xd8, 0xd8, 0xdc),
+    embed: Color::Rgb(0xc4, 0xc4, 0xc9),
 };
 
 /// The palette in force. A lock rather than a `OnceLock`: settings are
@@ -444,6 +455,10 @@ pub fn danger() -> Style {
 pub fn bright() -> Style {
     Style::new().fg(palette().bright)
 }
+/// An embed card's rail.
+pub fn embed() -> Style {
+    Style::new().fg(palette().embed)
+}
 /// The marker on a folded heading: the accent, so a closed section reads
 /// as the one thing on the page that is asking to be opened.
 pub fn fold() -> Style {
@@ -551,6 +566,9 @@ pub const FOLDED: &str = "\u{25b8} ";
 /// In front of an open callout that can fold.
 pub const UNFOLDED: &str = "\u{25be} ";
 pub const QUOTE_BAR: &str = "\u{258c}";
+/// The rail down the left of a `![[note]]` card: thin where a quote's is
+/// thick, so a card frames the other note rather than highlighting it.
+pub const EMBED_BAR: &str = "\u{2502}";
 /// The indent rule inside a fenced block, standing in for the space it
 /// replaces. Thin, so a column of them reads as ruling and not as text.
 pub const CODE_GUIDE: char = '\u{2502}';

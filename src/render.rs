@@ -1048,8 +1048,8 @@ type Fence = (Option<String>, String, Vec<(usize, usize)>);
 enum Deco {
     /// A plain blockquote's `▌ `.
     Rail,
-    /// An embed card's `▌ `, in the card's own colour.
-    Embed { style: Style },
+    /// An embed card's thin `│ `.
+    Embed,
     /// A callout card: its colour, how wide it is, and the source line of
     /// its title, which its bottom edge answers to (so a fold on the title
     /// keeps the edge under it).
@@ -1373,7 +1373,7 @@ impl Ren {
         self.quotes
             .iter()
             .map(|d| match d {
-                Deco::Rail | Deco::Embed { .. } => 2,
+                Deco::Rail | Deco::Embed => 2,
                 Deco::Card { .. } => 4,
             })
             .sum()
@@ -1447,8 +1447,8 @@ impl Ren {
                         &format!("{} ", theme::QUOTE_BAR),
                         theme::marker(),
                     )),
-                    Deco::Embed { style } => {
-                        cells.extend(str_cells(&format!("{} ", theme::QUOTE_BAR), style))
+                    Deco::Embed => {
+                        cells.extend(str_cells(&format!("{} ", theme::EMBED_BAR), theme::embed()))
                     }
                     Deco::Card { style, w, .. } => {
                         cells.extend(str_cells("│ ", style));
@@ -1761,16 +1761,14 @@ impl Ren {
     /// title (a link to it), its first lines, and how much was left out.
     fn emit_attachment_card(&mut self, name: &str, label: Option<&str>) {
         self.flush();
-        let style = crate::md::embed_style();
         let idx = self.out.urls.len();
         self.out
             .urls
             .push(crate::md::LinkTarget::File(name.to_string()).href());
-        let rail = format!("{} ", theme::QUOTE_BAR);
-        self.push(&rail, style, None);
-        match crate::md::attachment_card(name, label) {
-            (text, true) => self.push(&text, style.add_modifier(Modifier::BOLD), Some(idx)),
-            (text, false) => self.push(&text, theme::grey(), Some(idx)),
+        let rail = format!("{} ", theme::EMBED_BAR);
+        self.push(&rail, theme::embed(), None);
+        for (text, style) in crate::md::attachment_spans(name, label) {
+            self.push(&text, style, Some(idx));
         }
         self.flush();
     }
@@ -1780,7 +1778,6 @@ impl Ren {
     fn emit_embed_card(&mut self, embed: &crate::md::NoteEmbed) {
         self.flush();
         let card = crate::md::embed_card(embed);
-        let style = crate::md::embed_style();
         let idx = self.out.urls.len();
         self.out
             .urls
@@ -1788,14 +1785,9 @@ impl Ren {
         // the rail is a decoration, not text, so every row the card takes
         // gets one
         self.rails += 1;
-        self.quotes.push(Deco::Embed { style });
-        match card.found {
-            crate::md::embeds::Found::Missing => self.push(
-                &format!("{} (no such note)", card.head()),
-                theme::grey(),
-                Some(idx),
-            ),
-            _ => self.push(&card.head(), style.add_modifier(Modifier::BOLD), Some(idx)),
+        self.quotes.push(Deco::Embed);
+        for (text, style) in card.head_spans() {
+            self.push(&text, style, Some(idx));
         }
         self.flush();
         self.splice(&card.lines.join("\n"));
@@ -1812,6 +1804,8 @@ impl Ren {
         if markdown.trim().is_empty() || !embed_depth(1) {
             return;
         }
+        // a rail-only row, so the card's title stands clear of what it heads
+        self.emit_line(PLine::default());
         let width = match self.inner_width() {
             usize::MAX => usize::MAX,
             w => w.max(4),
@@ -2307,7 +2301,7 @@ impl Ren {
                 self.styles.pop();
                 self.flush();
                 match self.quotes.last() {
-                    Some(Deco::Rail) | Some(Deco::Embed { .. }) => {
+                    Some(Deco::Rail) | Some(Deco::Embed) => {
                         self.rails -= 1;
                         self.quotes.pop();
                     }
@@ -4532,7 +4526,7 @@ mod tests {
     fn an_attachment_embed_is_a_card_for_the_desktop() {
         let r = render("![[report.pdf|the report]]\n");
         let line = r.lines.iter().find(|l| l.text().contains("📎")).unwrap();
-        assert_eq!(line.text(), "▌ 📎 the report (no such file)");
+        assert_eq!(line.text(), "│ 📎 the report (no such file)");
         assert_eq!(
             crate::md::LinkTarget::parse(r.url(0).unwrap()),
             crate::md::LinkTarget::File("report.pdf".into())
@@ -4573,7 +4567,7 @@ mod tests {
         assert!(r
             .lines
             .iter()
-            .any(|l| l.text().to_lowercase().contains("▌ plan")));
+            .any(|l| l.text().to_lowercase().contains("│ plan")));
     }
 
     #[test]
@@ -4591,38 +4585,46 @@ mod tests {
         let texts: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
         let at = texts
             .iter()
-            .position(|t| t == "▌ Plan › Goals")
+            .position(|t| t == "│ Plan › Goals")
             .expect("a title row");
-        // the whole section is drawn, as markdown, behind the card's rail
+        // the whole section is drawn, as markdown, behind the card's rail,
+        // a rail-only row clear of the title
         assert_eq!(
-            &texts[at..at + 5],
+            texts[at..at + 6]
+                .iter()
+                .map(|t| t.trim_end())
+                .collect::<Vec<_>>(),
             &[
-                "▌ Plan › Goals",
-                "▌ • ship it",
-                "▌ • test it",
-                "▌ • doc it",
-                "▌ • more",
+                "│ Plan › Goals",
+                "│",
+                "│ • ship it",
+                "│ • test it",
+                "│ • doc it",
+                "│ • more",
             ]
         );
-        // the title is a link to the note, in the callout colour
+        // the title is a link to the note: a thin grey rail, the note
+        // stepped back and the section leading
         let title = &r.lines[at];
-        assert_eq!(title.cells[0].style.fg, theme::callout("note").fg);
+        assert_eq!(title.cells[0].style, theme::embed());
         let linked = title.cells.iter().find(|c| c.link.is_some()).unwrap();
         assert_eq!(r.url(linked.link.unwrap()), Some("wikilink:plan"));
-        assert!(linked.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(linked.style, theme::grey());
+        assert_eq!(title.cells[9].style, crate::md::embed_title());
         // the body reads in normal text, inline markup drawn
         let r = render("![[plan]]\n");
         let texts: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
-        assert_eq!(texts[0], "▌ Plan");
-        assert_eq!(texts[1], "▌ First line.");
-        assert!(r.lines[1].cells[8]
+        assert_eq!(texts[0], "│ Plan");
+        assert_eq!(texts[1].trim_end(), "│");
+        assert_eq!(texts[2], "│ First line.");
+        assert!(r.lines[2].cells[8]
             .style
             .add_modifier
             .contains(Modifier::BOLD));
         assert!(texts.iter().all(|t| !t.contains("]]")), "{texts:?}");
         // and it runs to the end of the note, headings and all
         assert!(texts.iter().any(|t| t.contains("Goals")), "{texts:?}");
-        assert_eq!(texts.last().unwrap().trim_end(), "▌ Nothing.");
+        assert_eq!(texts.last().unwrap().trim_end(), "│ Nothing.");
 
         // a paragraph too long for the page wraps inside the card: every row
         // it takes has the rail, and none of them overruns
@@ -4634,7 +4636,7 @@ mod tests {
         let r = render_wide("![[long]]\n", 24);
         let texts: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
         assert!(texts.len() > 3, "{texts:?}");
-        assert!(texts.iter().all(|t| t.starts_with("▌ ")), "{texts:?}");
+        assert!(texts.iter().all(|t| t.starts_with("│")), "{texts:?}");
         assert!(
             texts.iter().all(|t| crate::md::str_width(t) <= 24),
             "{texts:?}"
@@ -4657,7 +4659,7 @@ mod tests {
 
         // no such note
         let r = render("![[gone]]\n");
-        assert_eq!(r.lines[0].text(), "▌ gone (no such note)");
+        assert_eq!(r.lines[0].text(), "│ gone (no such note)");
         assert_eq!(r.lines[0].cells[2].style.fg, theme::grey().fg);
         assert_eq!(r.lines.len(), 1);
         crate::md::embeds::forget();
