@@ -552,6 +552,11 @@ pub struct App {
     /// The furthest right the page can pan, worked out by the last draw from
     /// the widest table on it. Zero when nothing overflows.
     pub preview_hmax: u16,
+    /// Screen rows of the editor's top line (`editor.scroll`) scrolled off
+    /// above the page. A wrapped table row or a picture is one source line
+    /// many rows tall; without this the wheel could only stop at line
+    /// boundaries and had to jump the whole thing at once.
+    pub edit_skip: u16,
     /// When the terminal's polarity was last checked against the system's.
     theme_checked: Instant,
     /// The system-appearance check in flight, if one is; see
@@ -855,6 +860,7 @@ impl App {
             preview_scroll: 0,
             preview_hscroll: 0,
             preview_hmax: 0,
+            edit_skip: 0,
             theme_checked: Instant::now(),
             theme_rx: None,
             status: None,
@@ -955,6 +961,7 @@ impl App {
         }
         self.preview_scroll = 0;
         self.preview_hscroll = 0;
+        self.edit_skip = 0;
         self.preview_goto = None;
         self.preview_sel = None;
         // a note switched to may have changed since its folds were made — a
@@ -1170,19 +1177,73 @@ impl App {
         self.refresh_visible();
     }
 
-    /// Scroll the editor by rows on screen, so a wheel tick over a fold does
-    /// not spend itself on lines nobody can see.
+    /// Scroll the editor by `delta` rows on screen: the rows a line wraps
+    /// to and the rows a picture takes count one by one, and the lines a
+    /// fold hides not at all. The top line and how many of its rows are
+    /// above the page — `edit_skip` — move together, so a tall table row or
+    /// picture scrolls in a row at a time rather than all at once.
     fn scroll_edit(&mut self, delta: isize) {
-        let row = self.visible.line_to_row(self.editor.scroll) as isize + delta;
-        let last = self.visible.rows().saturating_sub(1) as isize;
-        let line = self.visible.row_to_line(row.clamp(0, last) as usize);
+        let blocks = self.blocks();
+        let dir = self.note_dir();
+        let area = self.editor_area;
+        let width = area.width;
+        let height = |app: &mut App, line: usize| -> isize {
+            let (natural, url) = app.edit_row_height(&blocks, line, &dir, width);
+            match url {
+                Some(_) => crate::images::band_rows(natural, area.height) as isize,
+                None => natural as isize,
+            }
+        };
+        // start from a line that is on screen, whatever the buffer says
+        let mut line = self
+            .visible
+            .row_to_line(self.visible.line_to_row(self.editor.scroll));
+        let mut skip = self.edit_skip as isize + delta;
+        if delta >= 0 {
+            loop {
+                let h = height(self, line);
+                if skip < h {
+                    break;
+                }
+                match self.visible.next_visible(line + 1) {
+                    Some(next) => {
+                        skip -= h;
+                        line = next;
+                    }
+                    None => {
+                        // the last line can go no further than its own top
+                        skip = 0;
+                        break;
+                    }
+                }
+            }
+        } else {
+            while skip < 0 {
+                match line
+                    .checked_sub(1)
+                    .and_then(|l| self.visible.prev_visible(l))
+                {
+                    Some(prev) => {
+                        line = prev;
+                        skip += height(self, line);
+                    }
+                    None => {
+                        skip = 0;
+                        break;
+                    }
+                }
+            }
+        }
         self.editor
             .scroll_by(line as isize - self.editor.scroll as isize);
+        self.edit_skip = skip.max(0) as u16;
     }
 
     /// The coarse one-row-per-line scroll pass the buffer makes, done in rows
-    /// on screen so the lines a fold hides do not count toward the page.
+    /// on screen so the lines a fold hides do not count toward the page. A
+    /// top line it moved starts with all of its rows showing.
     pub fn scroll_cursor_into_view(&mut self, height: usize) {
+        let before = self.editor.scroll;
         if self.visible.is_plain() {
             self.editor.scroll_into_view(height);
         } else if self.editor.following() {
@@ -1190,6 +1251,47 @@ impl App {
                 self.visible
                     .scroll_for(self.editor.scroll, self.editor.cursor.0, height);
         }
+        if self.editor.scroll != before {
+            self.edit_skip = 0;
+        }
+    }
+
+    /// How many rows on screen source line `row` takes in the editor, and
+    /// the picture it is drawn as, if it is one. Front matter set to `hide`
+    /// takes none at all, the way a picture takes more than one: what the
+    /// buffer's shape on screen is, is the draw's business rather than the
+    /// buffer's.
+    pub fn edit_row_height(
+        &mut self,
+        blocks: &[md::Block],
+        row: usize,
+        dir: &std::path::Path,
+        width: u16,
+    ) -> (u16, Option<String>) {
+        if self.hidden_row(blocks, row) {
+            return (0, None);
+        }
+        let url = md::block_at(blocks, row)
+            .filter(|b| b.kind == md::BlockKind::Image && !self.revealed(b))
+            .and_then(|b| self.editor.lines().get(b.start))
+            .and_then(|src| md::image_line(src))
+            .map(|(_, url, max_px)| (url, max_px));
+        if let Some((url, max_px)) = url {
+            // no picture (unsupported terminal, missing file) keeps the text line
+            if let Some(h) = self.images.rows(&url, dir, width, max_px) {
+                return (h, Some(url));
+            }
+        }
+        let width = width.max(1) as usize;
+        let rows = self.wrapped(row, blocks, width).len();
+        // a table row carries the rule under it, and the last row of a table
+        // whose bottom edge the pointer is at carries the add-row handle
+        let extra = usize::from(self.table_rule_under(blocks, row))
+            + usize::from(self.hovered_table_edge(blocks, row, TableEdge::Bottom))
+            + usize::from(self.hovered_table_edge(blocks, row, TableEdge::Top))
+            + self.callout_close_rows(blocks, row, width).len()
+            + self.embed_rows(blocks, row, width).len();
+        ((rows.max(1) + extra) as u16, None)
     }
 
     /// Put the open note's name in the terminal's title, if it is not there
@@ -2944,6 +3046,7 @@ impl App {
         self.reveal_cursor();
         let row = self.visible.line_to_row(line).saturating_sub(2);
         self.editor.scroll = self.visible.row_to_line(row);
+        self.edit_skip = 0;
         self.preview_goto = Some(line);
     }
 
@@ -5483,23 +5586,27 @@ impl App {
             }
             return;
         }
+        // one tick moves `wheel_rows` rows: at the default of one it keeps
+        // pace with the terminal's own scrollback, so a trackpad flick
+        // reads as the same motion here as it does everywhere else
+        let step = self.config.wheel_rows.max(1) as isize;
         // the wheel over an open peek turns its pages, not the one beneath
         if let (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown, Some(peek)) =
             (ev.kind, self.peek.as_mut())
         {
             if peek.contains(ev.column, ev.row) {
                 let d = if ev.kind == MouseEventKind::ScrollUp {
-                    -2
+                    -step
                 } else {
-                    2
+                    step
                 };
                 peek.scroll_by(d);
                 return;
             }
         }
         match ev.kind {
-            MouseEventKind::ScrollUp => self.on_wheel(-2),
-            MouseEventKind::ScrollDown => self.on_wheel(2),
+            MouseEventKind::ScrollUp => self.on_wheel(-step),
+            MouseEventKind::ScrollDown => self.on_wheel(step),
             MouseEventKind::ScrollLeft if self.view == View::Preview => self.pan(-4),
             MouseEventKind::ScrollRight if self.view == View::Preview => self.pan(4),
             MouseEventKind::Moved => self.on_hover(ev.column, ev.row),

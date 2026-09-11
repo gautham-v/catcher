@@ -129,29 +129,54 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     let n = app.editor.lines().len();
 
     // the pass above counted one row per line; wrapped lines and pictures both
-    // take more, so walk the top down until the cursor's own display row fits
+    // take more, so bring the top down until the cursor's own display row
+    // fits — a row at a time, hiding rows of the top line before leaving it,
+    // so the page moves by exactly what the cursor needed and no more
     if app.editor.following() {
         let mut top = app.editor.scroll.min(crow);
+        let mut skip = if top == app.editor.scroll {
+            app.edit_skip as u32
+        } else {
+            0
+        };
+        // the cursor's own row is never among the hidden ones
+        if top == crow {
+            skip = skip.min(cseg as u32);
+        }
         // each row's height is the same wherever the top ends up, so measure
         // the span once and shrink it from the front
         let heights: Vec<u32> = (top..crow)
             .map(|r| row_height(app, &blocks, r, &dir, area.width).0 as u32)
             .collect();
+        // the top line may have grown shorter since the wheel stopped on it
+        if let Some(&first) = heights.first() {
+            skip = skip.min(first.saturating_sub(1));
+        }
         // only the rows of the cursor's line up to the cursor itself
-        let mut used: u32 = heights.iter().sum::<u32>() + cseg as u32 + 1;
+        let mut used: u32 = heights.iter().sum::<u32>() + cseg as u32 + 1 - skip;
         let mut i = 0;
         while top < crow && used > area.height as u32 {
-            used -= heights[i];
-            i += 1;
-            top += 1;
+            let excess = used - area.height as u32;
+            let left = heights[i] - skip;
+            if excess < left {
+                skip += excess;
+                used = area.height as u32;
+            } else {
+                used -= left;
+                skip = 0;
+                i += 1;
+                top += 1;
+            }
         }
         app.editor.scroll = top;
+        app.edit_skip = skip as u16;
     }
 
     // lay the visible rows out, giving drawable images the height they measured
     let top = app.editor.scroll.min(n.saturating_sub(1));
-    // (source line, rows, image url) — one entry per source line
-    let mut plan: Vec<(usize, u16, Option<String>, u16)> = Vec::new();
+    // (source line, rows, image url, rows of the whole band, rows of it
+    // scrolled off the top) — one entry per source line
+    let mut plan: Vec<(usize, u16, Option<String>, u16, u16)> = Vec::new();
     let mut used = 0u16;
     let mut row = top;
     while row < n && used < area.height {
@@ -164,38 +189,61 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
             None => natural,
         };
         let band = natural;
+        // only the top line has rows above the page, and never all of them:
+        // an edit may have made it shorter since the wheel stopped on it
+        let skip = if row == top {
+            app.edit_skip.min(natural.saturating_sub(1))
+        } else {
+            0
+        };
+        if row == top {
+            app.edit_skip = skip;
+        }
         // every drawn line gets at least one row; a hidden one gets none at
         // all, which is the only way a source line takes no space on screen
         let h = if natural == 0 {
             0
         } else {
-            natural.min(area.height - used).max(1)
+            (natural - skip).min(area.height - used).max(1)
         };
-        plan.push((row, h, url, band));
+        plan.push((row, h, url, band, skip));
         used += h;
         row += 1;
     }
 
     let mut lines: Vec<Line> = Vec::new();
-    // (rect on screen, url, rows of the whole band)
-    let mut images: Vec<(Rect, String, u16)> = Vec::new();
+    // (rect on screen, url, rows of the whole band, rows hidden above)
+    let mut images: Vec<(Rect, String, u16, u16)> = Vec::new();
     app.edit_rows.clear();
     app.table_handles.clear();
     let mut y = area.y;
-    for (row, h, url, band) in &plan {
+    for (row, h, url, band, skip) in &plan {
+        // the top line is laid out whole, then its hidden rows are cut away:
+        // what was drawn from this point on is what gets trimmed
+        let (lines_at, rows_at, handles_at) =
+            (lines.len(), app.edit_rows.len(), app.table_handles.len());
+        // the text branch lays out `skip` more rows than it shows
+        let h = h + skip;
         match url {
             Some(url) => {
+                let shown = h - skip;
                 app.edit_rows.push(EditRow {
-                    rect: Rect::new(area.x, y, area.width, *h),
+                    rect: Rect::new(area.x, y, area.width, shown),
                     line: *row,
                     seg: 0,
                 });
-                for _ in 0..*h {
+                for _ in 0..shown {
                     lines.push(Line::default());
                 }
                 // a picture cut off by the bottom of the page is drawn cropped
-                // to the rows it did get, so it scrolls into view row by row
-                images.push((Rect::new(area.x, y, area.width, *h), url.clone(), *band));
+                // to the rows it did get, so it scrolls into view row by row;
+                // one cut off by the top the same way
+                images.push((
+                    Rect::new(area.x, y, area.width, shown),
+                    url.clone(),
+                    *band,
+                    *skip,
+                ));
             }
             None => {
                 let segs = app.wrapped(*row, &blocks, width);
@@ -205,7 +253,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                 // the column grips above a table the pointer is at the top
                 // of: one row before the table's own, a grip over each column
                 let mut y = y;
-                let mut h = *h;
+                let mut h = h;
                 if app.hovered_table_edge(&blocks, *row, TableEdge::Top) && h > 1 {
                     let block = *crate::md::block_at(&blocks, *row).expect("a table row");
                     let raw = Some(app.editor.cursor)
@@ -365,12 +413,37 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
         }
-        y += h;
+        if *skip > 0 && url.is_none() {
+            // the rows above the page go, and what is left moves up into
+            // their place: the lines, the rows a click resolves through, and
+            // the table handles alike
+            let cut = area.y + skip;
+            lines.drain(lines_at..lines_at + *skip as usize);
+            let mut i = rows_at;
+            while i < app.edit_rows.len() {
+                if app.edit_rows[i].rect.y < cut {
+                    app.edit_rows.remove(i);
+                } else {
+                    app.edit_rows[i].rect.y -= skip;
+                    i += 1;
+                }
+            }
+            let mut i = handles_at;
+            while i < app.table_handles.len() {
+                if app.table_handles[i].0.y < cut {
+                    app.table_handles.remove(i);
+                } else {
+                    app.table_handles[i].0.y -= skip;
+                    i += 1;
+                }
+            }
+        }
+        y += h - skip;
     }
     f.render_widget(Paragraph::new(lines), area);
 
-    for (rect, url, band) in images {
-        draw_band(f, app, &url, &dir, rect, band, 0);
+    for (rect, url, band, hidden) in images {
+        draw_band(f, app, &url, &dir, rect, band, hidden);
     }
 
     if app.overlay == Overlay::None {
@@ -553,34 +626,7 @@ fn row_height(
     dir: &std::path::Path,
     width: u16,
 ) -> (u16, Option<String>) {
-    // front matter set to `hide` takes no rows at all, the way a picture takes
-    // more than one: what the buffer's shape on screen is, is the draw's
-    // business rather than the buffer's
-    if app.hidden_row(blocks, row) {
-        return (0, None);
-    }
-    let url = crate::md::block_at(blocks, row)
-        .filter(|b| b.kind == crate::md::BlockKind::Image && !app.revealed(b))
-        .and_then(|b| app.editor.lines().get(b.start))
-        .and_then(|src| crate::md::image_line(src))
-        .map(|(_, url, max_px)| (url, max_px));
-    if let Some((url, max_px)) = url {
-        // no picture (unsupported terminal, missing file) keeps the text line
-        if let Some(h) = app.images.rows(&url, dir, width, max_px) {
-            return (h, Some(url));
-        }
-    }
-    let rows = app.wrapped(row, blocks, width.max(1) as usize).len();
-    // a table row carries the rule under it, and the last row of a table
-    // whose bottom edge the pointer is at carries the add-row handle
-    let extra = usize::from(app.table_rule_under(blocks, row))
-        + usize::from(app.hovered_table_edge(blocks, row, TableEdge::Bottom))
-        + usize::from(app.hovered_table_edge(blocks, row, TableEdge::Top))
-        + app
-            .callout_close_rows(blocks, row, width.max(1) as usize)
-            .len()
-        + app.embed_rows(blocks, row, width.max(1) as usize).len();
-    ((rows.max(1) + extra) as u16, None)
+    app.edit_row_height(blocks, row, dir, width)
 }
 
 /// Everything the reading view's layout depends on, folded into one hash: a

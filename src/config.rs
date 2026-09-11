@@ -250,6 +250,10 @@ pub struct Config {
     pub status_bar_items: Vec<StatusItem>,
     pub autosave_ms: u64,
     pub tab_width: usize,
+    /// Rows one wheel tick scrolls. One matches the terminal's own scrollback,
+    /// which is as smooth as a trackpad flick gets in a grid of cells; a
+    /// notched mouse wheel may want more.
+    pub wheel_rows: u16,
     /// Whether a filename follows its note's title. Off means catcher never
     /// renames a file for you.
     pub rename_files: bool,
@@ -330,6 +334,7 @@ impl Default for Config {
             status_bar_items: vec![StatusItem::Path, StatusItem::Message, StatusItem::Keys],
             autosave_ms: 500,
             tab_width: 2,
+            wheel_rows: 1,
             rename_files: true,
             update_links: true,
             status_words: false,
@@ -646,6 +651,9 @@ impl Config {
         if let Some(v) = value(text, "tab_width").and_then(|v| v.parse::<usize>().ok()) {
             c.tab_width = v.clamp(1, 16);
         }
+        if let Some(v) = value(text, "wheel_rows").and_then(|v| v.parse::<u16>().ok()) {
+            c.wheel_rows = v.clamp(1, 10);
+        }
         c.table_style = word(text, "table_style").unwrap_or(c.table_style);
         c.quick_open_dirs = values(text, "quick_open_dirs")
             .iter()
@@ -833,6 +841,7 @@ impl Config {
         d.section("Editing");
         d.row("autosave_ms", self.autosave_ms, "idle time before a save");
         d.row("tab_width", self.tab_width, "spaces one tab inserts");
+        d.row("wheel_rows", self.wheel_rows, "rows one wheel tick scrolls");
         d.row(
             "rename_files",
             yn(self.rename_files),
@@ -1258,6 +1267,7 @@ mod tests {
             window_title: false,
             autosave_ms: 1500,
             tab_width: 4,
+            wheel_rows: 3,
             rename_files: false,
             update_links: false,
             status_words: true,
@@ -1583,6 +1593,9 @@ mod tests {
     fn numbers_are_clamped_to_something_usable() {
         assert_eq!(Config::from_str("- tab_width: 99").tab_width, 16);
         assert_eq!(Config::from_str("- tab_width: 0").tab_width, 1);
+        assert_eq!(Config::from_str("- wheel_rows: 3").wheel_rows, 3);
+        assert_eq!(Config::from_str("- wheel_rows: 0").wheel_rows, 1);
+        assert_eq!(Config::from_str("- wheel_rows: 50").wheel_rows, 10);
         assert_eq!(
             Config::from_str("- autosave_ms: 999999").autosave_ms,
             60_000
