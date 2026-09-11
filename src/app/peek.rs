@@ -2,6 +2,7 @@
 //! points at, and the card offered when it points at no note yet.
 
 use super::*;
+use crate::terminal::Place;
 
 /// A floating glimpse of another note, Obsidian-style.
 #[derive(Clone, Debug)]
@@ -31,6 +32,45 @@ pub struct Peek {
     pub view_rows: usize,
     /// Where the last draw put the popup, for pointer hit-testing.
     pub rect: Rect,
+    /// Where the last draw put each door along the bottom border, and where
+    /// it sends the note: `None` is here, in place of this one.
+    pub doors: Vec<(Rect, Option<Place>)>,
+    /// The door under the pointer, which the draw lights up.
+    pub door_hover: Option<usize>,
+}
+
+/// The ways out of a peek, in the order its bottom border lists them: the
+/// note here, or beside this one in a split or tab. The keys are the ones a
+/// ^O row answers to, so the peek and the picker are learnt once.
+pub const DOORS: [(Option<Place>, &str, &str); 4] = [
+    (None, "open", "⏎"),
+    (Some(Place::SplitRight), "right", "⌥⏎"),
+    (Some(Place::SplitDown), "below", "⌥⇧⏎"),
+    (Some(Place::Tab), "tab", "⌃⏎"),
+];
+
+/// The door labels that fit in `room` columns once the ` · ` between them
+/// and a space at either end are counted: word and key when all four fit,
+/// the words alone when they do not, and none when even those will not.
+/// A card for a note not written yet makes it, so its first door says so.
+pub fn door_labels(exists: bool, room: usize) -> Vec<String> {
+    let word = |w: &'static str| if w == "open" && !exists { "create" } else { w };
+    let fits = |labels: &[String]| {
+        let text: usize = labels.iter().map(|l| md::str_width(l)).sum();
+        text + 3 * (labels.len() - 1) + 2 <= room
+    };
+    let full: Vec<String> = DOORS
+        .iter()
+        .map(|(_, w, k)| format!("{} {k}", word(w)))
+        .collect();
+    if fits(&full) {
+        return full;
+    }
+    let bare: Vec<String> = DOORS.iter().map(|(_, w, _)| word(w).to_string()).collect();
+    if fits(&bare) {
+        return bare;
+    }
+    Vec::new()
 }
 
 impl Peek {
@@ -219,6 +259,8 @@ impl App {
             scroll: 0,
             view_rows: 0,
             rect: Rect::default(),
+            doors: Vec::new(),
+            door_hover: None,
         })
     }
 
@@ -233,27 +275,49 @@ impl App {
             path: PathBuf::new(),
             exists: false,
             name: name.clone(),
-            body: missing_link_hint(&name, &self.config.keys.label(Action::FollowLink)),
+            // on the card it is the card's own ⏎ that makes the note, not
+            // the follow key the status bar names
+            body: missing_link_hint(&name, "⏎"),
             anchor,
             rows: Vec::new(),
             rows_width: 0,
             scroll: 0,
             view_rows: 0,
             rect: Rect::default(),
+            doors: Vec::new(),
+            door_hover: None,
         }
     }
 
-    /// Open the peeked note for real, putting the popup away. A peek at a
-    /// note that is not there yet makes it, as following the link would.
-    pub(super) fn open_peek(&mut self) {
-        if let Some(peek) = self.peek.take() {
-            self.hover = None;
-            if peek.exists {
-                self.open_path(&peek.path);
-            } else {
-                self.create_from_link(&peek.target_name());
+    /// Open the peeked note for real, putting the popup away: here, or in
+    /// the split or tab `place` names. A peek at a note that is not there
+    /// yet makes it, as following the link would, and then opens it there.
+    pub(super) fn open_peek(&mut self, place: Option<Place>) {
+        let Some(peek) = self.peek.take() else {
+            return;
+        };
+        self.hover = None;
+        match (place, peek.exists) {
+            (None, true) => self.open_path(&peek.path),
+            (None, false) => self.create_from_link(&peek.target_name()),
+            (Some(place), true) => self.open_beside(place, Some(peek.path)),
+            (Some(place), false) => {
+                if let Some(path) = self.create_for_link(&peek.target_name()) {
+                    self.open_beside(place, Some(path));
+                }
             }
         }
+    }
+
+    /// The door of the peek at (x, y), if the pointer is on one: where it
+    /// sends the note, `None` being here.
+    pub(super) fn peek_door_at(&self, x: u16, y: u16) -> Option<Option<Place>> {
+        let at = ratatui::layout::Position { x, y };
+        let peek = self.peek.as_ref()?;
+        peek.doors
+            .iter()
+            .find(|(r, _)| r.contains(at))
+            .map(|(_, p)| *p)
     }
 }
 
@@ -275,6 +339,8 @@ mod tests {
             scroll: 0,
             view_rows: 5,
             rect: super::Rect::default(),
+            doors: Vec::new(),
+            door_hover: None,
         };
         p.ensure_rendered(30, crate::config::TableStyle::default());
         assert!(
@@ -303,6 +369,8 @@ mod tests {
             scroll: 0,
             view_rows: 5,
             rect: super::Rect::default(),
+            doors: Vec::new(),
+            door_hover: None,
         };
         assert_eq!(p.max_scroll(), 15);
         p.scroll_by(-3);
@@ -340,8 +408,38 @@ mod tests {
             scroll: 0,
             view_rows: 0,
             rect: super::Rect::default(),
+            doors: Vec::new(),
+            door_hover: None,
         };
         assert_eq!(p.target_name(), "plan");
         assert!(p.body.contains("creates it"));
+    }
+
+    #[test]
+    fn the_doors_say_word_and_key_when_there_is_room() {
+        assert_eq!(
+            super::door_labels(true, 60),
+            ["open ⏎", "right ⌥⏎", "below ⌥⇧⏎", "tab ⌃⏎"]
+        );
+    }
+
+    #[test]
+    fn narrow_doors_lose_their_keys_then_themselves() {
+        // " open ⏎ · right ⌥⏎ · below ⌥⇧⏎ · tab ⌃⏎ " is 40 wide
+        assert_eq!(super::door_labels(true, 40).len(), 4);
+        assert!(super::door_labels(true, 40)[0].contains('⏎'));
+        assert_eq!(
+            super::door_labels(true, 39),
+            ["open", "right", "below", "tab"]
+        );
+        // " open · right · below · tab " is 28
+        assert_eq!(super::door_labels(true, 28).len(), 4);
+        assert!(super::door_labels(true, 27).is_empty());
+    }
+
+    #[test]
+    fn a_card_for_a_missing_note_offers_to_create_it() {
+        assert_eq!(super::door_labels(false, 60)[0], "create ⏎");
+        assert_eq!(super::door_labels(true, 60)[1], "right ⌥⏎");
     }
 }

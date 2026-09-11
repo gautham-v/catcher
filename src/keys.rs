@@ -216,25 +216,28 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         None,
         "show the file in Finder (or the file manager)",
     ),
-    // this note again, beside this one: the terminal does the splitting
-    // (Ghostty, tmux, kitty, WezTerm), catcher only asks
+    // the linked note under the cursor, or this note again, beside this
+    // one: the terminal does the splitting (Ghostty, tmux, kitty, WezTerm),
+    // catcher only asks. On the alt layer with peek and today's note; \ and
+    // - draw the split they make, the way tmux's own keys do. Capital T for
+    // the same round-trip reason as ⌥P.
     (
         Action::OpenSplitRight,
         "key_split_right",
-        None,
-        "open this note again in a split to the right",
+        Some("alt+\\"),
+        "open the linked note under the cursor, or this one, in a split to the right",
     ),
     (
         Action::OpenSplitDown,
         "key_split_down",
-        None,
-        "open this note again in a split below",
+        Some("alt+-"),
+        "open the linked note under the cursor, or this one, in a split below",
     ),
     (
         Action::OpenTab,
         "key_new_tab",
-        None,
-        "open this note again in a new terminal tab",
+        Some("alt+T"),
+        "open the linked note under the cursor, or this one, in a new terminal tab",
     ),
     // the word-motion arrows, but only while the cursor is on a heading: the
     // app checks the line before it runs these, and anywhere else the key
@@ -341,6 +344,9 @@ const SUPERSEDED: &[(&str, &[&str])] = &[
     ),
     // shipped unbound, and the settings note wrote that down as `none`
     ("key_find", &["none", "off", ""]),
+    ("key_split_right", &["none", "off", ""]),
+    ("key_split_down", &["none", "off", ""]),
+    ("key_new_tab", &["none", "off", ""]),
 ];
 
 fn superseded(key: &str, spec: &str) -> bool {

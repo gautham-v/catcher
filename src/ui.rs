@@ -1203,6 +1203,19 @@ fn hint_pairs(app: &App) -> Vec<(String, &'static str)> {
         pairs.push(("↵".to_string(), "row below"));
         pairs.push(("esc".to_string(), "source"));
     }
+    // on a note link, the ways to open it beside this note: the pointer's
+    // in the reading view, the split keys in the editor when they are bound
+    if app.view == View::Preview && app.overlay == Overlay::None && app.hovering_link() {
+        pairs.push(("⌥click".to_string(), "right"));
+        pairs.push(("⌃⌥click".to_string(), "tab"));
+    } else if app.overlay == Overlay::None && app.cursor_note_link().is_some() {
+        for (action, what) in [(Action::OpenSplitRight, "right"), (Action::OpenTab, "tab")] {
+            let key = keys.label(action);
+            if !key.is_empty() {
+                pairs.push((key, what));
+            }
+        }
+    }
     // only the two that get you everywhere else: the card lists every other
     // binding, and a bar that lists them all is a bar you stop reading
     for (action, what) in [(Action::Help, "help"), (Action::Quit, "quit")] {
@@ -1789,8 +1802,21 @@ fn palette_rows(app: &App, width: usize) -> Vec<PRow> {
 fn row_text(app: &App, item: &Item) -> (String, String, &'static str) {
     match item {
         Item::Command(c) => {
+            use crate::keys::Action;
             let (n, d) = c.label();
-            (n.to_string(), d.to_string(), "")
+            // the split commands open the link the cursor is on, and say which
+            let beside = matches!(
+                c.action(),
+                Some(Action::OpenSplitRight | Action::OpenSplitDown | Action::OpenTab)
+            );
+            match app.cursor_note_link_name().filter(|_| beside) {
+                Some(name) => (
+                    n.to_string(),
+                    format!("{name}, the link under the cursor"),
+                    "",
+                ),
+                None => (n.to_string(), d.to_string(), ""),
+            }
         }
         // a typed path that exists — labelled so it is clear this is the file
         // on disk and not a search hit
@@ -1951,17 +1977,54 @@ fn draw_peek(f: &mut Frame, app: &mut App) {
         let last = (peek.scroll + peek.view_rows).min(peek.rows.len());
         format!(" {first}–{last} of {} ", peek.rows.len())
     });
-    // the hint on the left only when it fits beside the position on the right
-    let hint = " click to open · ↑↓ scroll ";
-    let used = pos.as_ref().map_or(0, |p| p.chars().count());
-    if hint.chars().count() + used <= inner_w {
-        block = block.title_bottom(Line::from(Span::styled(hint, dim())));
+    // the doors along the bottom border, beside the position when both fit;
+    // when only one does, the doors, since they are what the peek is for
+    let pos_w = pos.as_ref().map_or(0, |p| p.chars().count());
+    let mut labels = crate::app::door_labels(peek.exists, inner_w.saturating_sub(pos_w));
+    let mut pos = pos;
+    if labels.is_empty() {
+        labels = crate::app::door_labels(peek.exists, inner_w);
+        if !labels.is_empty() {
+            pos = None;
+        }
     }
     if let Some(pos) = pos {
         block = block.title_bottom(Line::from(Span::styled(pos, dim())).right_aligned());
     }
     let inner = open_panel(f, rect, block);
     f.render_widget(Paragraph::new(lines), inner);
+
+    // drawn over the border where a left-aligned title would sit, each one
+    // recorded so a click or the pointer can find it
+    peek.doors.clear();
+    if labels.is_empty() {
+        return;
+    }
+    let y = rect.y + rect.height - 1;
+    let mut x = rect.x + 1;
+    let mut spans = vec![Span::styled(" ", dim())];
+    x += 1;
+    for (i, label) in labels.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", dim()));
+            x += 3;
+        }
+        let w = crate::md::str_width(label) as u16;
+        let style = if peek.door_hover == Some(i) {
+            theme::highlight()
+        } else {
+            dim()
+        };
+        spans.push(Span::styled(label.clone(), style));
+        peek.doors
+            .push((Rect::new(x, y, w, 1), crate::app::DOORS[i].0));
+        x += w;
+    }
+    spans.push(Span::styled(" ", dim()));
+    let width = (x + 1)
+        .saturating_sub(rect.x + 1)
+        .min(rect.width.saturating_sub(1));
+    f.render_widget(Line::from(spans), Rect::new(rect.x + 1, y, width, 1));
 }
 
 fn draw_help(f: &mut Frame, app: &App) {

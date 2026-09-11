@@ -18,7 +18,7 @@ mod peek;
 mod table_edit;
 
 use peek::missing_link_hint;
-pub use peek::Peek;
+pub use peek::{door_labels, Peek, DOORS};
 use table_edit::{cell_source, screen_to_cell, slice_cells};
 pub use table_edit::{CellSel, SelKind, TableEdge, TableHandle};
 
@@ -295,9 +295,9 @@ impl Command {
                 Action::InsertTemplate => ("Insert template", "a note from the templates folder, at the cursor"),
                 Action::CopyPath => ("Copy path", "the note's path, to the clipboard"),
                 Action::RevealFile => ("Reveal in Finder", "show the file on disk"),
-                Action::OpenSplitRight => ("Open in split right", "this note again, beside this one"),
-                Action::OpenSplitDown => ("Open in split down", "this note again, below this one"),
-                Action::OpenTab => ("Open in new tab", "this note again, in a terminal tab"),
+                Action::OpenSplitRight => ("Open in split right", "the link under the cursor, or this note, beside this one"),
+                Action::OpenSplitDown => ("Open in split down", "the link under the cursor, or this note, below this one"),
+                Action::OpenTab => ("Open in new tab", "the link under the cursor, or this note, in a terminal tab"),
                 Action::Outline => ("Outline", "every heading in this note; ⏎ goes there, ⌥⏎ folds"),
                 Action::Tags => ("Tags", "every tag in the vault with its note count; ⏎ lists the notes"),
                 Action::ToggleProperties => ("Toggle properties (hide / show)", "the front matter: box, line or hidden on the page; dim or hidden in the editor"),
@@ -387,13 +387,21 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⇧ + any motion", "extend the selection"),
             ("click, drag", "place the cursor, select text"),
             (
-                "⌥click  ^click",
+                "^click",
                 "open the link, [[wikilink]] or #tag under the pointer",
+            ),
+            (
+                "⌥click  ⌃⌥click",
+                "open the linked note in a split to the right / a new tab",
             ),
             ("wheel", "scroll without moving the cursor"),
             (
                 "hover (reading view)",
                 "rest on a [[wikilink]] to peek at the note",
+            ),
+            (
+                "on a peek",
+                "⏎ open  ·  ⌥⏎ ⌥⇧⏎ ⌃⏎ in a split right / below / a new tab",
             ),
         ],
     ),
@@ -405,7 +413,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("tab", "in ^O, next tab: recent · tree · contents · tags"),
             ("← →", "in the tree, fold and unfold a folder"),
             (
-                "⌥⏎  ⌥⇧⏎  ⌘⏎",
+                "⌥⏎  ⌥⇧⏎  ⌃⏎",
                 "open the note in a split right / below / a new tab (⌥click too)",
             ),
             ("⌥⌫", "in Trash, delete the note under the cursor for good"),
@@ -1968,15 +1976,18 @@ impl App {
     /// boxes the last draw cached, and touches no file. The read happens in
     /// [`Self::maybe_peek`] once the pointer has rested for [`peek::PEEK_DWELL`].
     fn on_hover(&mut self, x: u16, y: u16) {
+        // moving about inside the popup is reading it, not leaving the link;
+        // over a door, that door lights up
+        if let Some(peek) = self.peek.as_mut().filter(|p| p.contains(x, y)) {
+            let at = ratatui::layout::Position { x, y };
+            peek.door_hover = peek.doors.iter().position(|(r, _)| r.contains(at));
+            return;
+        }
         if self.view == View::Edit && self.overlay == Overlay::None {
             self.table_hover = self.table_edge_at(x, y);
             return;
         }
         if self.view != View::Preview || self.overlay != Overlay::None {
-            return;
-        }
-        // moving about inside the popup is reading it, not leaving the link
-        if self.peek.as_ref().is_some_and(|p| p.contains(x, y)) {
             return;
         }
         let at = ratatui::layout::Position { x, y };
@@ -2183,24 +2194,103 @@ impl App {
     /// the status bar have already said what the key will do, and ^B goes
     /// back to where the link was.
     fn create_from_link(&mut self, target: &str) {
+        let Some(path) = self.create_for_link(target) else {
+            return;
+        };
+        self.open_path(&path);
+        // a note that is still just its title is for writing, not reading
+        self.view = View::Edit;
+        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+        self.flash(format!(
+            "created \u{201c}{}\u{201d}",
+            name.unwrap_or_default()
+        ));
+    }
+
+    /// Make the note an unresolved wikilink names, where
+    /// [`Self::create_from_link`] would, without opening it here: the path,
+    /// or `None` with the reason flashed.
+    fn create_for_link(&mut self, target: &str) -> Option<PathBuf> {
         let Some((folder, name)) = Self::link_note_path(target) else {
             self.flash(format!("“{target}” is not a name a note can have"));
-            return;
+            return None;
         };
         let dir = Self::create_dir(&self.note_dir(), &folder);
         match notes::create_named(&dir, &name, format!("# {name}\n\n")) {
             Ok(note) => {
-                let path = note.path.clone();
-                self.open_path(&path);
-                // a note that is still just its title is for writing, not reading
-                self.view = View::Edit;
                 // the link that made this note stops being red at once —
                 // one entry pushed, not a walk of the whole vault
-                self.index_add(&path, &name);
-                self.flash(format!("created \u{201c}{name}\u{201d}"));
+                self.index_add(&note.path, &name);
+                Some(note.path)
             }
-            Err(e) => self.flash(format!("create failed: {e}")),
+            Err(e) => {
+                self.flash(format!("create failed: {e}"));
+                None
+            }
         }
+    }
+
+    /// Open the note a link names in a new split or tab, leaving this one
+    /// where it is. A note not written yet is made first, as following the
+    /// link would make it. A link that is not to a note — a URL, a tag, an
+    /// attachment — has no split to go to, so it is followed as usual.
+    fn open_link_beside(&mut self, target: md::LinkTarget, place: crate::terminal::Place) {
+        let t = match target {
+            md::LinkTarget::Note(p) => return self.open_beside(place, Some(PathBuf::from(p))),
+            md::LinkTarget::Wiki(t) => t,
+            other => return self.follow(other),
+        };
+        // `[[#Heading]]` is a place in this note, so this note goes beside
+        if md::split_fragment(&t).0.is_empty() {
+            return self.open_beside(place, None);
+        }
+        let mut path = self.resolve_link(&t);
+        if path.is_none() {
+            // the same second look `follow_wikilink` takes before making it
+            self.refresh_index();
+            path = self.resolve_link(&t);
+        }
+        if let Some(path) = path.or_else(|| self.create_for_link(&t)) {
+            self.open_beside(place, Some(path));
+        }
+    }
+
+    /// The note link under the editor cursor, for the split commands to
+    /// open instead of this note. Only in the editor, where the cursor is
+    /// what you are pointing with, and only a link to a note.
+    pub fn cursor_note_link(&self) -> Option<md::LinkTarget> {
+        if self.view != View::Edit {
+            return None;
+        }
+        let pos = self.editor.cursor;
+        let target = self
+            .editor
+            .lines()
+            .get(pos.0)
+            .and_then(|l| md::link_at(l, pos.1))?;
+        match &target {
+            md::LinkTarget::Wiki(t) if !md::split_fragment(t).0.is_empty() => Some(target),
+            md::LinkTarget::Note(_) => Some(target),
+            _ => None,
+        }
+    }
+
+    /// What the split commands would open: the linked note's name when the
+    /// cursor is on a link, for the palette to say so.
+    pub fn cursor_note_link_name(&self) -> Option<String> {
+        match self.cursor_note_link()? {
+            md::LinkTarget::Wiki(t) => Self::link_note_path(&t).map(|(_, n)| n),
+            md::LinkTarget::Note(p) => Path::new(&p)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned()),
+            _ => None,
+        }
+    }
+
+    /// Whether the pointer is resting on a note link in the reading view,
+    /// which is when the status bar lists what a modified click does.
+    pub fn hovering_link(&self) -> bool {
+        self.hover.is_some()
     }
 
     /// Put a note this session just made into the index, where a walk would
@@ -3783,8 +3873,9 @@ impl App {
                 peek.scroll_by(d);
                 return;
             }
+            // ⏎ opens it here; ⌥⏎, ⌥⇧⏎ and ⌃⏎ beside, as on a ^O row
             if key.code == KeyCode::Enter {
-                self.open_peek();
+                self.open_peek(beside_key(key.modifiers));
                 return;
             }
         }
@@ -4438,9 +4529,9 @@ impl App {
             }
             Action::CopyPath => self.copy_path(),
             Action::RevealFile => self.reveal_file(),
-            Action::OpenSplitRight => self.open_beside(crate::terminal::Place::SplitRight, None),
-            Action::OpenSplitDown => self.open_beside(crate::terminal::Place::SplitDown, None),
-            Action::OpenTab => self.open_beside(crate::terminal::Place::Tab, None),
+            Action::OpenSplitRight => self.split_command(crate::terminal::Place::SplitRight),
+            Action::OpenSplitDown => self.split_command(crate::terminal::Place::SplitDown),
+            Action::OpenTab => self.split_command(crate::terminal::Place::Tab),
             Action::FoldSection => self.fold_section(),
             Action::UnfoldSection => self.unfold_section(),
             Action::FoldAll => self.fold_all(),
@@ -4556,7 +4647,7 @@ impl App {
             KeyCode::Down => self.select_step(1),
             KeyCode::Enter => {
                 if let Some(item) = self.overlay_items().get(self.selected).cloned() {
-                    self.activate_item(item, key.modifiers);
+                    self.activate_item(item, beside_key(key.modifiers));
                 }
             }
             _ => {}
@@ -4581,8 +4672,8 @@ impl App {
     /// ⏎ or a click on an overlay row: with a beside modifier a ^O row opens
     /// the note in a new split or tab, and an outline heading folds and
     /// leaves the picker up; otherwise the row runs.
-    fn activate_item(&mut self, item: Item, modifiers: KeyModifiers) {
-        match beside_place(modifiers) {
+    fn activate_item(&mut self, item: Item, place: Option<crate::terminal::Place>) {
+        match place {
             Some(place) if self.overlay == Overlay::QuickOpen => self.run_item_beside(item, place),
             Some(_) if self.overlay == Overlay::Outline => {
                 if let Item::Heading(line) = item {
@@ -4593,7 +4684,7 @@ impl App {
         }
     }
 
-    /// ⌥⏎ / ⌥⇧⏎ / ⌘⏎ (or ⌥click) on a ^O row: the note opens in a new split
+    /// ⌥⏎ / ⌥⇧⏎ / ⌃⏎ (or ⌥click) on a ^O row: the note opens in a new split
     /// or tab and this one stays where it is. A folder row folds as it would
     /// on a plain ⏎, since there is nothing to open.
     fn run_item_beside(&mut self, item: Item, place: crate::terminal::Place) {
@@ -4605,6 +4696,15 @@ impl App {
         if let Some(path) = path {
             self.overlay = Overlay::None;
             self.open_beside(place, Some(path));
+        }
+    }
+
+    /// The split commands: the note link under the cursor when there is one,
+    /// this note again when there is not.
+    fn split_command(&mut self, place: crate::terminal::Place) {
+        match self.cursor_note_link() {
+            Some(target) => self.open_link_beside(target, place),
+            None => self.open_beside(place, None),
         }
     }
 
@@ -4901,7 +5001,7 @@ impl App {
     /// the preview is for reading, and a click that changed mode made it
     /// impossible to drag out a quote and copy it. `preview_click: edit` in the
     /// settings puts the old behaviour back.
-    fn click_preview(&mut self, x: u16, y: u16) {
+    fn click_preview(&mut self, x: u16, y: u16, modifiers: KeyModifiers) {
         let at = ratatui::layout::Position { x, y };
         if let Some((_, url)) = self.preview_links.iter().find(|(r, _)| r.contains(at)) {
             let url = url.clone();
@@ -4910,7 +5010,11 @@ impl App {
                 self.toggle_properties(true);
                 return;
             }
-            self.follow(md::LinkTarget::parse(&url));
+            // ⌥click beside to the right, ⌃⌥click in a tab; plain, here
+            match beside_place(modifiers) {
+                Some(place) => self.open_link_beside(md::LinkTarget::parse(&url), place),
+                None => self.follow(md::LinkTarget::parse(&url)),
+            }
             return;
         }
         if let Some((_, row)) = self.preview_checkboxes.iter().find(|(r, _)| r.contains(at)) {
@@ -5481,9 +5585,13 @@ impl App {
     /// A left click at (x, y): on the peek, an overlay, the reading view or
     /// the editor, in that order.
     fn on_click(&mut self, x: u16, y: u16, modifiers: KeyModifiers) {
-        // a click on the popup opens the note it shows
+        // a click on the popup opens the note it shows: where a door on
+        // its bottom border says, or here; a beside modifier works anywhere on it
         if self.peek.as_ref().is_some_and(|p| p.contains(x, y)) {
-            self.open_peek();
+            let place = self
+                .peek_door_at(x, y)
+                .unwrap_or_else(|| beside_place(modifiers));
+            self.open_peek(place);
             return;
         }
         self.peek = None;
@@ -5506,7 +5614,7 @@ impl App {
                 .find(|(r, _)| r.contains(ratatui::layout::Position { x, y }))
                 .cloned()
             {
-                self.activate_item(item, modifiers);
+                self.activate_item(item, beside_place(modifiers));
             } else if !self
                 .overlay_rect
                 .contains(ratatui::layout::Position { x, y })
@@ -5529,7 +5637,7 @@ impl App {
                 .editor_area
                 .contains(ratatui::layout::Position { x, y })
         {
-            self.click_preview(x, y);
+            self.click_preview(x, y, modifiers);
         } else if self.view == View::Edit
             && self
                 .editor_area
@@ -5568,7 +5676,11 @@ impl App {
                     .get(pos.0)
                     .and_then(|l| md::link_at(l, pos.1))
                 {
-                    self.follow(target);
+                    // ^click here; ⌥click beside to the right, ⌃⌥click in a tab
+                    match beside_place(modifiers) {
+                        Some(place) => self.open_link_beside(target, place),
+                        None => self.follow(target),
+                    }
                     return;
                 }
             }
@@ -5992,18 +6104,36 @@ fn follows_link(m: KeyModifiers) -> bool {
     m.intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
-/// Which way ⌥ / ⌥⇧ / ⌘ send a picker row: a split right, a split below,
-/// a new tab. `None` is a plain open, in place.
+/// Which way ⌥ / ⌥⇧ / ⌘ send a picker row, a peek or a clicked link: a
+/// split right, a split below, a new tab. `None` is a plain open, in place.
+///
+/// ⌃⌥ is a tab as well, because a click never carries ⌘ and the terminal
+/// keeps ⇧click for its own selection (Ghostty, kitty and WezTerm all do),
+/// so ⌃⌥click is the one chord that reaches a tab by mouse.
 fn beside_place(m: KeyModifiers) -> Option<crate::terminal::Place> {
     use crate::terminal::Place;
-    if m.contains(KeyModifiers::SUPER) {
+    let alt = m.contains(KeyModifiers::ALT);
+    if m.contains(KeyModifiers::SUPER) || (alt && m.contains(KeyModifiers::CONTROL)) {
         Some(Place::Tab)
-    } else if m.contains(KeyModifiers::ALT) && m.contains(KeyModifiers::SHIFT) {
+    } else if alt && m.contains(KeyModifiers::SHIFT) {
         Some(Place::SplitDown)
     } else if m.contains(KeyModifiers::ALT) {
         Some(Place::SplitRight)
     } else {
         None
+    }
+}
+
+/// Which way a ⏎ goes, from its modifiers: as [`beside_place`], and ⌃⏎ a
+/// tab as well. ⌘⏎ is the terminal's own on a Mac (Ghostty goes full
+/// screen on it), and a key, unlike a click, reports ⌃ reliably once the
+/// kitty keyboard protocol is on; elsewhere ⌃⏎ arrives as a plain ⏎ and
+/// opens in place, which is no harm. ⌘⏎ still works where it gets through.
+fn beside_key(m: KeyModifiers) -> Option<crate::terminal::Place> {
+    if m.contains(KeyModifiers::CONTROL) {
+        Some(crate::terminal::Place::Tab)
+    } else {
+        beside_place(m)
     }
 }
 
@@ -6463,6 +6593,28 @@ mod tests {
             0,
             None
         ));
+    }
+
+    #[test]
+    fn alt_opens_beside_and_ctrl_alone_opens_here() {
+        use crate::terminal::Place;
+        let (alt, ctrl, shift, cmd) = (
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::SHIFT,
+            KeyModifiers::SUPER,
+        );
+        assert_eq!(beside_place(KeyModifiers::NONE), None);
+        assert_eq!(beside_place(ctrl), None);
+        assert_eq!(beside_place(alt), Some(Place::SplitRight));
+        assert_eq!(beside_place(alt | shift), Some(Place::SplitDown));
+        assert_eq!(beside_place(ctrl | alt), Some(Place::Tab));
+        assert_eq!(beside_place(cmd), Some(Place::Tab));
+        // a key is a tab on ⌃ alone, where a click is here
+        assert_eq!(beside_key(ctrl), Some(Place::Tab));
+        assert_eq!(beside_key(KeyModifiers::NONE), None);
+        assert_eq!(beside_key(alt), Some(Place::SplitRight));
+        assert_eq!(beside_key(alt | shift), Some(Place::SplitDown));
     }
 
     #[test]

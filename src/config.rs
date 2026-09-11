@@ -1929,9 +1929,6 @@ mod tests {
             "key_date",
             "key_copy_path",
             "key_reveal",
-            "key_split_right",
-            "key_split_down",
-            "key_new_tab",
             "key_extract",
         ] {
             assert!(doc.contains(&format!("- {key}: none")), "{key}");
@@ -1940,6 +1937,28 @@ mod tests {
         assert_eq!(c.keys.label(Action::InsertDate), "^D");
         // and the rewrite keeps it
         assert!(c.to_document().contains("- key_date: ^D"));
+    }
+
+    #[test]
+    fn the_split_keys_ship_bound_and_an_old_none_follows_them() {
+        use crate::keys::Action;
+        let doc = Config::default().to_document();
+        assert!(doc.contains("- key_split_right: ⌥\\"), "{doc}");
+        assert!(doc.contains("- key_split_down: ⌥-"));
+        assert!(doc.contains("- key_new_tab: ⌥T"));
+        // and they read back as themselves
+        let c = Config::from_str(&doc);
+        assert_eq!(c.keys.label(Action::OpenSplitRight), "⌥\\");
+        assert_eq!(c.keys.label(Action::OpenSplitDown), "⌥-");
+        assert_eq!(c.keys.label(Action::OpenTab), "⌥T");
+        // a settings note written while they shipped unbound says `none`,
+        // which is the old default and not a choice, so the new one applies
+        let old = doc
+            .replace("- key_split_right: ⌥\\", "- key_split_right: none")
+            .replace("- key_new_tab: ⌥T", "- key_new_tab: none");
+        let c = Config::from_str(&old);
+        assert_eq!(c.keys.label(Action::OpenSplitRight), "⌥\\");
+        assert_eq!(c.keys.label(Action::OpenTab), "⌥T");
     }
 
     #[test]
