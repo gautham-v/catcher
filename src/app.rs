@@ -779,7 +779,7 @@ impl App {
                     .unwrap_or_else(|| PathBuf::from("."));
                 (parent, Some(Want::Path(f)))
             }
-            Launch::In { root, file } => {
+            Launch::In { root, file, .. } => {
                 let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
                 let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.clone());
                 (root, Some(Want::Path(file)))
@@ -792,6 +792,9 @@ impl App {
         let restore = matches!(launch, Launch::Default)
             .then(|| recents.first().cloned())
             .flatten();
+        // a split or tab opened from the reading view starts in it: the mode
+        // you were in is the mode you meant
+        let reading = matches!(launch, Launch::In { reading: true, .. });
 
         let mut all = notes::load_all(&dir)?;
         let mut active = 0;
@@ -858,7 +861,7 @@ impl App {
             notes: all,
             active,
             editor: Editor::default(),
-            view: View::Edit,
+            view: if reading { View::Preview } else { View::Edit },
             overlay: Overlay::None,
             query: String::new(),
             selected: 0,
@@ -4829,19 +4832,15 @@ impl App {
 
     /// Ask the terminal for a new split or tab running catcher on `path`
     /// (this note, if none), rooted where this session is, so ^O there sees
-    /// the same vault. The new surface takes focus, as the terminal's own
-    /// split would.
+    /// the same vault, and in the view this one is in, so reading stays
+    /// reading. The new surface takes focus, as the terminal's own split
+    /// would.
     fn open_beside(&mut self, place: crate::terminal::Place, path: Option<PathBuf>) {
         self.overlay = Overlay::None;
         self.save_now();
         let path = path.unwrap_or_else(|| self.active_note().path.clone());
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("catcher"));
-        let argv = vec![
-            exe.to_string_lossy().into_owned(),
-            "--root".to_string(),
-            self.dir.to_string_lossy().into_owned(),
-            path.to_string_lossy().into_owned(),
-        ];
+        let argv = Self::beside_argv(&exe, &self.dir, &path, self.view);
         match crate::terminal::open_beside(place, &argv) {
             Ok(()) => {
                 let what = match place {
@@ -4853,6 +4852,21 @@ impl App {
             }
             Err(e) => self.flash(e),
         }
+    }
+
+    /// The command line a split or tab runs: this vault, that note, and
+    /// `--reading` when this session is in the reading view.
+    fn beside_argv(exe: &Path, dir: &Path, path: &Path, view: View) -> Vec<String> {
+        let mut argv = vec![
+            exe.to_string_lossy().into_owned(),
+            "--root".to_string(),
+            dir.to_string_lossy().into_owned(),
+            path.to_string_lossy().into_owned(),
+        ];
+        if view == View::Preview {
+            argv.push("--reading".to_string());
+        }
+        argv
     }
 
     /// Map a screen cell to a source position, undoing the centred-column
@@ -6289,6 +6303,20 @@ mod tests {
             }
         }
         rows
+    }
+
+    #[test]
+    fn a_split_from_the_reading_view_asks_for_the_reading_view() {
+        let exe = Path::new("/bin/catcher");
+        let dir = Path::new("/v");
+        let note = Path::new("/v/a.md");
+        let editing = App::beside_argv(exe, dir, note, View::Edit);
+        assert_eq!(editing, ["/bin/catcher", "--root", "/v", "/v/a.md"]);
+        let reading = App::beside_argv(exe, dir, note, View::Preview);
+        assert_eq!(
+            reading,
+            ["/bin/catcher", "--root", "/v", "/v/a.md", "--reading"]
+        );
     }
 
     #[test]

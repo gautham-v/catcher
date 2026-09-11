@@ -5,8 +5,9 @@
 //! catcher <name>          fuzzy-open a note by title; an error if none matches
 //! catcher <file>.md       open the TUI on that file, rooted at its parent
 //! catcher <dir>           open the TUI rooted at that directory
-//! catcher --root <dir> <file>
-//!                         open <file>, rooted at <dir>: what a split runs
+//! catcher --root <dir> <file> [--reading]
+//!                         open <file>, rooted at <dir>: what a split runs;
+//!                         `--reading` starts in the reading view
 //! catcher new <name>      create a note titled <name> and open it
 //! catcher today           open today's daily note, creating it if missing
 //! catcher add "text"      capture a note without the TUI (stdin if no text)
@@ -56,8 +57,13 @@ pub enum Launch {
     Dir(PathBuf),
     /// This file, in a session rooted at this directory: what one catcher
     /// hands another when it opens a note in a new split or tab, so the
-    /// second one sees the same vault as the first.
-    In { root: PathBuf, file: PathBuf },
+    /// second one sees the same vault as the first. `reading` carries the
+    /// view over too: a note opened beside a page being read opens read.
+    In {
+        root: PathBuf,
+        file: PathBuf,
+        reading: bool,
+    },
     /// Today's daily note, made if missing.
     Today,
 }
@@ -104,6 +110,12 @@ pub fn parse(args: &[String], probe: impl Fn(&str) -> PathKind) -> Cli {
                 [_, root, file] => Cli::Tui(Launch::In {
                     root: PathBuf::from(root),
                     file: PathBuf::from(file),
+                    reading: false,
+                }),
+                [_, root, file, flag] if flag == "--reading" => Cli::Tui(Launch::In {
+                    root: PathBuf::from(root),
+                    file: PathBuf::from(file),
+                    reading: true,
                 }),
                 _ => Cli::Error("--root takes a directory and a file".to_string()),
             };
@@ -174,9 +186,22 @@ mod tests {
             parse(&args(&["--root", "/v", "/v/a/b.md"]), nothing),
             Cli::Tui(Launch::In {
                 root: "/v".into(),
-                file: "/v/a/b.md".into()
+                file: "/v/a/b.md".into(),
+                reading: false,
             })
         );
+        assert_eq!(
+            parse(&args(&["--root", "/v", "/v/a/b.md", "--reading"]), nothing),
+            Cli::Tui(Launch::In {
+                root: "/v".into(),
+                file: "/v/a/b.md".into(),
+                reading: true,
+            })
+        );
+        assert!(matches!(
+            parse(&args(&["--root", "/v", "/v/a/b.md", "--wat"]), nothing),
+            Cli::Error(_)
+        ));
         assert!(matches!(
             parse(&args(&["--root", "/v"]), nothing),
             Cli::Error(_)
