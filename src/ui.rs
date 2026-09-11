@@ -414,7 +414,20 @@ fn draw_complete(f: &mut Frame, app: &mut App) {
         .max()
         .unwrap_or(0)
         .min(24);
+    // a link can be gone on with after it; the footer says how, and a list
+    // longer than the popup says where in it the arrows are
+    let keys = if c.token.kind == crate::complete::Kind::Tag {
+        "⏎ insert · esc".to_string()
+    } else {
+        "⏎ insert · ⇥ stay in link · esc".to_string()
+    };
+    let footer = if c.items.len() > crate::complete::MAX_ROWS {
+        format!(" {keys} · {}/{} ", c.selected + 1, c.items.len())
+    } else {
+        format!(" {keys} ")
+    };
     let inner_w = (label_w + if detail_w > 0 { 2 + detail_w } else { 0 })
+        .max(footer.chars().count() + 2)
         .min(screen.width.saturating_sub(2) as usize);
     let width = inner_w as u16 + 2;
     let height = (c.items.len().min(crate::complete::MAX_ROWS) as u16 + 2).min(screen.height);
@@ -433,6 +446,7 @@ fn draw_complete(f: &mut Frame, app: &mut App) {
         .items
         .iter()
         .enumerate()
+        .skip(c.top)
         .take(crate::complete::MAX_ROWS)
         .map(|(i, item)| {
             let label_room = inner_w.saturating_sub(if detail_w > 0 { 2 + detail_w } else { 0 });
@@ -453,7 +467,10 @@ fn draw_complete(f: &mut Frame, app: &mut App) {
             }
         })
         .collect();
-    let block = panel(app).title_bottom(Line::from(Span::styled(" ⏎ insert · esc ", dim())));
+    if let Some(c) = app.complete.as_mut() {
+        c.rect = Some(rect);
+    }
+    let block = panel(app).title_bottom(Line::from(Span::styled(footer, dim())));
     let inner = open_panel(f, rect, block);
     f.render_widget(Paragraph::new(lines), inner);
 }

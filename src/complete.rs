@@ -42,8 +42,11 @@ pub struct Candidate {
     pub insert: String,
 }
 
-/// How many rows the popup shows at most.
+/// How many rows the popup shows at once; the rest scroll into view.
 pub const MAX_ROWS: usize = 8;
+
+/// How many candidates a query offers at most, scrolling included.
+pub const MAX_ITEMS: usize = 100;
 
 /// The token the cursor at `col` (chars) is in on `line`, or `None` when
 /// the cursor is not after an unclosed `[[` and not in a `#tag` word.
@@ -141,7 +144,7 @@ fn tag_token(chars: &[char], col: usize) -> Option<Token> {
 }
 
 /// The notes that answer `query`, best first: a name, or an alias when the
-/// alias is what matched. At most [`MAX_ROWS`].
+/// alias is what matched. At most [`MAX_ITEMS`].
 pub fn link_candidates(query: &str, entries: &[Entry]) -> Vec<Candidate> {
     let mut scored: Vec<(i64, Candidate)> = Vec::new();
     for e in entries {
@@ -172,7 +175,7 @@ pub fn link_candidates(query: &str, entries: &[Entry]) -> Vec<Candidate> {
         }
     }
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.insert.cmp(&b.1.insert)));
-    let mut out: Vec<Candidate> = scored.into_iter().map(|(_, c)| c).take(MAX_ROWS).collect();
+    let mut out: Vec<Candidate> = scored.into_iter().map(|(_, c)| c).take(MAX_ITEMS).collect();
     // the folder earns its place only when it tells two same-named notes apart
     let mut seen: HashMap<&str, usize> = HashMap::new();
     for c in &out {
@@ -188,24 +191,42 @@ pub fn link_candidates(query: &str, entries: &[Entry]) -> Vec<Candidate> {
 }
 
 /// The headings of a note that answer `query`, in document order, the way
-/// the outline lists them — or, when the query opens with `^`, its blocks.
+/// the outline lists them, each with its level beside it — or, when the
+/// query opens with `^`, its blocks.
 pub fn anchor_candidates(query: &str, lines: &[String]) -> Vec<Candidate> {
     if let Some(q) = query.strip_prefix('^') {
         return block_candidates(q, lines);
     }
-    let blocks = crate::md::blocks(lines);
-    let mut out: Vec<Candidate> = crate::outline::headings(lines, &blocks)
+    let blocks = note_blocks(lines);
+    crate::outline::headings(lines, &blocks)
         .into_iter()
-        .filter(|h| search::fuzzy(query, &h.text).is_some())
+        .filter(|h| !h.text.is_empty() && search::fuzzy(query, &h.text).is_some())
         .map(|h| Candidate {
-            label: format!("{}{}", "  ".repeat(h.level.saturating_sub(1)), h.text),
+            label: h.text.clone(),
             stamp: None,
-            detail: String::new(),
+            detail: format!("H{}", h.level),
             insert: h.text,
         })
-        .collect();
-    out.truncate(MAX_ROWS);
-    out
+        .take(MAX_ITEMS)
+        .collect()
+}
+
+/// The blocks of a note, its front matter one of them: the closing `---`
+/// under a `key: value` line is not a heading, nor is the metadata a
+/// paragraph to link to.
+fn note_blocks(lines: &[String]) -> Vec<crate::md::Block> {
+    match crate::notes::front_matter_end(lines.iter().map(String::as_str)) {
+        Some(end) => {
+            let mut out = vec![crate::md::Block {
+                kind: crate::md::BlockKind::FrontMatter,
+                start: 0,
+                end,
+            }];
+            out.extend(crate::md::blocks_from(lines, end + 1));
+            out
+        }
+        None => crate::md::blocks(lines),
+    }
 }
 
 /// One linkable block of a note: a paragraph or a list item.
@@ -224,7 +245,7 @@ pub struct BlockRef {
 /// blocks one links to. A list item is a block of its own; a run of plain
 /// lines is one paragraph, and its id belongs on the run's last line.
 pub fn block_refs(lines: &[String]) -> Vec<BlockRef> {
-    let special = crate::md::blocks(lines);
+    let special = note_blocks(lines);
     let skip = |row: usize| special.iter().any(|b| b.contains(row));
     let mut out = Vec::new();
     let mut i = 0;
@@ -321,7 +342,7 @@ pub fn block_candidates(query: &str, lines: &[String]) -> Vec<Candidate> {
                 }
             }
         })
-        .take(MAX_ROWS)
+        .take(MAX_ITEMS)
         .collect()
 }
 
@@ -345,14 +366,22 @@ pub fn tag_candidates(query: &str, tags: &[String]) -> Vec<Candidate> {
             detail: String::new(),
             insert: t.clone(),
         })
-        .take(MAX_ROWS)
+        .take(MAX_ITEMS)
         .collect()
 }
 
 /// `line` with `insert` in place of the token's query, and the column the
 /// cursor lands on. A link is closed with `]]` when nothing after the
-/// cursor closes it already; when it is, the cursor steps over the `]]`.
-pub fn accept(line: &str, col: usize, token: &Token, insert: &str) -> (String, usize) {
+/// cursor closes it already; when it is, the cursor steps over the `]]` —
+/// unless `inside`, which leaves it before them, still in the link, to go on
+/// with a `#heading`, a `^block` or `|display text`.
+pub fn accept(
+    line: &str,
+    col: usize,
+    token: &Token,
+    insert: &str,
+    inside: bool,
+) -> (String, usize) {
     let chars: Vec<char> = line.chars().collect();
     let col = col.min(chars.len());
     let head: String = chars[..token.start.min(col)].iter().collect();
@@ -367,11 +396,12 @@ pub fn accept(line: &str, col: usize, token: &Token, insert: &str) -> (String, u
     let mut cursor = out.chars().count();
     if token.kind != Kind::Tag {
         let before_next_open = rest.find("[[").map_or(rest.as_str(), |i| &rest[..i]);
+        let step = if inside { 0 } else { 2 };
         if rest.starts_with("]]") {
-            cursor += 2;
+            cursor += step;
         } else if !before_next_open.contains("]]") {
             out.push_str("]]");
-            cursor += 2;
+            cursor += step;
         }
     }
     out.push_str(&rest);
@@ -447,7 +477,7 @@ mod tests {
         // and the accepted row puts the `#` in
         let token = crate::complete::token_at("![[2026-09-05^", 14).unwrap();
         assert_eq!(
-            accept("![[2026-09-05^", 14, &token, "^ab72fb"),
+            accept("![[2026-09-05^", 14, &token, "^ab72fb", false),
             ("![[2026-09-05#^ab72fb]]".to_string(), 23)
         );
     }
@@ -474,21 +504,53 @@ mod tests {
     fn accepting_a_link_replaces_the_query_and_closes_the_brackets() {
         let t = token_at("see [[gro", 9).unwrap();
         assert_eq!(
-            accept("see [[gro", 9, &t, "groceries"),
+            accept("see [[gro", 9, &t, "groceries", false),
             ("see [[groceries]]".into(), 17)
         );
         // closed already: step over the brackets rather than doubling them
         let t = token_at("see [[gro]] x", 9).unwrap();
         assert_eq!(
-            accept("see [[gro]] x", 9, &t, "groceries"),
+            accept("see [[gro]] x", 9, &t, "groceries", false),
             ("see [[groceries]] x".into(), 17)
         );
         // a later link's `]]` is not this one's
         let t = token_at("[[gro and [[b]]", 5).unwrap();
         assert_eq!(
-            accept("[[gro and [[b]]", 5, &t, "groceries"),
+            accept("[[gro and [[b]]", 5, &t, "groceries", false),
             ("[[groceries]] and [[b]]".into(), 13)
         );
+    }
+
+    #[test]
+    fn tab_takes_a_link_and_stays_inside_it() {
+        let t = token_at("see [[gro", 9).unwrap();
+        assert_eq!(
+            accept("see [[gro", 9, &t, "groceries", true),
+            ("see [[groceries]]".into(), 15)
+        );
+        let t = token_at("see [[gro]] x", 9).unwrap();
+        assert_eq!(
+            accept("see [[gro]] x", 9, &t, "groceries", true),
+            ("see [[groceries]] x".into(), 15)
+        );
+    }
+
+    #[test]
+    fn every_heading_is_offered_with_its_level_and_front_matter_is_not_one() {
+        let mut lines: Vec<String> = ["---", "tags: x", "updated: 2026", "---", "# Top"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for i in 0..20 {
+            lines.push(format!("## Part {i}"));
+        }
+        let got = anchor_candidates("", &lines);
+        // past the rows the popup shows at once: the rest scroll into view
+        assert_eq!(got.len(), 21);
+        assert_eq!(got[0].label, "Top");
+        assert_eq!(got[0].detail, "H1");
+        assert_eq!(got[20].insert, "Part 19");
+        assert_eq!(got[20].detail, "H2");
     }
 
     #[test]
@@ -505,13 +567,13 @@ mod tests {
         );
         let t = token_at("see [[^la", 9).unwrap();
         assert_eq!(
-            accept("see [[^la", 9, &t, "^ab12cd"),
+            accept("see [[^la", 9, &t, "^ab12cd", false),
             ("see [[#^ab12cd]]".into(), 16)
         );
         // through `#^` the hash is already there
         let t = token_at("[[note#^la", 10).unwrap();
         assert_eq!(
-            accept("[[note#^la", 10, &t, "^ab12cd"),
+            accept("[[note#^la", 10, &t, "^ab12cd", false),
             ("[[note#^ab12cd]]".into(), 16)
         );
     }
@@ -520,12 +582,12 @@ mod tests {
     fn accepting_a_heading_or_a_tag_keeps_what_came_before() {
         let t = token_at("[[note#Se", 9).unwrap();
         assert_eq!(
-            accept("[[note#Se", 9, &t, "Setup"),
+            accept("[[note#Se", 9, &t, "Setup", false),
             ("[[note#Setup]]".into(), 14)
         );
         let t = token_at("about #wo now", 9).unwrap();
         assert_eq!(
-            accept("about #wo now", 9, &t, "work"),
+            accept("about #wo now", 9, &t, "work", false),
             ("about #work now".into(), 11)
         );
     }

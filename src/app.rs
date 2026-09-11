@@ -130,13 +130,31 @@ pub struct MergePlan {
     pub notes: usize,
 }
 
-/// The completion popup: the token it answers, its rows and the one the
-/// arrows are on.
+/// The completion popup: the token it answers, its rows, the one the
+/// arrows are on, and the first row in view when there are more than it
+/// shows at once.
 #[derive(Clone, Debug)]
 pub struct Completion {
     pub token: crate::complete::Token,
     pub items: Vec<crate::complete::Candidate>,
     pub selected: usize,
+    pub top: usize,
+    /// Where the popup was last drawn, for the wheel and clicks over it.
+    pub rect: Option<Rect>,
+}
+
+impl Completion {
+    /// Move the arrows' row to `to`, scrolling just enough to keep it in view.
+    fn select(&mut self, to: usize) {
+        let rows = crate::complete::MAX_ROWS;
+        self.selected = to.min(self.items.len().saturating_sub(1));
+        if self.selected < self.top {
+            self.top = self.selected;
+        } else if self.selected >= self.top + rows {
+            self.top = self.selected + 1 - rows;
+        }
+        self.top = self.top.min(self.items.len().saturating_sub(rows));
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -3934,9 +3952,10 @@ impl App {
         self.refresh_complete();
     }
 
-    /// A key while the completion popup is up: the arrows move on it, ⏎ and
-    /// ⇥ take the row, esc puts it away. Anything else falls through to the
-    /// editor, which re-filters after. `true` when the key was taken.
+    /// A key while the completion popup is up: the arrows and page keys move
+    /// on it, ⏎ takes the row, ⇥ takes it and stays inside the link, esc puts
+    /// it away. Anything else falls through to the editor, which re-filters
+    /// after. `true` when the key was taken.
     fn complete_key(&mut self, key: KeyEvent) -> bool {
         let Some(c) = self.complete.as_mut() else {
             return false;
@@ -3946,9 +3965,20 @@ impl App {
             return false;
         }
         match key.code {
-            KeyCode::Up => c.selected = c.selected.saturating_sub(1),
-            KeyCode::Down => c.selected = (c.selected + 1).min(c.items.len().saturating_sub(1)),
-            KeyCode::Enter | KeyCode::Tab => self.accept_complete(),
+            KeyCode::Up => c.select(c.selected.saturating_sub(1)),
+            KeyCode::Down => c.select(c.selected + 1),
+            KeyCode::PageUp => c.select(c.selected.saturating_sub(crate::complete::MAX_ROWS)),
+            KeyCode::PageDown => c.select(c.selected + crate::complete::MAX_ROWS),
+            KeyCode::Enter => self.accept_complete(false),
+            KeyCode::Tab => {
+                // a link stays open for a #heading, ^block or |text after it,
+                // the popup with it; a tag has nothing to go on with
+                let inside = c.token.kind != crate::complete::Kind::Tag;
+                self.accept_complete(inside);
+                if inside {
+                    self.refresh_complete();
+                }
+            }
             KeyCode::Esc => {
                 self.complete_dismissed = Some((self.editor.cursor.0, c.token.start));
                 self.complete = None;
@@ -3958,8 +3988,44 @@ impl App {
         true
     }
 
-    /// Put the selected row's text into the line in place of the query.
-    fn accept_complete(&mut self) {
+    /// The wheel over the completion popup moves along its rows, and a click
+    /// on one takes it. `true` when the event was the popup's.
+    fn complete_mouse(&mut self, ev: MouseEvent) -> bool {
+        let Some(c) = self.complete.as_mut() else {
+            return false;
+        };
+        let Some(rect) = c.rect else {
+            return false;
+        };
+        let at = ratatui::layout::Position {
+            x: ev.column,
+            y: ev.row,
+        };
+        if !rect.contains(at) {
+            return false;
+        }
+        match ev.kind {
+            MouseEventKind::ScrollUp => c.select(c.selected.saturating_sub(1)),
+            MouseEventKind::ScrollDown => c.select(c.selected + 1),
+            MouseEventKind::Down(_) => {
+                // inside the border: row 0 is the top one in view
+                let row = (ev.row.saturating_sub(rect.y + 1)) as usize;
+                if ev.row > rect.y && row < crate::complete::MAX_ROWS {
+                    let i = c.top + row;
+                    if i < c.items.len() {
+                        c.selected = i;
+                        self.accept_complete(false);
+                    }
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Put the selected row's text into the line in place of the query; the
+    /// cursor ends up after the link, or `inside` it, before its `]]`.
+    fn accept_complete(&mut self, inside: bool) {
         let Some(c) = self.complete.take() else {
             return;
         };
@@ -3975,7 +4041,7 @@ impl App {
         }
         let (row, col) = self.editor.cursor;
         let line = self.editor.lines()[row].clone();
-        let (text, cursor) = crate::complete::accept(&line, col, &c.token, &item.insert);
+        let (text, cursor) = crate::complete::accept(&line, col, &c.token, &item.insert, inside);
         self.editor.set_line(row, text);
         self.editor.set_cursor((row, cursor));
         self.sync_editor_to_note();
@@ -4104,21 +4170,28 @@ impl App {
             self.complete = None;
             return;
         }
-        // the same token, re-filtered: keep the row if it is still there
-        let selected = self
+        // the same token, re-filtered: keep the row if it is still there,
+        // and the scroll with it
+        let same = self
             .complete
             .as_ref()
-            .filter(|c| c.token.kind == token.kind && c.token.start == token.start)
+            .filter(|c| c.token.kind == token.kind && c.token.start == token.start);
+        let selected = same
             .and_then(|c| {
                 let was = &c.items.get(c.selected)?.insert;
                 items.iter().position(|i| &i.insert == was)
             })
             .unwrap_or(0);
-        self.complete = Some(Completion {
+        let top = same.map_or(0, |c| c.top);
+        let mut c = Completion {
             token,
             items,
-            selected,
-        });
+            selected: 0,
+            top,
+            rect: same.and_then(|c| c.rect),
+        };
+        c.select(selected);
+        self.complete = Some(c);
     }
 
     /// The bottom edges drawn under `row`: one for every callout card whose
@@ -5288,6 +5361,9 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
+        if self.complete_mouse(ev) {
+            return;
+        }
         if !matches!(ev.kind, MouseEventKind::Moved) {
             self.complete = None;
             self.opener = None;
