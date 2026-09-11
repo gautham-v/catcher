@@ -354,8 +354,11 @@ fn inline_footnotes(markdown: &str) -> (String, Vec<InlineNote>) {
     (out, notes)
 }
 
-/// Add the linked-mentions footer to an already-rendered page: a rule, a count,
-/// and one row per note that links here.
+/// Put the notes that mention this one at the foot of the page, under a
+/// rule: the ones that link here, then the ones that only say its name, each
+/// under a heading that folds it. A note is its name, bright and a link to the
+/// file, with what it says hanging off a thin rail beneath — each excerpt
+/// wrapped to two rows rather than cut to a fragment beside the name.
 ///
 /// It is appended rather than rendered because it is not part of the note — the
 /// file on disk says nothing about who points at it, and nothing the footer
@@ -367,7 +370,12 @@ fn inline_footnotes(markdown: &str) -> (String, Vec<InlineNote>) {
 /// With no mentions there is no footer at all, not even a rule: a note nothing
 /// links to should look like a note, not like a note with an empty drawer at
 /// the bottom.
-pub fn append_mentions(r: &mut Rendered, mentions: &[crate::mentions::Mention], width: usize) {
+pub fn append_mentions(
+    r: &mut Rendered,
+    mentions: &[crate::mentions::Mention],
+    width: usize,
+    folds: MentionFolds,
+) {
     if mentions.is_empty() {
         return;
     }
@@ -382,112 +390,180 @@ pub fn append_mentions(r: &mut Rendered, mentions: &[crate::mentions::Mention], 
         ),
         ..Default::default()
     });
-    // one name column for the whole footer, so the excerpts line up and read
-    // as a column rather than as ragged sentences
-    let namew = mentions
-        .iter()
-        .map(|m| crate::md::str_width(&m.name))
-        .max()
-        .unwrap_or(0)
-        .min(MAX_NAME_COLS)
-        .min(width.saturating_sub(2));
     // two sections under one rule: the notes that link here, then the notes
     // that only say this note's name. Each is left out when it is empty.
     let linked: Vec<&crate::mentions::Mention> = mentions.iter().filter(|m| m.linked).collect();
     let unlinked: Vec<&crate::mentions::Mention> = mentions.iter().filter(|m| !m.linked).collect();
     if !linked.is_empty() {
-        let count = match linked.len() {
-            1 => "1 note links here".to_string(),
-            n => format!("{n} notes link here"),
-        };
-        r.lines.push(PLine {
-            cells: str_cells(&count, dim),
-            ..Default::default()
-        });
-        for m in &linked {
-            append_mention_row(r, m, namew, width);
+        append_mention_heading(
+            r,
+            "Linked mentions",
+            linked.len(),
+            folds.linked,
+            LINKED_HREF,
+            width,
+        );
+        if !folds.linked {
+            for m in &linked {
+                append_mention_note(r, m, width);
+            }
         }
     }
     if !unlinked.is_empty() {
         if !linked.is_empty() {
             r.lines.push(PLine::default());
         }
-        let count = match unlinked.len() {
-            1 => "mentioned in 1 note".to_string(),
-            n => format!("mentioned in {n} notes"),
-        };
-        r.lines.push(PLine {
-            cells: str_cells(&count, dim),
-            ..Default::default()
-        });
-        let shown = unlinked.len().min(crate::mentions::MAX_UNLINKED_ROWS);
-        for m in &unlinked[..shown] {
-            append_mention_row(r, m, namew, width);
-        }
-        if unlinked.len() > shown {
-            r.lines.push(PLine {
-                cells: str_cells(&format!("  {} more", unlinked.len() - shown), dim),
-                ..Default::default()
-            });
+        append_mention_heading(
+            r,
+            "Unlinked mentions",
+            unlinked.len(),
+            folds.unlinked,
+            UNLINKED_HREF,
+            width,
+        );
+        if !folds.unlinked {
+            let shown = unlinked.len().min(crate::mentions::MAX_UNLINKED_ROWS);
+            for m in &unlinked[..shown] {
+                append_mention_note(r, m, width);
+            }
+            if unlinked.len() > shown {
+                let more = unlinked.len() - shown;
+                r.lines.push(PLine {
+                    cells: str_cells(&format!("  {more} more notes"), dim),
+                    ..Default::default()
+                });
+            }
         }
     }
 }
 
-/// One footer row: the note's name as a link, then its excerpt.
-fn append_mention_row(r: &mut Rendered, m: &crate::mentions::Mention, namew: usize, width: usize) {
-    let dim = theme::marker();
-    {
-        let idx = r.urls.len();
-        // an exact file, not a name to resolve again: two notes called `spec`
-        // must not send the click to whichever one the resolver prefers
-        r.urls
-            .push(crate::md::LinkTarget::Note(m.path.to_string_lossy().into_owned()).href());
-        let mut cells = str_cells("  ", dim);
-        let mut name = truncate_cells(&str_cells(&m.name, theme::link()), namew);
-        for c in &mut name {
-            c.link = Some(idx);
+/// Which of the footer's two sections are folded to their heading. Unlinked
+/// starts folded: it is the noisier list, and often names notes the linked
+/// one has already shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MentionFolds {
+    pub linked: bool,
+    pub unlinked: bool,
+}
+
+impl Default for MentionFolds {
+    fn default() -> Self {
+        MentionFolds {
+            linked: false,
+            unlinked: true,
         }
-        let pad = namew.saturating_sub(cells_width(&name));
-        cells.extend(name);
-        cells.extend(str_cells(&" ".repeat(pad), dim));
-        // ×3 is the whole reason the row collapsed, so its room is taken
-        // before the excerpt's and it is never the thing that gets cut away
-        let tail = if m.count > 1 {
-            format!(" ×{}", m.count)
-        } else {
-            String::new()
-        };
-        let room = width
-            .saturating_sub(cells_width(&cells) + 2 + crate::md::str_width(&tail))
-            .min(MAX_EXCERPT_COLS);
-        // a narrow page should show fewer things rather than shredded ones: an
-        // excerpt with a dozen columns to live in says nothing worth the space
-        if room >= 12 && !m.excerpt.is_empty() {
-            cells.extend(str_cells("  ", dim));
-            // the words that made an unlinked row are shown in normal text
-            // against the dim excerpt, which is what says why the row is here
-            cells.extend(excerpt_cells(&m.excerpt, m.link, dim, room, !m.linked));
-        }
-        cells.extend(str_cells(&tail, dim));
-        r.lines.push(PLine {
-            // never wider than the page: the footer must not be the thing that
-            // makes a page of prose pan sideways
-            cells: truncate_cells(&cells, width),
-            ..Default::default()
-        });
     }
 }
+
+/// The hrefs on the footer's two headings: not links anywhere, clicks the app
+/// answers by folding or opening that section.
+pub const LINKED_HREF: &str = "catcher:mentions-linked";
+pub const UNLINKED_HREF: &str = "catcher:mentions-unlinked";
+
+/// A section heading: the fold marker, the title, and how many notes are under
+/// it at the right edge. The whole row is the click that folds it.
+fn append_mention_heading(
+    r: &mut Rendered,
+    title: &str,
+    n: usize,
+    folded: bool,
+    href: &str,
+    width: usize,
+) {
+    let dim = theme::marker();
+    let idx = r.urls.len();
+    r.urls.push(href.to_string());
+    let marker = if folded {
+        theme::FOLDED
+    } else {
+        theme::UNFOLDED
+    };
+    let mut cells = str_cells(marker, dim);
+    // bright and bold the way a third-level heading is, so the two titles
+    // stand above the notes listed under them
+    cells.extend(str_cells(title, theme::heading(3)));
+    let count = n.to_string();
+    let gap = if width == usize::MAX {
+        2
+    } else {
+        width
+            .saturating_sub(cells_width(&cells) + count.len())
+            .max(2)
+    };
+    cells.extend(str_cells(&" ".repeat(gap), dim));
+    cells.extend(str_cells(&count, dim));
+    let mut cells = truncate_cells(&cells, width);
+    for c in &mut cells {
+        c.link = Some(idx);
+    }
+    r.lines.push(PLine {
+        cells,
+        ..Default::default()
+    });
+}
+
+/// One note in the footer: its name as a link to the file, then each excerpt
+/// on the rail under it, and how many more there were.
+fn append_mention_note(r: &mut Rendered, m: &crate::mentions::Mention, width: usize) {
+    let dim = theme::marker();
+    let idx = r.urls.len();
+    // an exact file, not a name to resolve again: two notes called `spec`
+    // must not send the click to whichever one the resolver prefers
+    r.urls
+        .push(crate::md::LinkTarget::Note(m.path.to_string_lossy().into_owned()).href());
+    let mut name = str_cells(&m.name, theme::bright());
+    for c in &mut name {
+        c.link = Some(idx);
+    }
+    let mut cells = str_cells("  ", dim);
+    cells.extend(name);
+    r.lines.push(PLine {
+        // never wider than the page: the footer must not be the thing that
+        // makes a page of prose pan sideways
+        cells: truncate_cells(&cells, width),
+        ..Default::default()
+    });
+    let room = width.saturating_sub(RAIL_COLS).min(MAX_EXCERPT_COLS);
+    // a narrow page should show fewer things rather than shredded ones: an
+    // excerpt with a dozen columns to live in says nothing worth the space
+    if room < 12 {
+        return;
+    }
+    let rail = |mut row: Vec<PCell>| {
+        let mut cells = str_cells("  ", dim);
+        cells.extend(str_cells(
+            &format!("{} ", theme::LIST_GUIDE),
+            theme::border(),
+        ));
+        cells.append(&mut row);
+        PLine {
+            cells,
+            ..Default::default()
+        }
+    };
+    for e in m.excerpts.iter().filter(|e| !e.text.is_empty()) {
+        for row in excerpt_rows(&e.text, e.link, room) {
+            r.lines.push(rail(row));
+        }
+    }
+    let more = m.count.saturating_sub(m.excerpts.len());
+    if more > 0 {
+        r.lines.push(rail(str_cells(&format!("{more} more"), dim)));
+    }
+}
+
+/// Columns taken by the indent and rail an excerpt hangs off.
+const RAIL_COLS: usize = 4;
+/// Rows an excerpt may wrap to before it is cut.
+const EXCERPT_ROWS: usize = 2;
 
 /// The href on the properties box's top edge and on the line it folds to:
 /// not a link anywhere, a click the app answers by flipping the setting.
 pub const PROPERTIES_HREF: &str = "catcher:properties";
 
-/// The widest an excerpt is ever drawn, however wide the window is. Past this
-/// the eye stops reading the column and starts reading the page twice.
+/// The widest an excerpt row is ever drawn, however wide the window is. Past
+/// this the eye stops reading a line and starts hunting for the next one.
 const MAX_EXCERPT_COLS: usize = 80;
-/// The widest the name column gets: a longer name is cut, so one note with a
-/// long name cannot push every excerpt off the page.
-const MAX_NAME_COLS: usize = 28;
 
 /// Put the note's front matter at the top of an already-rendered page, drawn
 /// as a box of properties rather than the YAML the editor shows: one row per
@@ -793,33 +869,116 @@ fn mark_folded(line: &mut PLine, src: usize, hidden: usize, width: usize) {
     line.cells.extend(str_cells(&label, theme::marker()));
 }
 
-/// The cells carry no link and no source position: the footer is not the
-/// note, and a click on an excerpt has nowhere in the note to go.
+/// An excerpt as the rows it takes on the rail: styled rather than shown as
+/// markdown, the words that made it a mention bright and bold, and wrapped at
+/// spaces to at most [`EXCERPT_ROWS`] rows of `room`. Nothing in the footer is
+/// underlined — the note's name is the link, and a row of underlines reads as
+/// noise rather than as links.
 ///
-/// With `plain_span`, the chars inside `link` are drawn without `base` — the
-/// matched words of an unlinked mention stand out of the dim excerpt.
-fn excerpt_cells(
-    excerpt: &str,
-    link: (usize, usize),
-    base: Style,
-    room: usize,
-    plain_span: bool,
-) -> Vec<PCell> {
+/// An excerpt too long for its rows is cut around the link, not from the
+/// start, so the reason the row exists is always on screen. The cells carry
+/// no link and no source position: the footer is not the note, and a click on
+/// an excerpt has nowhere in the note to go.
+fn excerpt_rows(excerpt: &str, link: (usize, usize), room: usize) -> Vec<Vec<PCell>> {
+    let base = theme::link().remove_modifier(Modifier::UNDERLINED);
+    let hit = theme::bright().add_modifier(Modifier::BOLD);
     let cells: Vec<PCell> = crate::md::style_inline(excerpt)
         .into_iter()
         .map(|c| PCell {
             ch: c.ch,
-            style: if plain_span && c.src >= link.0 && c.src < link.1 {
-                c.style
+            style: if c.src >= link.0 && c.src < link.1 {
+                hit
             } else {
-                base.patch(c.style)
+                base.patch(c.style).remove_modifier(Modifier::UNDERLINED)
             },
             link: None,
             src: Some((0, c.src)),
         })
         .collect();
+    // where the link landed once the brackets were hidden
+    let first = cells
+        .iter()
+        .position(|c| c.src.is_some_and(|s| s.1 >= link.0));
+    let last = cells
+        .iter()
+        .rposition(|c| c.src.is_some_and(|s| s.1 < link.1));
+    let (Some(first), Some(last)) = (first, last) else {
+        return wrap_rows(&strip_src(cells), room).0;
+    };
+    // from the start if the link fits there; otherwise from the first word
+    // that brings it into the rows, behind a `…`
+    let starts = std::iter::once(0).chain((1..=first).filter(|&i| cells[i - 1].ch == ' '));
+    for start in starts {
+        let mut from = if start == 0 {
+            Vec::new()
+        } else {
+            str_cells("…", base)
+        };
+        let lead = from.len();
+        from.extend_from_slice(&cells[start..]);
+        let (rows, placed) = wrap_rows(&from, room);
+        if placed > last - start + lead {
+            return rows.into_iter().map(strip_src).collect();
+        }
+    }
+    // a link in a word longer than the rows can hold: the window, cut blind
+    wrap_rows(
+        &strip_src(window_on_link(cells, link, base, room * EXCERPT_ROWS)),
+        room,
+    )
+    .0
+}
+
+/// Wrap `cells` at spaces into at most [`EXCERPT_ROWS`] rows of `room`, the
+/// last cut with `…` if the rest does not fit. Returns the rows and how many
+/// of `cells` made it into them.
+fn wrap_rows(cells: &[PCell], room: usize) -> (Vec<Vec<PCell>>, usize) {
+    let mut rows = Vec::new();
+    let mut at = 0;
+    while at < cells.len() && rows.len() < EXCERPT_ROWS {
+        let rest = &cells[at..];
+        if cells_width(rest) <= room {
+            rows.push(rest.to_vec());
+            at = cells.len();
+            break;
+        }
+        if rows.len() + 1 == EXCERPT_ROWS {
+            let row = truncate_cells(rest, room);
+            at += row.len() - 1;
+            rows.push(row);
+            break;
+        }
+        // break at the last space that fits, or mid-word when a word is
+        // wider than the row
+        let mut used = 0;
+        let fit = rest
+            .iter()
+            .take_while(|c| {
+                used += crate::md::char_width(c.ch);
+                used <= room
+            })
+            .count();
+        let cut = rest[..=fit.min(rest.len() - 1)]
+            .iter()
+            .rposition(|c| c.ch == ' ')
+            .filter(|&p| p > 0)
+            .unwrap_or(fit);
+        rows.push(rest[..cut].to_vec());
+        at += cut;
+        while cells.get(at).is_some_and(|c| c.ch == ' ') {
+            at += 1;
+        }
+    }
+    (rows, at)
+}
+
+/// Cut `cells` to `room` columns so the link stays in view: from the right
+/// when the link fits from the start, otherwise a window that opens with `…`
+/// and puts the link a third of the way in, so what was said before it is
+/// read as context and what came after as the point.
+fn window_on_link(cells: Vec<PCell>, link: (usize, usize), base: Style, room: usize) -> Vec<PCell> {
     if cells_width(&cells) <= room {
-        return strip_src(cells);
+        return cells;
     }
     // where the link landed once the brackets were hidden
     let first = cells
@@ -829,26 +988,31 @@ fn excerpt_cells(
         .iter()
         .rposition(|c| c.src.is_some_and(|s| s.1 < link.1));
     let (Some(first), Some(last)) = (first, last) else {
-        return strip_src(truncate_cells(&cells, room));
+        return truncate_cells(&cells, room);
     };
     let before = cells_width(&cells[..first]);
     let linkw = cells_width(&cells[first..=last]);
-    // the link fits from the start: cut from the right as any row would be
     if before + linkw < room {
-        return strip_src(truncate_cells(&cells, room));
+        return truncate_cells(&cells, room);
     }
-    // otherwise open a window with the link a third of the way in, so what
-    // was said before it is read as context and what came after as the point
-    let lead = room.saturating_sub(linkw + 2) / 3;
+    // a link near the end gives the window's room to what came before it
+    let tail = cells_width(&cells[first..]);
+    let lead = (room.saturating_sub(linkw + 2) / 3).max(room.saturating_sub(tail + 1));
     let mut skip = first;
     let mut skipped = 0;
     while skip > 0 && skipped + crate::md::char_width(cells[skip - 1].ch) <= lead {
         skip -= 1;
         skipped += crate::md::char_width(cells[skip].ch);
     }
+    // and opens on a whole word
+    if let Some(p) = cells[skip..first].iter().position(|c| c.ch == ' ') {
+        if skip > 0 && cells[skip - 1].ch != ' ' {
+            skip += p + 1;
+        }
+    }
     let mut out = str_cells("…", base);
     out.extend(truncate_cells(&cells[skip..], room.saturating_sub(1)));
-    strip_src(out)
+    out
 }
 
 /// Forget the source columns the inline styler recorded: they were only ever
@@ -4539,8 +4703,10 @@ mod tests {
         crate::mentions::Mention {
             path: std::path::PathBuf::from(format!("/vault/{name}.md")),
             name: name.to_string(),
-            excerpt: excerpt.to_string(),
-            link,
+            excerpts: vec![crate::mentions::Excerpt {
+                text: excerpt.to_string(),
+                link,
+            }],
             count,
             linked: true,
         }
@@ -4553,58 +4719,20 @@ mod tests {
             .map(|b| excerpt[..b].chars().count())
             .unwrap_or(0);
         let mut m = mention(name, excerpt, 1);
-        m.link = (at, at + word.chars().count());
+        m.excerpts[0].link = (at, at + word.chars().count());
         m.linked = false;
         m
     }
 
-    #[test]
-    fn unlinked_mentions_are_a_second_section_with_the_matched_words_undimmed() {
-        let mut r = render("# Spec\n");
-        append_mentions(
-            &mut r,
-            &[
-                mention("meta", "about [[spec]]", 1),
-                unlinked("plan", "the spec says so", "spec"),
-            ],
-            60,
-        );
-        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
-        assert!(text.iter().any(|t| t == "1 note links here"));
-        assert!(text.iter().any(|t| t == "mentioned in 1 note"), "{text:?}");
-        let row = footer_row(&r, "plan");
-        // the name is a link to the exact file, as in the linked section
-        let p = row.cells.iter().find(|c| c.ch == 'p').unwrap();
-        assert_eq!(r.url(p.link.unwrap()), Some("note:/vault/plan.md"));
-        // "the " is dim, "spec" is not
-        let t = row.cells.iter().find(|c| c.ch == 't').unwrap();
-        assert_eq!(t.style, theme::marker());
-        let s = row
-            .cells
-            .iter()
-            .find(|c| c.ch == 's' && c.link.is_none())
-            .unwrap();
-        assert_eq!(s.style, theme::PLAIN);
-        // with nothing linking here, only the second section is drawn
-        let mut r = render("# Spec\n");
-        append_mentions(&mut r, &[unlinked("plan", "the spec says so", "spec")], 60);
-        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
-        assert!(!text.iter().any(|t| t.contains("link here")));
-        assert!(text.iter().any(|t| t == "mentioned in 1 note"));
-    }
+    const OPEN: MentionFolds = MentionFolds {
+        linked: false,
+        unlinked: false,
+    };
 
-    #[test]
-    fn the_unlinked_section_stops_at_twenty_rows_and_counts_the_rest() {
-        let mut r = render("# Spec\n");
-        let rows: Vec<_> = (0..25)
-            .map(|i| unlinked(&format!("n{i:02}"), "the spec", "spec"))
-            .collect();
-        append_mentions(&mut r, &rows, 60);
-        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
-        assert!(text.iter().any(|t| t == "mentioned in 25 notes"));
-        assert!(text.iter().any(|t| t.starts_with("  n19")));
-        assert!(!text.iter().any(|t| t.starts_with("  n20")));
-        assert_eq!(text.last().unwrap(), "  5 more");
+    fn footer(mentions: &[crate::mentions::Mention], width: usize) -> Rendered {
+        let mut r = render_wide("# Spec\n", width);
+        append_mentions(&mut r, mentions, width, OPEN);
+        r
     }
 
     fn footer_row<'a>(r: &'a Rendered, name: &str) -> &'a PLine {
@@ -4614,66 +4742,279 @@ mod tests {
             .unwrap()
     }
 
+    /// The rows hanging off the rail, as text without the rail.
+    fn rail_rows(r: &Rendered) -> Vec<String> {
+        r.lines
+            .iter()
+            .filter_map(|l| l.text().strip_prefix("  │ ").map(String::from))
+            .collect()
+    }
+
+    #[test]
+    fn each_note_is_its_name_with_what_it_says_hanging_off_a_rail() {
+        let r = footer(&[mention("meta", "about [[spec]] here", 1)], 60);
+        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        let head = text
+            .iter()
+            .position(|t| t.starts_with("▾ Linked mentions"))
+            .unwrap();
+        assert_eq!(text[head + 1], "  meta");
+        assert_eq!(text[head + 2], "  │ about spec here");
+        // the rail is drawn in the border colour, the way a card's edge is
+        let row = &r.lines[r.lines.len() - 1];
+        assert_eq!(row.cells[2].style, theme::border());
+        // the linked word is bright and bold, the rest in the link colour
+        // without its underline
+        let s = row.cells.iter().find(|c| c.ch == 's').unwrap();
+        assert_eq!(s.style, theme::bright().add_modifier(Modifier::BOLD));
+        let a = row.cells.iter().find(|c| c.ch == 'a').unwrap();
+        assert_eq!(a.style, theme::link().remove_modifier(Modifier::UNDERLINED));
+        // nothing in the footer is underlined
+        assert!(r
+            .lines
+            .iter()
+            .flat_map(|l| &l.cells)
+            .all(|c| !c.style.add_modifier.contains(Modifier::UNDERLINED)));
+    }
+
+    #[test]
+    fn a_heading_names_its_section_counts_it_at_the_edge_and_folds_it() {
+        let rows = [
+            mention("meta", "about [[spec]]", 1),
+            unlinked("plan", "the spec says so", "spec"),
+        ];
+        let mut r = render_wide("# Spec\n", 40);
+        append_mentions(&mut r, &rows, 40, MentionFolds::default());
+        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        let head = r
+            .lines
+            .iter()
+            .find(|l| l.text().starts_with("▾ Linked mentions"))
+            .unwrap();
+        assert!(head.text().ends_with(" 1"), "{:?}", head.text());
+        assert_eq!(cells_width(&head.cells), 40);
+        // the whole heading is the click that folds it
+        assert!(head.cells.iter().all(|c| c.link.is_some()));
+        assert_eq!(r.url(head.cells[0].link.unwrap()), Some(LINKED_HREF));
+        // the title is bright and bold like a heading on the page
+        let t = head.cells.iter().find(|c| c.ch == 'L').unwrap();
+        assert_eq!(t.style, theme::heading(3));
+        // unlinked starts folded: its heading, and nothing under it
+        let un = r
+            .lines
+            .iter()
+            .find(|l| l.text().starts_with("▸ Unlinked mentions"))
+            .unwrap();
+        assert_eq!(r.url(un.cells[0].link.unwrap()), Some(UNLINKED_HREF));
+        assert!(!text.iter().any(|t| t.contains("plan")), "{text:?}");
+        // and open, it lists the note with its matched words bright
+        let r = footer(&rows, 40);
+        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(text.iter().any(|t| t.starts_with("▾ Unlinked mentions")));
+        assert!(text.iter().any(|t| t == "  plan"));
+        let row = r
+            .lines
+            .iter()
+            .find(|l| l.text() == "  │ the spec says so")
+            .unwrap();
+        let s = row.cells.iter().find(|c| c.ch == 's').unwrap();
+        assert_eq!(s.style, theme::bright().add_modifier(Modifier::BOLD));
+        // a folded linked section keeps its heading and loses its notes
+        let mut r = render_wide("# Spec\n", 40);
+        let folds = MentionFolds {
+            linked: true,
+            unlinked: false,
+        };
+        append_mentions(&mut r, &rows, 40, folds);
+        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(text.iter().any(|t| t.starts_with("▸ Linked mentions")));
+        assert!(!text.iter().any(|t| t.contains("meta")));
+        assert!(text.iter().any(|t| t == "  plan"));
+        // with nothing linking here, only the second section is drawn
+        let r = footer(&[unlinked("plan", "the spec says so", "spec")], 60);
+        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(!text.iter().any(|t| t.contains("Linked")));
+        assert!(text.iter().any(|t| t.starts_with("▾ Unlinked mentions")));
+    }
+
+    #[test]
+    fn the_unlinked_section_stops_at_twenty_notes_and_counts_the_rest() {
+        let rows: Vec<_> = (0..25)
+            .map(|i| unlinked(&format!("n{i:02}"), "the spec", "spec"))
+            .collect();
+        let r = footer(&rows, 60);
+        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(text
+            .iter()
+            .any(|t| t.starts_with("▾ Unlinked mentions") && t.ends_with(" 25")));
+        assert!(text.iter().any(|t| t == "  n19"));
+        assert!(!text.iter().any(|t| t == "  n20"));
+        assert_eq!(text.last().unwrap(), "  5 more notes");
+    }
+
     #[test]
     fn no_mentions_means_no_footer_line_at_all() {
         let mut r = render("# Spec\n\nbody\n");
         let before = r.lines.len();
-        append_mentions(&mut r, &[], 60);
-        // not even a rule, and certainly not "0 notes link here"
+        append_mentions(&mut r, &[], 60, OPEN);
+        // not even a rule, and certainly not an empty heading
         assert_eq!(r.lines.len(), before);
-        assert!(!r.lines.iter().any(|l| l.text().contains("link here")));
     }
 
     #[test]
-    fn the_footer_names_each_note_once_and_counts_the_rest() {
-        let mut r = render("# Spec\n");
-        append_mentions(
-            &mut r,
-            &[
-                mention("meta-os-control", "…see [[spec]] for the", 3),
-                mention("ford-mvp", "…pulled from [[spec]]", 1),
-            ],
-            60,
+    fn every_excerpt_a_note_has_is_shown_and_the_rest_are_counted() {
+        let mut m = mention("meta", "see [[spec]] for the", 5);
+        m.excerpts.push(crate::mentions::Excerpt {
+            text: "and [[spec]] again".to_string(),
+            link: (4, 12),
+        });
+        let r = footer(&[m, mention("ford-mvp", "pulled from [[spec]]", 1)], 60);
+        assert_eq!(
+            rail_rows(&r),
+            [
+                "see spec for the",
+                "and spec again",
+                "3 more",
+                "pulled from spec"
+            ]
         );
-        let text: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
-        assert!(text.iter().any(|t| t == "2 notes link here"));
-        let first = text.iter().find(|t| t.contains("meta-os-control")).unwrap();
-        assert!(first.contains("…see spec for the"));
-        // several mentions in one note are one row, with the count beside it
-        assert!(first.ends_with(" ×3"));
-        let second = text.iter().find(|t| t.contains("ford-mvp")).unwrap();
-        assert!(!second.contains('×'));
-        // one note reads as one note
-        let mut one = render("# Spec\n");
-        append_mentions(&mut one, &[mention("meta", "x", 1)], 60);
-        assert!(one.lines.iter().any(|l| l.text() == "1 note links here"));
+        let more = r
+            .lines
+            .iter()
+            .find(|l| l.text().ends_with("3 more"))
+            .unwrap();
+        assert_eq!(more.cells.last().unwrap().style, theme::marker());
     }
 
     #[test]
-    fn every_footer_row_is_a_link_to_the_note_that_mentions_this_one() {
-        let mut r = render("# Spec\n");
-        append_mentions(&mut r, &[mention("meta", "about [[spec]]", 1)], 60);
-        let row = r.lines.iter().find(|l| l.text().contains("meta")).unwrap();
-        let link = row
+    fn a_note_name_is_a_link_to_its_file_and_nothing_else_in_the_footer_is() {
+        let mut m = mention("meta-os-control", "about [[spec]]", 1);
+        m.path = std::path::PathBuf::from("/vault/deep/meta-os-control.md");
+        let r = footer(&[m], 60);
+        let row = footer_row(&r, "meta-os-control");
+        let name: String = row
             .cells
             .iter()
-            .find(|c| c.ch == 'm')
-            .unwrap()
-            .link
-            .unwrap();
+            .filter(|c| c.link.is_some())
+            .map(|c| c.ch)
+            .collect();
+        // named by its file, not its first line
+        assert_eq!(name, "meta-os-control");
+        let link = row.cells[2].link.unwrap();
         // an exact file, so the click cannot land on another note of the same
         // name, and never a url the desktop would be handed
-        assert_eq!(r.url(link), Some("note:/vault/meta.md"));
-        assert_eq!(
-            crate::md::LinkTarget::parse(r.url(link).unwrap()),
-            crate::md::LinkTarget::Note("/vault/meta.md".to_string())
-        );
-        // the excerpt is not part of the link
+        assert_eq!(r.url(link), Some("note:/vault/deep/meta-os-control.md"));
+        // bright, and not underlined
         assert!(row
             .cells
             .iter()
             .filter(|c| c.link.is_some())
-            .all(|c| "meta".contains(c.ch)));
+            .all(|c| c.style == theme::bright()));
+        // the excerpt is not part of the link
+        let rail = r
+            .lines
+            .iter()
+            .find(|l| l.text().starts_with("  │"))
+            .unwrap();
+        assert!(rail.cells.iter().all(|c| c.link.is_none()));
+    }
+
+    #[test]
+    fn a_footer_row_carries_no_source_position_so_a_click_cannot_land_in_the_note() {
+        let mut r = render("# Spec\n");
+        let before = r.lines.len();
+        append_mentions(&mut r, &[mention("meta", "about [[spec]]", 1)], 60, OPEN);
+        for line in &r.lines[before..] {
+            assert_eq!(line.src_line, None);
+            assert_eq!(line.checkbox, None);
+            assert!(!line.wide);
+            assert!(line.cells.iter().all(|c| c.src.is_none()));
+        }
+    }
+
+    #[test]
+    fn the_footer_never_makes_a_page_wider_than_the_page() {
+        let r = footer(
+            &[mention(
+                "a-note-with-a-very-long-name-indeed",
+                "a sentence far longer than the page could ever hold, on and on and on",
+                12,
+            )],
+            30,
+        );
+        assert!(r.lines.iter().all(|l| cells_width(&l.cells) <= 30));
+    }
+
+    #[test]
+    fn the_excerpt_is_styled_rather_than_shown_as_raw_markdown() {
+        let r = footer(
+            &[mention(
+                "meta",
+                "**Projects:** [[spec|the spec]] and `code`",
+                1,
+            )],
+            80,
+        );
+        let row = r
+            .lines
+            .iter()
+            .find(|l| l.text().contains("Projects"))
+            .unwrap();
+        let text = row.text();
+        assert!(!text.contains("**"), "{text}");
+        assert!(!text.contains("[["), "{text}");
+        assert!(!text.contains('`'), "{text}");
+        assert!(text.contains("Projects: the spec and code"), "{text}");
+        // bold is bold
+        let p = row.cells.iter().find(|c| c.ch == 'P').unwrap();
+        assert!(p.style.add_modifier.contains(Modifier::BOLD));
+        // and nothing in the excerpt maps back into the note
+        assert!(row.cells.iter().all(|c| c.src.is_none()));
+    }
+
+    #[test]
+    fn a_long_excerpt_wraps_at_a_space_to_two_rows_and_keeps_the_link() {
+        let r = footer(
+            &[mention(
+                "qc",
+                "Be honest that serving was single-GPU. See the distributed inference note in [[nm]].",
+                1,
+            )],
+            40,
+        );
+        assert_eq!(
+            rail_rows(&r),
+            [
+                "…serving was single-GPU. See the",
+                "distributed inference note in nm.",
+            ]
+        );
+        assert!(r.lines.iter().all(|l| cells_width(&l.cells) <= 40));
+    }
+
+    #[test]
+    fn a_long_excerpt_is_cut_around_the_link_so_the_link_stays_on_screen() {
+        let before = "word ".repeat(30);
+        let after = " tail".repeat(30);
+        let r = footer(
+            &[mention("meta", &format!("{before}[[spec]]{after}"), 1)],
+            40,
+        );
+        let rows = rail_rows(&r);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.join(" ").contains("spec"), "{rows:?}");
+        // the window opens with an ellipsis
+        assert!(rows[0].starts_with('…'), "{rows:?}");
+        // and one that fits from the start is not moved
+        let r = footer(&[mention("meta", &format!("[[spec]]{after}"), 1)], 40);
+        assert!(rail_rows(&r)[0].starts_with("spec tail"));
+    }
+
+    #[test]
+    fn a_narrow_page_keeps_the_names_and_drops_the_excerpts() {
+        let r = footer(&[mention("meta", "about the spec", 1)], 15);
+        assert!(r.lines.iter().any(|l| l.text() == "  meta"));
+        assert!(rail_rows(&r).is_empty());
     }
 
     fn folded(md: &str, heads: &[usize], width: usize) -> Rendered {
@@ -4749,110 +5090,6 @@ mod tests {
         assert!(r.lines.iter().all(|l| l.image.is_none()));
         // the checkbox under the fold is not there to click
         assert!(r.lines.iter().all(|l| l.checkbox.is_none()));
-    }
-
-    #[test]
-    fn a_footer_row_carries_no_source_position_so_a_click_cannot_land_in_the_note() {
-        let mut r = render("# Spec\n");
-        let before = r.lines.len();
-        append_mentions(&mut r, &[mention("meta", "about [[spec]]", 1)], 60);
-        for line in &r.lines[before..] {
-            assert_eq!(line.src_line, None);
-            assert_eq!(line.checkbox, None);
-            assert!(!line.wide);
-            assert!(line.cells.iter().all(|c| c.src.is_none()));
-        }
-    }
-
-    #[test]
-    fn the_footer_never_makes_a_page_wider_than_the_page() {
-        let mut r = render_wide("# Spec\n", 30);
-        append_mentions(
-            &mut r,
-            &[mention(
-                "a-note-with-a-very-long-name-indeed",
-                "a sentence far longer than the page could ever hold, on and on",
-                12,
-            )],
-            30,
-        );
-        assert!(r.lines.iter().all(|l| cells_width(&l.cells) <= 30));
-    }
-
-    #[test]
-    fn the_footer_names_a_note_by_its_file_not_its_first_line() {
-        let mut r = render("# Spec\n");
-        let mut m = mention("meta-os-control", "about [[spec]]", 1);
-        m.path = std::path::PathBuf::from("/vault/deep/meta-os-control.md");
-        append_mentions(&mut r, &[m], 60);
-        let row = footer_row(&r, "meta-os-control");
-        let name: String = row
-            .cells
-            .iter()
-            .filter(|c| c.link.is_some())
-            .map(|c| c.ch)
-            .collect();
-        assert_eq!(name, "meta-os-control");
-        assert!(row
-            .cells
-            .iter()
-            .filter(|c| c.link.is_some())
-            .all(|c| c.style == theme::link()));
-    }
-
-    #[test]
-    fn the_excerpt_is_styled_rather_than_shown_as_raw_markdown() {
-        let mut r = render("# Spec\n");
-        append_mentions(
-            &mut r,
-            &[mention(
-                "meta",
-                "**Projects:** [[spec|the spec]] and `code`",
-                1,
-            )],
-            80,
-        );
-        let row = footer_row(&r, "meta");
-        let text = row.text();
-        assert!(!text.contains("**"), "{text}");
-        assert!(!text.contains("[["), "{text}");
-        assert!(!text.contains('`'), "{text}");
-        assert!(text.contains("Projects: the spec and code"), "{text}");
-        // bold is bold, and the link reads as a link
-        let p = row.cells.iter().find(|c| c.ch == 'P').unwrap();
-        assert!(p.style.add_modifier.contains(Modifier::BOLD));
-        let t = row.cells.iter().find(|c| c.ch == 't').unwrap();
-        assert!(t.style.add_modifier.contains(Modifier::UNDERLINED));
-        // and nothing in the excerpt maps back into the note
-        assert!(row.cells.iter().all(|c| c.src.is_none()));
-    }
-
-    #[test]
-    fn a_long_excerpt_is_cut_around_the_link_so_the_link_stays_on_screen() {
-        let mut r = render("# Spec\n");
-        let before = "word ".repeat(30);
-        let after = " tail".repeat(30);
-        let excerpt = format!("{before}[[spec]]{after}");
-        append_mentions(&mut r, &[mention("meta", &excerpt, 1)], 60);
-        let row = footer_row(&r, "meta");
-        let text = row.text();
-        assert!(text.contains("spec"), "{text}");
-        // the window opens with an ellipsis, right after the name column
-        assert!(text.starts_with("  meta  …"), "{text}");
-        assert!(cells_width(&row.cells) <= 60);
-        // and one that fits from the start is not moved
-        let mut r = render("# Spec\n");
-        let excerpt = format!("[[spec]]{after}");
-        append_mentions(&mut r, &[mention("meta", &excerpt, 1)], 60);
-        assert!(footer_row(&r, "meta").text().contains("  spec tail"));
-    }
-
-    #[test]
-    fn a_narrow_page_keeps_the_titles_and_drops_the_excerpts() {
-        let mut r = render_wide("# Spec\n", 18);
-        append_mentions(&mut r, &[mention("meta", "about the spec", 1)], 18);
-        let row = r.lines.iter().find(|l| l.text().contains("meta")).unwrap();
-        assert!(!row.text().contains("about"));
     }
 
     #[test]

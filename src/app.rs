@@ -686,6 +686,9 @@ pub struct App {
     /// Who links to the note on screen: scanned on a worker thread the first
     /// time the reading view asks, and kept until a save says look again.
     pub mentions: crate::mentions::Backlinks,
+    /// Which footer sections are folded to their heading. For the session and
+    /// every note, not per note: it is a preference about the footer.
+    pub mention_folds: crate::render::MentionFolds,
     /// Recently opened notes, most recent first; persisted between runs.
     pub recents: Vec<PathBuf>,
     /// A preview selection, as (page row, display column) pairs into the rows
@@ -916,6 +919,7 @@ impl App {
             hover: None,
             peek: None,
             mentions: crate::mentions::Backlinks::default(),
+            mention_folds: crate::render::MentionFolds::default(),
             recents,
             preview_sel: None,
             preview_dragging: false,
@@ -5111,6 +5115,15 @@ impl App {
             // the properties box's own edge, and the line it folds to
             if url == crate::render::PROPERTIES_HREF {
                 self.toggle_properties(true);
+                return;
+            }
+            // the footer's headings fold their section
+            if url == crate::render::LINKED_HREF {
+                self.mention_folds.linked = !self.mention_folds.linked;
+                return;
+            }
+            if url == crate::render::UNLINKED_HREF {
+                self.mention_folds.unlinked = !self.mention_folds.unlinked;
                 return;
             }
             // ⌥click beside to the right, ⌃⌥click in a tab; plain, here

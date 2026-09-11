@@ -649,6 +649,7 @@ fn preview_key(app: &mut App, area: Rect) -> u64 {
     // answers with no rows, and the rows it lands with are what changes
     if app.config.linked_mentions && app.config.wikilinks {
         app.linked_mentions().hash(&mut h);
+        app.mention_folds.hash(&mut h);
     }
     // a picture the last layout looked for and found, or did not: a screenshot
     // saved after the note named it should get its rows on the next frame,
@@ -692,7 +693,7 @@ fn layout_preview(app: &mut App, area: Rect) -> PreviewPage {
     // that "link here" would be counting something the page does not show
     if app.config.linked_mentions && app.config.wikilinks {
         let rows = app.linked_mentions();
-        crate::render::append_mentions(&mut rendered, &rows, width);
+        crate::render::append_mentions(&mut rendered, &rows, width, app.mention_folds);
     }
     let dir = app.note_dir();
 

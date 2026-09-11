@@ -25,25 +25,42 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-/// One row of the footer: a note that links here, and the first thing it says
-/// around the link.
+/// One note in the footer: a note that links here, and what it says around
+/// the first few of its links.
 #[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Mention {
     pub path: PathBuf,
     /// The file's stem, which is how every other list in the app names a note.
     pub name: String,
-    /// Raw markdown around the link, centred on it; the renderer styles it.
-    pub excerpt: String,
-    /// Where the link sits in `excerpt`, in chars, so the renderer can keep it
-    /// on screen when the excerpt is cut to the page.
-    pub link: (usize, usize),
-    /// How many times that note links here. Several mentions collapse to one
-    /// row — the row names a note, and a note is named once.
+    /// The first [`MAX_EXCERPTS`] places the note says this one, in the
+    /// order they are written.
+    pub excerpts: Vec<Excerpt>,
+    /// How many times that note links here, which can be more than the
+    /// excerpts kept — the footer says how many it left out.
     pub count: usize,
     /// `true` for a `[[link]]` to this note; `false` for an unlinked mention —
     /// the note's title or one of its aliases written as plain words. The
     /// footer draws the two under separate headings.
     pub linked: bool,
+}
+
+/// One place a note says this one, cut down for the footer.
+#[derive(Clone, Debug, PartialEq, Hash)]
+pub struct Excerpt {
+    /// Raw markdown around the link, centred on it; the renderer styles it.
+    pub text: String,
+    /// Where the link sits in `text`, in chars, so the renderer can mark it
+    /// and keep it on screen when the excerpt is cut to the page.
+    pub link: (usize, usize),
+}
+
+impl From<&Hit> for Excerpt {
+    fn from(h: &Hit) -> Self {
+        Excerpt {
+            text: h.excerpt.clone(),
+            link: h.link,
+        }
+    }
 }
 
 /// One `[[link]]` found pointing this way, before it has been confirmed.
@@ -70,6 +87,10 @@ const MAX_MENTIONS: usize = 50;
 /// Unlinked mentions are noisier than links — a note called `Notes` is named
 /// everywhere — so fewer rows are drawn before the footer says `N more`.
 pub const MAX_UNLINKED_ROWS: usize = 20;
+/// Excerpts kept per note. A note that links here a dozen times is saying the
+/// same thing a dozen times; the first few show how, and the footer counts
+/// the rest.
+const MAX_EXCERPTS: usize = 3;
 /// Chars kept either side of the link. The link is the reason the row exists,
 /// so the excerpt is cut around it rather than from the start; the real cut to
 /// the page width happens at render time, which is the only place that knows
@@ -348,8 +369,8 @@ pub fn excerpt(line: &str, at: usize, end: usize) -> (String, (usize, usize)) {
         out.pop();
     }
     let new_end = new_end.min(out.len());
-    let start = new_at.saturating_sub(BEFORE_LINK);
-    let stop = (new_end + AFTER_LINK).min(out.len());
+    let start = cut_before(&out, new_at.saturating_sub(BEFORE_LINK), new_at);
+    let stop = cut_after(&out, new_end, (new_end + AFTER_LINK).min(out.len()));
     let mut text = String::new();
     let mut shift = 0;
     if start > 0 {
@@ -361,6 +382,32 @@ pub fn excerpt(line: &str, at: usize, end: usize) -> (String, (usize, usize)) {
         text.push('…');
     }
     (text, (new_at - start + shift, new_end - start + shift))
+}
+
+/// Where an excerpt cut short on the left begins: at the first sentence that
+/// starts between `start` and the link, or failing that the first word, so
+/// the excerpt never opens on the back half of one (`…nterview`). A window
+/// that is all one word is left as it is.
+fn cut_before(out: &[char], start: usize, link: usize) -> usize {
+    if start == 0 {
+        return 0;
+    }
+    let sentence =
+        (start.max(2)..=link).find(|&i| out[i - 1] == ' ' && matches!(out[i - 2], '.' | '!' | '?'));
+    let word = (start..=link).find(|&i| out[i - 1] == ' ');
+    sentence.or(word).unwrap_or(start)
+}
+
+/// Where an excerpt cut short on the right ends: after the last whole word
+/// before `stop`, never inside the link.
+fn cut_after(out: &[char], link_end: usize, stop: usize) -> usize {
+    if stop >= out.len() {
+        return stop;
+    }
+    out[link_end..stop]
+        .iter()
+        .rposition(|c| *c == ' ')
+        .map_or(stop, |p| link_end + p)
 }
 
 /// The markers a line is drawn with rather than the words it says: a heading's
@@ -474,14 +521,13 @@ pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Menti
         } else {
             unlinked_in(&body, &words)
         };
-        if let Some(first) = plain.first() {
+        if !plain.is_empty() {
             unlinked.push((
                 modified,
                 Mention {
                     name: stem_of(&path),
                     path: path.clone(),
-                    excerpt: first.excerpt.clone(),
-                    link: first.link,
+                    excerpts: plain.iter().take(MAX_EXCERPTS).map(Excerpt::from).collect(),
                     count: plain.len(),
                     linked: false,
                 },
@@ -513,24 +559,29 @@ pub fn scan(target: &Entry, roots: &[PathBuf], cancel: &AtomicBool) -> Vec<Menti
         // the only thing that can say which, and it is the same call the click
         // on that link would make, so the footer cannot claim a mention the
         // link itself would not honour
-        let mut kept = hits.iter().filter(|h| {
-            let key = crate::md::link_key(&h.target);
-            *verdict.entry(key).or_insert_with(|| {
-                index::resolve(&entries, &h.target).is_some_and(|e| e.path == target.path)
+        let kept: Vec<&Hit> = hits
+            .iter()
+            .filter(|h| {
+                let key = crate::md::link_key(&h.target);
+                *verdict.entry(key).or_insert_with(|| {
+                    index::resolve(&entries, &h.target).is_some_and(|e| e.path == target.path)
+                })
             })
-        });
-        let Some(first) = kept.next() else {
+            .collect();
+        if kept.is_empty() {
             continue;
-        };
-        let count = 1 + kept.count();
+        }
         out.push((
             modified,
             Mention {
                 name: stem_of(&path),
                 path,
-                excerpt: first.excerpt.clone(),
-                link: first.link,
-                count,
+                excerpts: kept
+                    .iter()
+                    .take(MAX_EXCERPTS)
+                    .map(|h| Excerpt::from(*h))
+                    .collect(),
+                count: kept.len(),
                 linked: true,
             },
         ));
@@ -762,15 +813,33 @@ mod tests {
 
     #[test]
     fn the_excerpt_is_centred_on_the_link_and_says_where_it_was_cut() {
-        let far = "x".repeat(150);
-        let line = format!("{far} before [[spec]] after {far}");
+        let far = "word ".repeat(40);
+        let line = format!("{far}before [[spec]] after {far}");
         let (e, span) = excerpt_of(&line);
         assert!(e.starts_with('…') && e.ends_with('…'));
         assert_eq!(spanned(&e, span), "[[spec]]");
-        assert_eq!(e.chars().count(), 1 + BEFORE_LINK + 8 + AFTER_LINK + 1);
+        assert!(e.chars().count() <= 1 + BEFORE_LINK + 8 + AFTER_LINK + 1);
+        // cut at words, never through one
+        assert!(e.starts_with("…word "), "{e}");
+        assert!(e.ends_with(" word…"), "{e}");
+        // a word too long for the window is cut where the window falls
+        let far = "x".repeat(150);
+        let (e, _) = excerpt_of(&format!("{far}[[spec]]"));
+        assert_eq!(e.chars().count(), 1 + BEFORE_LINK + 8);
         // a short line is not cut at all
         let (e, span) = excerpt_of("see [[spec]] for the rest");
         assert_eq!(e, "see [[spec]] for the rest");
+        assert_eq!(spanned(&e, span), "[[spec]]");
+    }
+
+    #[test]
+    fn a_cut_excerpt_starts_at_a_sentence_where_one_starts_in_reach() {
+        let line = format!(
+            "{} ends here. Be honest that serving was single-GPU, see [[spec]].",
+            "lead ".repeat(20)
+        );
+        let (e, span) = excerpt_of(&line);
+        assert_eq!(e, "…Be honest that serving was single-GPU, see [[spec]].");
         assert_eq!(spanned(&e, span), "[[spec]]");
     }
 
@@ -804,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn several_mentions_in_one_note_collapse_to_one_row_with_the_first_excerpt_and_a_count() {
+    fn several_mentions_in_one_note_are_one_note_with_each_excerpt_and_a_count() {
         let dir = tmpdir("collapse");
         write(&dir, "spec.md", "# Spec\n");
         write(
@@ -816,7 +885,11 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "meta");
         assert_eq!(rows[0].count, 2);
-        assert_eq!(rows[0].excerpt, "see [[spec]] for the shape.");
+        let texts: Vec<&str> = rows[0].excerpts.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["see [[spec]] for the shape.", "and again [[spec]] later."]
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -998,9 +1071,11 @@ mod tests {
         // the note itself does not mention itself; `specific` is another word
         assert_eq!(names, vec!["meta", "plan"]);
         assert_eq!(unlinked[0].count, 2);
-        assert_eq!(unlinked[0].excerpt, "see [[spec]] and the spec twice: spec");
-        assert_eq!(spanned(&unlinked[0].excerpt, unlinked[0].link), "spec");
-        assert_eq!(spanned(&unlinked[1].excerpt, unlinked[1].link), "The Plan");
+        let first = &unlinked[0].excerpts[0];
+        assert_eq!(first.text, "see [[spec]] and the spec twice: spec");
+        assert_eq!(spanned(&first.text, first.link), "spec");
+        let plan = &unlinked[1].excerpts[0];
+        assert_eq!(spanned(&plan.text, plan.link), "The Plan");
         // the linked rows come first
         assert!(rows[0].linked);
         let _ = fs::remove_dir_all(&dir);
