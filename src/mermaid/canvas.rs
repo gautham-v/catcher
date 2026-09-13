@@ -44,17 +44,28 @@ pub enum Side {
     Right,
     Down,
     Left,
+    Up,
 }
 
 /// The shapes mermaid's node brackets ask for, as far as a terminal can honour
 /// them: `[]` is a rectangle, `()` a rounded one, `{}` a decision, `(())` a
-/// circle. Anything else mermaid can spell is drawn as the nearest of these.
+/// circle, `[()]` a cylinder — a box with a rule under its top edge for the
+/// lid. Anything else mermaid can spell is drawn as the nearest of these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {
     Rect,
     Round,
     Diamond,
     Circle,
+    Cylinder,
+}
+
+impl Shape {
+    /// Rows the shape spends on its lid, above the label: one for a cylinder,
+    /// none for anything else.
+    pub fn lid(self) -> usize {
+        usize::from(self == Shape::Cylinder)
+    }
 }
 
 /// The arrowhead that points `side`.
@@ -63,6 +74,7 @@ pub fn arrow_char(side: Side) -> char {
         Side::Right => '▶',
         Side::Down => '▼',
         Side::Left => '◀',
+        Side::Up => '▲',
     }
 }
 
@@ -290,6 +302,7 @@ impl Canvas {
             Side::Right => R,
             Side::Left => L,
             Side::Down => D,
+            Side::Up => U,
         };
         self.put_bits(x, y, bits, role);
     }
@@ -301,7 +314,7 @@ impl Canvas {
     pub fn node_size(shape: Shape, label: &[String]) -> (usize, usize) {
         let text = label.iter().map(|l| str_width(l)).max().unwrap_or(0);
         let pad = if shape == Shape::Diamond { 6 } else { 4 };
-        (text + pad, label.len().max(1) + 2)
+        (text + pad, label.len().max(1) + 2 + shape.lid())
     }
 
     /// Draw a labelled node with its top-left at `(x, y)`, `w` columns wide and
@@ -321,7 +334,7 @@ impl Canvas {
         }
         let inner = w - 2;
         let (tl, tr, bl, br, side) = match shape {
-            Shape::Rect => ('╭', '╮', '╰', '╯', '│'),
+            Shape::Rect | Shape::Cylinder => ('╭', '╮', '╰', '╯', '│'),
             Shape::Round => ('╭', '╮', '╰', '╯', '│'),
             Shape::Circle => ('╭', '╮', '╰', '╯', '('),
             Shape::Diamond => ('╱', '╲', '╲', '╱', '│'),
@@ -340,12 +353,17 @@ impl Canvas {
             self.put(x, y + row, side, Role::Line);
             self.put(x + w - 1, y + row, right, Role::Line);
         }
+        // the cylinder's lid: a rule under the top edge, joined to the sides
+        let top = 1 + shape.lid();
+        if shape == Shape::Cylinder && h > 3 {
+            self.hline(x, y + 1, w, Role::Line);
+        }
         for (i, line) in label.iter().enumerate() {
-            if i + 1 >= h - 1 {
+            if top + i >= h - 1 {
                 break;
             }
             let pad = inner.saturating_sub(str_width(line)) / 2;
-            self.text(x + 1 + pad, y + 1 + i, line, Role::Node);
+            self.text(x + 1 + pad, y + top + i, line, Role::Node);
         }
     }
 
@@ -421,6 +439,16 @@ mod tests {
         let mut c = Canvas::new(w, h);
         c.node(0, 0, w, h, Shape::Diamond, &label);
         assert_eq!(text(&c), vec![" ╱─────╲", "│  ok?  │", " ╲─────╱"]);
+    }
+
+    #[test]
+    fn a_cylinder_is_a_box_with_a_lid() {
+        let label = vec!["db".to_string()];
+        let (w, h) = Canvas::node_size(Shape::Cylinder, &label);
+        assert_eq!((w, h), (6, 4));
+        let mut c = Canvas::new(w, h);
+        c.node(0, 0, w, h, Shape::Cylinder, &label);
+        assert_eq!(text(&c), vec!["╭────╮", "├────┤", "│ db │", "╰────╯"]);
     }
 
     #[test]

@@ -37,10 +37,6 @@ const GUTTER_LR: usize = 6;
 /// one for the sideways jog that carries the line to the box below.
 const GUTTER_TD: usize = 2;
 
-/// Room an edge label wants either side of itself inside a gutter, so the words
-/// never sit flush against the box they belong to.
-const LABEL_PAD: usize = 4;
-
 /// Blank rows between two boxes stacked in the same `LR` column.
 const STACK_LR: usize = 1;
 
@@ -478,9 +474,9 @@ fn spec(s: &str) -> Option<Spec> {
 
 /// The bracket `rest` opens with, as `(open, close, shape)`.
 ///
-/// Mermaid can spell a dozen shapes and a terminal can draw four, so the rest
-/// are mapped onto the nearest: a stadium and a cylinder are round, a
-/// subroutine and an asymmetric box are rectangles, a hexagon is a decision.
+/// Mermaid can spell a dozen shapes and a terminal can draw five, so the rest
+/// are mapped onto the nearest: a stadium is round, a subroutine and an
+/// asymmetric box are rectangles, a hexagon is a decision.
 /// Longest spellings first — `((` has to be tried before `(`.
 fn bracket(rest: &str) -> Option<(&'static str, &'static str, Shape)> {
     const FORMS: [(&str, &str, Shape); 13] = [
@@ -493,7 +489,7 @@ fn bracket(rest: &str) -> Option<(&'static str, &'static str, Shape)> {
         ("[\\", "/]", Shape::Rect),
         ("([", "])", Shape::Round),
         ("[[", "]]", Shape::Rect),
-        ("[(", ")]", Shape::Round),
+        ("[(", ")]", Shape::Cylinder),
         ("{{", "}}", Shape::Diamond),
         ("[", "]", Shape::Rect),
         ("(", ")", Shape::Round),
@@ -791,6 +787,42 @@ impl Frame {
         }
     }
 
+    /// The first cell of a run along the major axis: only the edge it leaves
+    /// by, so it joins whatever it turns off without reaching back.
+    fn stub(&self, c: &mut Canvas, major: usize, minor: usize) {
+        let side = match self.dir {
+            Dir::Lr => Side::Right,
+            Dir::Rl => Side::Left,
+            Dir::Td => Side::Down,
+        };
+        let (x, y) = self.point(major, minor);
+        c.stub(x, y, side, Role::Line);
+    }
+
+    /// The last cell of a run along the major axis: only the edge it came
+    /// by, so it turns a corner instead of reaching on into nothing.
+    fn stub_back(&self, c: &mut Canvas, major: usize, minor: usize) {
+        let side = match self.dir {
+            Dir::Lr => Side::Left,
+            Dir::Rl => Side::Right,
+            Dir::Td => Side::Up,
+        };
+        let (x, y) = self.point(major, minor);
+        c.stub(x, y, side, Role::Line);
+    }
+
+    /// A run along the major axis from `from` up to and including `to`, the
+    /// cell where it turns. A run one cell long is the turn alone, and reaches
+    /// back only — the same cell drawn as a run would reach both ways and
+    /// make a tee of the corner.
+    fn leg(&self, c: &mut Canvas, from: usize, to: usize, minor: usize, stroke: Stroke) {
+        if to > from {
+            self.along(c, from, minor, to + 1 - from, stroke);
+        } else {
+            self.stub_back(c, to, minor);
+        }
+    }
+
     fn arrow(&self, c: &mut Canvas, major: usize, minor: usize) {
         let side = match self.dir {
             Dir::Lr => Side::Right,
@@ -801,13 +833,35 @@ impl Frame {
         c.arrow(x, y, side, Role::Line);
     }
 
+    /// An arrowhead on a box's `Lo` or `Hi` side: it points across the minor
+    /// axis, towards the box, from the side `from_hi` names.
+    fn arrow_across(&self, c: &mut Canvas, major: usize, minor: usize, from_hi: bool) {
+        let side = match (self.dir, from_hi) {
+            (Dir::Td, true) => Side::Left,
+            (Dir::Td, false) => Side::Right,
+            (_, true) => Side::Up,
+            (_, false) => Side::Down,
+        };
+        let (x, y) = self.point(major, minor);
+        c.arrow(x, y, side, Role::Line);
+    }
+
+    /// Words beside a leg, starting at `major` and running along it, with a
+    /// space either side so they never touch the line's dashes.
+    fn label_from(&self, c: &mut Canvas, major: usize, minor: usize, text: &str) {
+        let text = format!(" {text} ");
+        let len = str_width(&text);
+        c.text(self.at(major, len), minor, &text, Role::Label);
+    }
+
     /// Words centred over the major range `lo..=hi`, at one place on the minor
     /// axis. This is the `LR` way round: the run under the label is horizontal,
     /// so the label lies along it.
     fn label_along(&self, c: &mut Canvas, lo: usize, hi: usize, minor: usize, text: &str) {
+        let text = format!(" {text} ");
         let len = hi + 1 - lo;
-        let pad = len.saturating_sub(str_width(text)) / 2;
-        c.text(self.at(lo, len) + pad, minor, text, Role::Label);
+        let pad = len.saturating_sub(str_width(&text)) / 2;
+        c.text(self.at(lo, len) + pad, minor, &text, Role::Label);
     }
 
     /// Words centred over the minor range `lo..=hi`, at one place on the major
@@ -844,7 +898,10 @@ fn line(c: &mut Canvas, x: usize, y: usize, len: usize, horizontal: bool, stroke
     };
     for i in 0..len {
         let (x, y) = if horizontal { (x + i, y) } else { (x, y + i) };
-        if c.get(x, y) != plain {
+        // the ends of a dotted run are where it touches a box or turns a
+        // corner, and a gap there would cut the line loose — or, worse, blank
+        // the edge the corner is about to be made from
+        if c.get(x, y) != plain || (stroke == Stroke::Dotted && (i == 0 || i + 1 == len)) {
             continue;
         }
         // the dash phase follows the canvas column, not the run, so a route
@@ -871,6 +928,81 @@ struct Place {
     shape: Shape,
 }
 
+/// The four sides of a box an edge can touch. `In` and `Out` face the ranks
+/// before and after; `Lo` and `Hi` face the two ends of the minor axis — the
+/// top and bottom of an `LR` chart, the left and right of a `TD` one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side4 {
+    In,
+    Out,
+    Lo,
+    Hi,
+}
+
+impl Side4 {
+    const ALL: [Side4; 4] = [Side4::In, Side4::Out, Side4::Lo, Side4::Hi];
+
+    /// Whether ports on this side are spaced along the minor axis.
+    fn minor(self) -> bool {
+        matches!(self, Side4::In | Side4::Out)
+    }
+
+    /// The side facing the lane a detour runs in.
+    fn lane(hi: bool) -> Side4 {
+        if hi {
+            Side4::Hi
+        } else {
+            Side4::Lo
+        }
+    }
+}
+
+/// How an edge gets from its box to the other one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    /// One rank forward: out of one side, across the gutter, into the next.
+    Step,
+    /// More than one rank forward, with nothing in the way: along its own
+    /// row from the source, then up under the target and in through its far
+    /// side. The usual shape of "one box feeds several down the line".
+    Shot,
+    /// Anything else: out to a lane beyond the layout, along it, and back in.
+    /// `hi` says which side of the layout the lane is on. An end that is the
+    /// last box in its rank on that side (`from_edge`, `to_edge`) reaches the
+    /// lane straight from that side; any other goes through a gutter first.
+    Detour {
+        forward: bool,
+        hi: bool,
+        from_edge: bool,
+        to_edge: bool,
+    },
+}
+
+impl Route {
+    /// The side an edge leaves its source by, and the side it reaches its
+    /// target on.
+    fn sides(self) -> (Side4, Side4) {
+        match self {
+            Route::Step => (Side4::Out, Side4::In),
+            Route::Shot => (Side4::Out, Side4::Hi),
+            Route::Detour {
+                forward,
+                hi,
+                from_edge,
+                to_edge,
+            } => {
+                let from = match (from_edge, forward) {
+                    (true, _) => Side4::lane(hi),
+                    (false, true) => Side4::Out,
+                    (false, false) => Side4::In,
+                };
+                let to = if to_edge { Side4::lane(hi) } else { Side4::In };
+                (from, to)
+            }
+        }
+    }
+}
+
 /// Everywhere everything goes.
 struct Plan {
     frame: Frame,
@@ -883,6 +1015,19 @@ struct Plan {
     /// them, at either end, are the lanes the detours run in.
     from: usize,
     to: usize,
+    /// How each edge travels, by edge.
+    routes: Vec<Route>,
+    /// Where each edge touches its two boxes, by edge: a coordinate along the
+    /// side it uses — on the minor axis for `In`/`Out`, the major for
+    /// `Lo`/`Hi`. Two edges on one side of one box never share a port, so
+    /// their lines never merge and their labels never land on each other.
+    ports: Vec<(usize, usize)>,
+    /// Where each edge's legs across a gutter run, by edge: the major
+    /// coordinate it leaves along, in the gutter after its source (or before
+    /// it, for a back edge), and the one it arrives along, before its target.
+    /// Every leg in one gutter has a coordinate of its own, so two never
+    /// merge into one line. `None` for a leg the route does not have.
+    legs: Vec<(Option<usize>, Option<usize>)>,
 }
 
 /// Word-wrap a label so a long name deepens the diagram rather than pushing
@@ -914,57 +1059,212 @@ fn wrap(label: &[String], width: usize) -> Vec<String> {
     out
 }
 
-/// Work out where every box and every lane goes.
+/// Port `i` of `k` spread over `lo..=hi`: evenly, with the same air at both
+/// ends as between neighbours. A lone port sits at `centre` — the middle of
+/// the box — so a plain chain is drawn exactly as it always was.
+fn spread(lo: usize, hi: usize, k: usize, i: usize, centre: usize) -> usize {
+    if k <= 1 || hi < lo {
+        return centre;
+    }
+    let span = hi + 1 - lo;
+    lo + ((2 * i + 1) * span) / (2 * k)
+}
+
+/// A label with blank lines above it, so a box stretched past what its words
+/// need still reads as centred.
+fn pad(label: &[String], room: usize) -> Vec<String> {
+    if room == 0 {
+        return label.to_vec();
+    }
+    let mut out = vec![String::new(); room / 2];
+    out.extend_from_slice(label);
+    out
+}
+
+/// One leg across a gutter, waiting for a coordinate: the edge, and the two
+/// minor positions it runs between — where it leaves the line it came along
+/// and where it joins the one it goes on by.
+#[derive(Clone, Copy)]
+struct Jog {
+    edge: usize,
+    from: usize,
+    to: usize,
+}
+
+impl Jog {
+    fn covers(&self, minor: usize) -> bool {
+        (self.from.min(self.to)..=self.from.max(self.to)).contains(&minor)
+    }
+}
+
+/// Crossings between step jogs in one gutter, given the order they take
+/// coordinates in — `order[0]` nearest the boxes the jogs arrive at. A jog's
+/// leg in from its source runs as far as its own coordinate and crosses every
+/// jog nearer the source that spans its row; its leg out to the target runs
+/// from its coordinate onward and crosses every jog nearer the target that
+/// spans that row.
+fn crossings(jogs: &[Jog], order: &[usize]) -> usize {
+    let mut n = 0;
+    for (ia, &a) in order.iter().enumerate() {
+        for (ib, &b) in order.iter().enumerate() {
+            if a == b {
+                continue;
+            }
+            // `ib > ia` puts b nearer the source than a
+            if ib > ia && jogs[b].covers(jogs[a].from) {
+                n += 1;
+            }
+            if ib < ia && jogs[b].covers(jogs[a].to) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// The order step jogs in one gutter should take their coordinates in, nearest
+/// the target first, so the fewest legs cross. Small enough to try every
+/// order; a gutter with more jogs than that keeps the order they were written.
+fn best_order(jogs: &[Jog]) -> Vec<usize> {
+    let k = jogs.len();
+    let mut order: Vec<usize> = (0..k).collect();
+    if k > 6 {
+        return order;
+    }
+    let mut best = (crossings(jogs, &order), order.clone());
+    // Heap's algorithm, iteratively
+    let mut c = vec![0usize; k];
+    let mut i = 0;
+    while i < k {
+        if c[i] < i {
+            if i % 2 == 0 {
+                order.swap(0, i);
+            } else {
+                order.swap(c[i], i);
+            }
+            let n = crossings(jogs, &order);
+            if n < best.0 {
+                best = (n, order.clone());
+            }
+            c[i] += 1;
+            i = 0;
+        } else {
+            c[i] = 0;
+            i += 1;
+        }
+    }
+    best.1
+}
+
+/// How each edge travels. A forward edge is a shot if `shot` allows it — the
+/// layout below vetoes one whose row is not clear — else a step if it goes
+/// one rank on, else a detour, on whichever side of the layout more of its
+/// ends are free to reach straight; a tie goes below for a forward edge,
+/// above for a back edge, so the two kinds keep out of each other's way.
+fn routes(g: &Graph, ranks: &[usize], by_rank: &[Vec<usize>], shot: &[bool]) -> Vec<Route> {
+    g.edges
+        .iter()
+        .enumerate()
+        .map(|(k, e)| {
+            let (s, t) = (ranks[e.from], ranks[e.to]);
+            let forward = t > s;
+            let last = |i: usize| by_rank[ranks[i]].last() == Some(&i);
+            let first = |i: usize| by_rank[ranks[i]].first() == Some(&i);
+            // a shot is open to a step too: a box stacked under the chain
+            // that feeds a box on it comes up from below, and the chain's own
+            // line into that box stays straight
+            if forward && shot[k] && last(e.to) {
+                return Route::Shot;
+            }
+            if t == s + 1 {
+                return Route::Step;
+            }
+            let hi_score = usize::from(last(e.from)) + usize::from(last(e.to));
+            let lo_score = usize::from(first(e.from)) + usize::from(first(e.to));
+            let hi = match hi_score.cmp(&lo_score) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                std::cmp::Ordering::Equal => forward,
+            };
+            let (from_edge, to_edge) = if hi {
+                (last(e.from), last(e.to))
+            } else {
+                (first(e.from), first(e.to))
+            };
+            Route::Detour {
+                forward,
+                hi,
+                from_edge,
+                to_edge,
+            }
+        })
+        .collect()
+}
+
+/// Work out where every box, every port and every lane goes.
+///
+/// The minor axis is settled first — how boxes stack and where their ports
+/// are — because nothing about it depends on the gutters, and the gutters
+/// depend on it: a gutter is as wide as the words and the jogs it has to hold,
+/// and which edges jog is only known once the ports are.
 fn plan(g: &Graph, ranks: &[usize], dir: Dir, width: usize) -> Plan {
     let td = dir == Dir::Td;
-    let gutter = if td { GUTTER_TD } else { GUTTER_LR };
-    let stack = if td { STACK_TD } else { STACK_LR };
-
-    let labels: Vec<Vec<String>> = g
-        .nodes
-        .iter()
-        .map(|n| wrap(&n.label, (width / 3).max(MIN_LABEL)))
-        .collect();
-    let sizes: Vec<(usize, usize)> = g
-        .nodes
-        .iter()
-        .zip(&labels)
-        .map(|(n, label)| Canvas::node_size(n.shape, label))
-        .collect();
-    let major: Vec<usize> = sizes.iter().map(|&(w, h)| if td { h } else { w }).collect();
-    let minor: Vec<usize> = sizes.iter().map(|&(w, h)| if td { w } else { h }).collect();
-
     let count = ranks.iter().max().map_or(1, |r| r + 1);
     let mut by_rank: Vec<Vec<usize>> = vec![Vec::new(); count];
     for (i, &r) in ranks.iter().enumerate() {
         by_rank[r].push(i);
     }
+    let labels: Vec<Vec<String>> = g
+        .nodes
+        .iter()
+        .map(|n| wrap(&n.label, (width / 3).max(MIN_LABEL)))
+        .collect();
 
-    // a gutter is as wide as the widest label that has to sit in it. In `TD`
-    // it is rows rather than columns, and a label is one row whatever it says,
-    // so there the minimum is already the answer.
-    let mut gaps = vec![gutter; count];
-    gaps[0] = if g.edges.iter().any(|e| ranks[e.to] == 0) {
-        gutter
-    } else {
-        0
-    };
-    if !td {
-        for e in &g.edges {
-            let (from, to) = (ranks[e.from], ranks[e.to]);
-            match &e.label {
-                Some(label) if to == from + 1 => {
-                    gaps[to] = gaps[to].max(str_width(label) + LABEL_PAD);
+    // every skip starts out hoping for a straight shot; one whose row turns
+    // out to have a box on it is demoted to a detour and the layout redone,
+    // since its ports and its box's size change with it
+    let mut shot = vec![true; g.edges.len()];
+    let mut laid = None;
+    for _ in 0..=g.edges.len() {
+        let routes = routes(g, ranks, &by_rank, &shot);
+        let (places, ports, from, to) = stack(g, ranks, &by_rank, &routes, &labels, td);
+        let blocked: Vec<usize> = g
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(k, e)| {
+                routes[*k] == Route::Shot && {
+                    let (s, _) = ports[*k];
+                    let t = &places[e.to];
+                    s < t.minor + t.mn
+                        || places.iter().enumerate().any(|(i, p)| {
+                            i != e.to
+                                && ranks[i] > ranks[e.from]
+                                && ranks[i] <= ranks[e.to]
+                                && (p.minor..p.minor + p.mn).contains(&s)
+                        })
                 }
-                _ => {}
-            }
+            })
+            .map(|(k, _)| k)
+            .collect();
+        laid = Some((routes, places, ports, from, to));
+        if blocked.is_empty() {
+            break;
+        }
+        for k in blocked {
+            shot[k] = false;
         }
     }
+    let (routes, mut places, _, from, to) = laid.expect("at least one layout");
 
-    // along the major axis: rank after rank, each as deep as its deepest box
+    // along the major axis: every gutter as wide as the words on the legs
+    // that leave into it and the legs that cross it, then rank after rank,
+    // each as deep as its deepest box
+    let ports = assign_ports(g, &routes, &places, td);
+    let (gaps, legs) = gutters(g, ranks, &routes, &ports, count, td);
     let depth: Vec<usize> = by_rank
         .iter()
-        .map(|rank| rank.iter().map(|&i| major[i]).max().unwrap_or(0))
+        .map(|rank| rank.iter().map(|&i| places[i].ms).max().unwrap_or(0))
         .collect();
     let mut starts = Vec::with_capacity(count);
     let mut at = 0;
@@ -974,46 +1274,22 @@ fn plan(g: &Graph, ranks: &[usize], dir: Dir, width: usize) -> Plan {
         at += depth[r];
     }
     let span = at;
+    for (i, p) in places.iter_mut().enumerate() {
+        p.major = starts[ranks[i]];
+    }
+    // the ports on a box's top and bottom sit along the major axis, which is
+    // only now known
+    let ports = assign_ports(g, &routes, &places, td);
+    let legs: Vec<(Option<usize>, Option<usize>)> = legs
+        .iter()
+        .map(|&(a, b)| {
+            let place = |(r, off): (usize, usize)| starts[r] - gaps[r] + off;
+            (a.map(place), b.map(place))
+        })
+        .collect();
     let gaps: Vec<(usize, usize)> = (0..count)
         .map(|r| (starts[r] - gaps[r], starts[r]))
         .collect();
-
-    // across the minor axis: every rank centred against the deepest one, with
-    // room above it for the lane each back edge needs
-    let widths: Vec<usize> = by_rank
-        .iter()
-        .map(|rank| {
-            rank.iter().map(|&i| minor[i]).sum::<usize>() + stack * rank.len().saturating_sub(1)
-        })
-        .collect();
-    let widest = widths.iter().copied().max().unwrap_or(0);
-    let from = g
-        .edges
-        .iter()
-        .filter(|e| ranks[e.to] <= ranks[e.from])
-        .count();
-
-    let mut places: Vec<Place> = Vec::with_capacity(g.nodes.len());
-    for (i, node) in g.nodes.iter().enumerate() {
-        places.push(Place {
-            major: starts[ranks[i]],
-            minor: 0,
-            ms: depth[ranks[i]],
-            mn: minor[i],
-            // a box given more depth than it asked for, so its rank lines up,
-            // holds its words in the middle of it rather than at the top —
-            // which along the major axis is only something `TD` can mean
-            label: pad(&labels[i], td, depth[ranks[i]] - major[i]),
-            shape: node.shape,
-        });
-    }
-    for (r, rank) in by_rank.iter().enumerate() {
-        let mut at = from + (widest - widths[r]) / 2;
-        for &i in rank {
-            places[i].minor = at;
-            at += places[i].mn + stack;
-        }
-    }
 
     Plan {
         frame: Frame { dir, span },
@@ -1021,111 +1297,495 @@ fn plan(g: &Graph, ranks: &[usize], dir: Dir, width: usize) -> Plan {
         places,
         gaps,
         from,
-        to: from + widest,
+        to,
+        routes,
+        ports,
+        legs,
     }
 }
 
-/// A label with blank lines above it, so a box stretched to its rank's depth
-/// still reads as centred.
-fn pad(label: &[String], td: bool, room: usize) -> Vec<String> {
-    if !td || room == 0 {
-        return label.to_vec();
+/// Size every box and stack the ranks along the minor axis, given how the
+/// edges travel. Returns the boxes (with no major position yet), the ports,
+/// and where the ranks start and end on the minor axis.
+fn stack(
+    g: &Graph,
+    ranks: &[usize],
+    by_rank: &[Vec<usize>],
+    routes: &[Route],
+    labels: &[Vec<String>],
+    td: bool,
+) -> (Vec<Place>, Vec<(usize, usize)>, usize, usize) {
+    let stack = if td { STACK_TD } else { STACK_LR };
+
+    // how many edges touch each side of each box: a side with several grows
+    // the box until each can have a row (or column) of its own
+    let mut touches = vec![[0usize; 4]; g.nodes.len()];
+    for (e, route) in g.edges.iter().zip(routes) {
+        let (a, b) = route.sides();
+        touches[e.from][a as usize] += 1;
+        touches[e.to][b as usize] += 1;
     }
-    let mut out = vec![String::new(); room / 2];
-    out.extend_from_slice(label);
-    out
+    let mut major = Vec::with_capacity(g.nodes.len());
+    let mut minor = Vec::with_capacity(g.nodes.len());
+    let mut natural = Vec::with_capacity(g.nodes.len());
+    for (i, (n, label)) in g.nodes.iter().zip(labels).enumerate() {
+        let (w, h) = Canvas::node_size(n.shape, label);
+        let (ms, mn) = if td { (h, w) } else { (w, h) };
+        let t = &touches[i];
+        let on_minor = t[Side4::In as usize].max(t[Side4::Out as usize]);
+        let on_major = t[Side4::Lo as usize].max(t[Side4::Hi as usize]);
+        // the lid takes a row, and a row is on the minor axis in `LR`
+        let (lid_minor, lid_major) = if td {
+            (0, n.shape.lid())
+        } else {
+            (n.shape.lid(), 0)
+        };
+        natural.push(mn);
+        minor.push(mn.max(on_minor + 2 + lid_minor));
+        major.push(ms.max(on_major + 2 + lid_major));
+    }
+    let depth: Vec<usize> = by_rank
+        .iter()
+        .map(|rank| rank.iter().map(|&i| major[i]).max().unwrap_or(0))
+        .collect();
+
+    // above the layout is a lane for each detour that goes that way, and a
+    // row for the stem of one landing on a box's top
+    let above = routes
+        .iter()
+        .filter(|r| matches!(r, Route::Detour { hi: false, .. }))
+        .count();
+    let from = if above > 0 { above + 1 } else { 0 };
+    let mut places: Vec<Place> = g
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| Place {
+            major: 0,
+            minor: 0,
+            ms: depth[ranks[i]],
+            mn: minor[i],
+            // a box given more room than its words need holds them in the
+            // middle of it rather than at the top: along the major axis when
+            // its rank is deeper than it is (`TD`), and along the minor axis
+            // when its ports made it taller (`LR`)
+            label: pad(
+                &labels[i],
+                if td {
+                    depth[ranks[i]] - major[i]
+                } else {
+                    minor[i] - natural[i]
+                },
+            ),
+            shape: node.shape,
+        })
+        .collect();
+
+    // across the minor axis: a box sits so that the middle one of the edges
+    // feeding it runs straight, and anything else in its rank stacks on past
+    // it. The ports are worked out from where the boxes are, and the boxes
+    // from where the ports are, so it goes round twice: the first pass lines
+    // centres up, the second lines the ports themselves up. Positions are
+    // signed until the end: a box that wants to sit above where its rank
+    // starts pulls the whole picture down rather than being pushed off line.
+    let mut ports = vec![(0usize, 0usize); g.edges.len()];
+    let mut to = from;
+    for pass in 0..2 {
+        let mut at_of: Vec<i64> = vec![0; g.nodes.len()];
+        let mut low: i64 = 0;
+        let mut high: i64 = 0;
+        for rank in by_rank {
+            let mut at: i64 = i64::MIN;
+            for &i in rank {
+                let mut feeds: Vec<(usize, &Edge)> = g
+                    .edges
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, e)| routes[*k] == Route::Step && e.to == i)
+                    .collect();
+                feeds.sort_by_key(|(_, e)| at_of[e.from]);
+                let wanted = feeds
+                    .get((feeds.len().saturating_sub(1)) / 2)
+                    .map_or(0, |&(k, e)| {
+                        let p = &places[e.from];
+                        if pass == 0 {
+                            at_of[e.from] + (p.mn / 2) as i64 - (places[i].mn / 2) as i64
+                        } else {
+                            // a port's offset within its box does not depend
+                            // on where the box is, which is what makes the
+                            // first pass's ports usable for the second
+                            let (s, t) = ports[k];
+                            let s_off = s as i64 - p.minor as i64;
+                            let t_off = t as i64 - places[i].minor as i64;
+                            at_of[e.from] + s_off - t_off
+                        }
+                    });
+                at = at.max(wanted);
+                at_of[i] = at;
+                low = low.min(at);
+                at += (places[i].mn + stack) as i64;
+                high = high.max(at - stack as i64);
+            }
+        }
+        let shift = from as i64 - low;
+        for (i, p) in places.iter_mut().enumerate() {
+            p.minor = (at_of[i] + shift) as usize;
+        }
+        to = (high + shift) as usize;
+        ports = assign_ports(g, routes, &places, td);
+    }
+    (places, ports, from, to)
+}
+
+/// Every edge's port on each of its boxes: the edges on one side of a box,
+/// in the order their other ends lie, spread along that side.
+fn assign_ports(g: &Graph, routes: &[Route], places: &[Place], td: bool) -> Vec<(usize, usize)> {
+    let mut on_side: Vec<[Vec<usize>; 4]> =
+        (0..g.nodes.len()).map(|_| Default::default()).collect();
+    for (k, (e, route)) in g.edges.iter().zip(routes).enumerate() {
+        let (a, b) = route.sides();
+        on_side[e.from][a as usize].push(k);
+        on_side[e.to][b as usize].push(k);
+    }
+    let centre = |i: usize, side: Side4| {
+        let p = &places[i];
+        if side.minor() {
+            p.minor + p.mn / 2
+        } else {
+            p.major + p.ms / 2
+        }
+    };
+    // where the far end of edge `k` is, along the axis this side's ports are
+    // spread on: the far box's middle, or — for an end that lands on its top
+    // or bottom — that edge of it, which is where the line will be
+    let far = |k: usize, i: usize, side: Side4| {
+        let e = &g.edges[k];
+        let (a, b) = routes[k].sides();
+        let (other, end) = if e.from == i { (e.to, b) } else { (e.from, a) };
+        let p = &places[other];
+        match (side.minor(), end) {
+            (true, Side4::Hi) => p.minor + p.mn,
+            (true, Side4::Lo) => p.minor.saturating_sub(1),
+            (true, _) => p.minor + p.mn / 2,
+            (false, _) => p.major + p.ms / 2,
+        }
+    };
+    let mut ports = vec![(0usize, 0usize); g.edges.len()];
+    for (i, sides) in on_side.iter_mut().enumerate() {
+        for (s, edges) in sides.iter_mut().enumerate() {
+            let side = Side4::ALL[s];
+            edges.sort_by_key(|&k| far(k, i, side));
+            let p = &places[i];
+            // the lid takes the first row on the vertical axis
+            let lid = if side.minor() != td { p.shape.lid() } else { 0 };
+            let (lo, hi) = if side.minor() {
+                (p.minor + 1 + lid, p.minor + p.mn - 2)
+            } else {
+                (p.major + 1 + lid, p.major + p.ms - 2)
+            };
+            let k = edges.len();
+            for (n, &edge) in edges.iter().enumerate() {
+                let at = spread(lo, hi, k, n, centre(i, side));
+                if g.edges[edge].from == i {
+                    ports[edge].0 = at;
+                } else {
+                    ports[edge].1 = at;
+                }
+            }
+        }
+    }
+    ports
+}
+
+/// The gutter a detour's legs cross, if they do: the one after the source
+/// (before it, going back) for the leg that leaves, and the one before the
+/// target for the leg that arrives.
+fn detour_gutters(ranks: &[usize], e: &Edge, route: Route) -> (Option<usize>, Option<usize>) {
+    match route {
+        Route::Detour {
+            forward,
+            from_edge,
+            to_edge,
+            ..
+        } => (
+            (!from_edge).then(|| {
+                if forward {
+                    ranks[e.from] + 1
+                } else {
+                    ranks[e.from]
+                }
+            }),
+            (!to_edge).then(|| ranks[e.to]),
+        ),
+        _ => (None, None),
+    }
+}
+
+/// How wide each gutter is, and where in it each edge's legs run, as `(rank,
+/// offset)` pairs to be placed once the ranks are.
+///
+/// In `LR` a gutter holds, left to right: a dash, the longest label on a leg
+/// leaving into it, a dash, one column per leg that crosses it, a dash and
+/// the arrowhead. In `TD` it is rows: one for the labels if there are any,
+/// one per leg, and the arrowhead's. The legs nearest the boxes they arrive
+/// at are the steps', in the order that crosses least; the detours' legs sit
+/// behind them, nearer the boxes they leave.
+#[allow(clippy::type_complexity)]
+fn gutters(
+    g: &Graph,
+    ranks: &[usize],
+    routes: &[Route],
+    ports: &[(usize, usize)],
+    count: usize,
+    td: bool,
+) -> (
+    Vec<usize>,
+    Vec<(Option<(usize, usize)>, Option<(usize, usize)>)>,
+) {
+    let mut label_w = vec![0usize; count];
+    let mut steps: Vec<Vec<Jog>> = vec![Vec::new(); count];
+    // (edge, leaving) — a detour's leg in this gutter, and whether it is the
+    // leg leaving its source rather than the one arriving at its target
+    let mut detours: Vec<Vec<(usize, bool)>> = vec![Vec::new(); count];
+    let mut arrivals = vec![false; count];
+    for (k, (e, route)) in g.edges.iter().zip(routes).enumerate() {
+        let (s, t) = ports[k];
+        // words go beside the leg leaving the source, in the gutter after it
+        let forward = ranks[e.to] > ranks[e.from];
+        if let (Some(label), true) = (&e.label, forward) {
+            let r = ranks[e.from] + 1;
+            label_w[r] = label_w[r].max(str_width(label));
+        }
+        match *route {
+            Route::Step => {
+                let r = ranks[e.to];
+                arrivals[r] = true;
+                if s != t {
+                    steps[r].push(Jog {
+                        edge: k,
+                        from: s,
+                        to: t,
+                    });
+                }
+            }
+            Route::Shot => {}
+            Route::Detour { .. } => {
+                let (a, b) = detour_gutters(ranks, e, *route);
+                if let Some(r) = a {
+                    detours[r].push((k, true));
+                }
+                if let Some(r) = b {
+                    arrivals[r] = true;
+                    detours[r].push((k, false));
+                }
+            }
+        }
+    }
+    let mut widths = vec![0usize; count];
+    let mut legs: Vec<(Option<(usize, usize)>, Option<(usize, usize)>)> =
+        vec![(None, None); g.edges.len()];
+    for r in 0..count {
+        let n = steps[r].len() + detours[r].len();
+        let (head, words) = if td {
+            (1, usize::from(label_w[r] > 0))
+        } else {
+            (2, if label_w[r] > 0 { label_w[r] + 4 } else { 1 })
+        };
+        let least = if td { GUTTER_TD } else { GUTTER_LR };
+        let width = if r == 0 && !arrivals[0] && n == 0 {
+            0
+        } else {
+            (words + n + head).max(least)
+        };
+        widths[r] = width;
+        // coordinates from the arriving end backwards: the last `head` cells
+        // are the arrowhead's, then the steps', then the detours'
+        let mut next = width.saturating_sub(head);
+        let mut take = || {
+            next -= 1;
+            next
+        };
+        let order = best_order(&steps[r]);
+        for i in order {
+            legs[steps[r][i].edge].1 = Some((r, take()));
+        }
+        for &(k, leaving) in &detours[r] {
+            let at = Some((r, take()));
+            if leaving {
+                legs[k].0 = at;
+            } else {
+                legs[k].1 = at;
+            }
+        }
+    }
+    (widths, legs)
 }
 
 impl Plan {
-    /// The middle of the gutter before rank `r` — where a line turns.
-    fn mid(&self, r: usize) -> usize {
-        let (from, to) = self.gaps[r];
-        (from + to) / 2
-    }
-
-    /// Where an edge leaves a box and where it arrives, on the minor axis.
-    fn ends(&self, e: &Edge) -> (usize, usize) {
-        let (s, t) = (&self.places[e.from], &self.places[e.to]);
-        (s.minor + s.mn / 2, t.minor + t.mn / 2)
-    }
-
-    /// The last leg of every route: in through the gutter before the target,
-    /// stopping a cell short of the box so the arrowhead has somewhere to sit.
+    /// The last leg of a route that comes in through the gutter: from the
+    /// turn to the box, stopping a cell short so the arrowhead has somewhere
+    /// to sit.
     fn arrive(&self, c: &mut Canvas, e: &Edge, from: usize, minor: usize) {
         let edge = self.places[e.to].major;
         // an edge with no head runs onto the box's own border, where `put`
         // turns it into a tee; one with a head stops a cell short and the head
         // is what touches
         let end = if e.head { edge - 1 } else { edge + 1 };
-        self.frame
-            .along(c, from, minor, end.saturating_sub(from), e.stroke);
+        // a run one cell long reaches both ways and would draw the turn as a
+        // tee; that short, the turn is a stub that only reaches onward
+        if end > from + 1 {
+            self.frame.along(c, from, minor, end - from, e.stroke);
+        } else {
+            self.frame.stub(c, from, minor);
+        }
         if e.head {
             self.frame.arrow(c, edge - 1, minor);
         }
     }
 
-    /// An edge between neighbouring ranks: out of one box, a jog across the
-    /// gutter to line up with the other, and in.
-    fn step(&self, c: &mut Canvas, e: &Edge) {
-        let (s, t) = self.ends(e);
-        let source = &self.places[e.from];
-        let out = source.major + source.ms;
-        let mid = self.mid(self.ranks[e.to]);
+    /// The last leg of a route that comes in across the minor axis, from a
+    /// lane at `lane` to the box's `Lo` or `Hi` side at major `at`.
+    fn land(&self, c: &mut Canvas, e: &Edge, at: usize, lane: usize) {
+        let t = &self.places[e.to];
+        let from_hi = lane >= t.minor + t.mn;
+        let edge = if from_hi {
+            t.minor + t.mn
+        } else {
+            t.minor.saturating_sub(1)
+        };
         self.frame
-            .along(c, out, s, (mid + 1).saturating_sub(out), e.stroke);
-        // a jog of one cell would be drawn as a crossing rather than as
-        // nothing, so a straight line is left straight
-        if s != t {
-            self.frame
-                .across(c, mid, s.min(t), s.abs_diff(t) + 1, e.stroke);
+            .across(c, at, edge.min(lane), edge.abs_diff(lane) + 1, e.stroke);
+        if e.head {
+            self.frame.arrow_across(c, at, edge, from_hi);
         }
-        self.arrive(c, e, mid, t);
+    }
+
+    /// The stem of a route leaving a box across the minor axis, from the
+    /// box's `Lo` or `Hi` side at major `at` out to the lane.
+    fn depart(&self, c: &mut Canvas, e: &Edge, at: usize, lane: usize) {
+        let s = &self.places[e.from];
+        let edge = if lane >= s.minor + s.mn {
+            s.minor + s.mn
+        } else {
+            s.minor.saturating_sub(1)
+        };
+        self.frame
+            .across(c, at, edge.min(lane), edge.abs_diff(lane) + 1, e.stroke);
+    }
+
+    /// The words on an edge, beside the leg that leaves its source: after the
+    /// first dash, so `─ label ─`. `TD` has no room beside a leg one column
+    /// wide, and keeps its words in the gutter's own row, centred between the
+    /// two ends of the jog.
+    fn label_leg(&self, c: &mut Canvas, e: &Edge, out: usize, s: usize, t: usize) {
         if let Some(label) = &e.label {
-            let (from, to) = self.gaps[self.ranks[e.to]];
             if self.frame.td() {
-                self.frame.label_across(c, from, s.min(t), s.max(t), label);
+                self.frame.label_across(c, out, s.min(t), s.max(t), label);
             } else {
-                self.frame.label_along(c, from, to - 1, t, label);
+                self.frame.label_from(c, out + 1, s, label);
             }
         }
     }
 
-    /// An edge that does not step one rank forward: a skip over a rank, or a
-    /// back edge closing a loop. It goes out into a lane of its own beyond the
-    /// layout, along it, and back in — every leg of it in a gutter or a lane,
-    /// which is to say never over a box.
-    fn detour(&self, c: &mut Canvas, e: &Edge, lane: usize, back: bool) {
-        let (s, t) = self.ends(e);
+    /// An edge between neighbouring ranks: out of one box, a jog across the
+    /// gutter to line up with the other, and in.
+    fn step(&self, c: &mut Canvas, k: usize, e: &Edge) {
+        let (s, t) = self.ports[k];
         let source = &self.places[e.from];
-        let (a, b) = if back {
-            (self.mid(self.ranks[e.from]), self.mid(self.ranks[e.to]))
-        } else {
-            (self.mid(self.ranks[e.from] + 1), self.mid(self.ranks[e.to]))
-        };
-        if back {
-            let edge = source.major;
-            self.frame.along(c, a, s, edge.saturating_sub(a), e.stroke);
-        } else {
-            let out = source.major + source.ms;
+        let out = source.major + source.ms;
+        let gap = self.gaps[self.ranks[e.to]];
+        let turn = self.legs[k].1.unwrap_or(gap.1 - 1);
+        self.frame.leg(c, out, turn, s, e.stroke);
+        // a jog of one cell would be drawn as a crossing rather than as
+        // nothing, so a straight line is left straight
+        if s != t {
             self.frame
-                .along(c, out, s, (a + 1).saturating_sub(out), e.stroke);
+                .across(c, turn, s.min(t), s.abs_diff(t) + 1, e.stroke);
         }
+        self.arrive(c, e, turn, t);
+        let words = if self.frame.td() { gap.0 } else { out };
+        self.label_leg(c, e, words, s, t);
+    }
+
+    /// A straight shot: along the source's own row, then in through the
+    /// target's far side.
+    fn shot(&self, c: &mut Canvas, k: usize, e: &Edge) {
+        let (s, t) = self.ports[k];
+        let source = &self.places[e.from];
+        let out = source.major + source.ms;
         self.frame
-            .across(c, a, lane.min(s), lane.abs_diff(s) + 1, e.stroke);
+            .along(c, out, s, (t + 1).saturating_sub(out), e.stroke);
+        self.land(c, e, t, s);
+        let words = if self.frame.td() {
+            self.gaps[self.ranks[e.from] + 1].0
+        } else {
+            out
+        };
+        self.label_leg(c, e, words, s, s);
+    }
+
+    /// A detour: out of the source — straight from the side facing the lane,
+    /// or along a gutter to it — along the lane, and into the target the same
+    /// two ways. Every leg lies in a gutter or a lane, never over a box.
+    fn detour(&self, c: &mut Canvas, k: usize, e: &Edge, forward: bool, lane: usize) {
+        let (s, t) = self.ports[k];
+        let (leave, arrive) = self.legs[k];
+        let source = &self.places[e.from];
+        let out = source.major + source.ms;
+        // where on the lane the route comes from and goes to
+        let a = match leave {
+            Some(a) => {
+                if forward {
+                    self.frame.leg(c, out, a, s, e.stroke);
+                } else {
+                    self.frame
+                        .along(c, a, s, source.major.saturating_sub(a), e.stroke);
+                }
+                self.frame
+                    .across(c, a, lane.min(s), lane.abs_diff(s) + 1, e.stroke);
+                a
+            }
+            None => {
+                self.depart(c, e, s, lane);
+                s
+            }
+        };
+        let b = arrive.unwrap_or(t);
         self.frame
             .along(c, a.min(b), lane, a.abs_diff(b) + 1, e.stroke);
-        self.frame
-            .across(c, b, lane.min(t), lane.abs_diff(t) + 1, e.stroke);
-        self.arrive(c, e, b, t);
-        if let Some(label) = &e.label {
-            // the words go on whichever leg of the route runs across the page:
-            // the lane itself in `LR`, and the leg that comes back in in `TD`
-            if self.frame.td() {
+        match arrive {
+            Some(b) => {
                 self.frame
-                    .label_across(c, b, lane.min(t), lane.max(t), label);
-            } else {
-                self.frame.label_along(c, a.min(b), a.max(b), lane, label);
+                    .across(c, b, lane.min(t), lane.abs_diff(t) + 1, e.stroke);
+                self.arrive(c, e, b, t);
             }
+            None => self.land(c, e, t, lane),
+        }
+        let Some(label) = &e.label else { return };
+        if self.frame.td() {
+            // the words go on a leg that runs across the page: the one
+            // leaving, the one arriving, or the stem out of the source
+            match (leave, arrive) {
+                (Some(a), _) => self
+                    .frame
+                    .label_across(c, a, lane.min(s), lane.max(s), label),
+                (None, Some(b)) => self
+                    .frame
+                    .label_across(c, b, lane.min(t), lane.max(t), label),
+                (None, None) => {
+                    let edge = if lane >= source.minor + source.mn {
+                        source.minor + source.mn
+                    } else {
+                        source.minor.saturating_sub(1)
+                    };
+                    self.frame
+                        .label_across(c, s, lane.min(edge), lane.max(edge), label);
+                }
+            }
+        } else if forward && leave.is_some() {
+            self.label_leg(c, e, out, s, s);
+        } else {
+            self.frame.label_along(c, a.min(b), a.max(b), lane, label);
         }
     }
 }
@@ -1133,31 +1793,32 @@ impl Plan {
 /// Place the ranked graph on a canvas, running `dir`, trying to fit `width`.
 fn draw(g: &Graph, ranks: &[usize], dir: Dir, width: usize) -> Canvas {
     let plan = plan(g, ranks, dir, width);
-    let skips = g
-        .edges
-        .iter()
-        .filter(|e| ranks[e.to] > ranks[e.from] + 1)
-        .count();
-    let (_, _, w, h) = plan.frame.rect(0, 0, plan.frame.span, plan.to + skips);
+    let (_, _, w, h) = plan.frame.rect(0, 0, plan.frame.span, plan.to);
     let mut c = Canvas::new(w.max(1), h.max(1));
 
     for p in &plan.places {
         let (x, y, w, h) = plan.frame.rect(p.major, p.minor, p.ms, p.mn);
         c.node(x, y, w, h, p.shape, &p.label);
     }
-    // one lane per detour, back edges above the layout and skips below it, in
-    // the order they were written — the first one written stays nearest
-    let (mut back, mut skip) = (0, 0);
-    for e in &g.edges {
-        let (s, t) = (ranks[e.from], ranks[e.to]);
-        if t == s + 1 {
-            plan.step(&mut c, e);
-        } else if t > s {
-            plan.detour(&mut c, e, plan.to + skip, false);
-            skip += 1;
-        } else {
-            plan.detour(&mut c, e, plan.from - 1 - back, true);
-            back += 1;
+    // one lane per detour, above the layout or below it, in the order they
+    // were written — the first one written stays nearest. A row is left
+    // between the layout and the first lane for the stem of a line leaving
+    // or landing on a box's top or bottom.
+    let (mut above, mut below) = (0, 0);
+    for (k, e) in g.edges.iter().enumerate() {
+        match plan.routes[k] {
+            Route::Step => plan.step(&mut c, k, e),
+            Route::Shot => plan.shot(&mut c, k, e),
+            Route::Detour { forward, hi, .. } => {
+                let lane = if hi {
+                    below += 1;
+                    plan.to + below
+                } else {
+                    above += 1;
+                    plan.from - 1 - above
+                };
+                plan.detour(&mut c, k, e, forward, lane);
+            }
         }
     }
     c
@@ -1205,7 +1866,7 @@ mod tests {
             vec![
                 Shape::Round,
                 Shape::Rect,
-                Shape::Round,
+                Shape::Cylinder,
                 Shape::Diamond,
                 Shape::Rect
             ]
@@ -1250,7 +1911,7 @@ mod tests {
     fn an_edge_label_is_drawn_on_the_line_between_the_boxes() {
         assert_eq!(
             drawn("flowchart LR\nA -->|yes| B", Dir::Lr)[1],
-            "│ A │──yes─▶│ B │"
+            "│ A │─ yes ──▶│ B │"
         );
         // and the other spelling of the same thing means the same thing
         let g = parse("flowchart LR\nA -- yes --> B");
@@ -1466,6 +2127,126 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The two flowcharts from the note that first showed the layout up: a
+    /// chain with a second box feeding into it and skipping down it, and a
+    /// fan-in of three labelled edges into a store.
+    const KITCHEN: &str = "flowchart LR\n\
+        A[Raw data<br/>the pantry] --> B[Cleaned features<br/>prep station]\n\
+        B --> C[Training runs<br/>test kitchen]\n\
+        C --> D[Eval<br/>tasting]\n\
+        G[Orchestrator<br/>kitchen manager] -.runs the order.-> B\n\
+        G -.-> C\n\
+        G -.-> D";
+
+    pub(super) const LINEAGE: &str = "flowchart LR\n\
+        C[Training run] -->|\"which data, which config\"| N[(NM lineage)]\n\
+        D[Eval run] -->|\"which model, score\"| N\n\
+        E[Registry approve] -->|\"who approved\"| N\n\
+        N -->|\"policy check\"| F{Allowed?}\n\
+        F -->|yes| S[Serving]\n\
+        F -->|no| X[Blocked]";
+
+    #[test]
+    fn edges_into_one_box_get_a_row_each_and_their_labels_stay_whole() {
+        let rows = drawn(LINEAGE, Dir::Lr);
+        // the store sits level with the first box feeding it, and the two
+        // below come up under it, each on its own row and its own column, so
+        // every label is drawn whole rather than over the next one
+        assert_eq!(row_of(&rows, "Training run"), row_of(&rows, "NM lineage"));
+        assert!(rows[row_of(&rows, "NM lineage")].contains("──▶│ NM lineage │"));
+        let under = row_of(&rows, "╰────────────╯") + 1;
+        assert_eq!(rows[under].matches('▲').count(), 2, "{rows:#?}");
+        for label in [
+            "which data, which config",
+            "which model, score",
+            "who approved",
+        ] {
+            assert_eq!(
+                rows.iter().filter(|r| r.contains(label)).count(),
+                1,
+                "{label:?} in {rows:#?}"
+            );
+        }
+        assert!(!rows.iter().any(|r| r.contains('┼')), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_cylinder_is_drawn_with_a_lid() {
+        let rows = drawn("flowchart LR\nA[(db)] --> B", Dir::Lr);
+        assert!(rows[1].starts_with("├────┤"), "{rows:#?}");
+        assert_eq!(rows[2], "│ db │─────▶│ B │");
+    }
+
+    #[test]
+    fn a_chain_stays_level_and_a_skip_with_a_clear_row_lands_from_below() {
+        let rows = drawn(KITCHEN, Dir::Lr);
+        // the chain runs straight across, whatever else feeds its second box
+        let top = row_of(&rows, "Raw data");
+        for name in ["Cleaned features", "Training runs", "Eval"] {
+            assert_eq!(row_of(&rows, name), top, "{name} is off the line");
+        }
+        // the orchestrator's three edges run along their own rows and come up
+        // under their targets, on the row below the chain's boxes — the one
+        // to the neighbouring rank too, so the chain's line into that box
+        // stays straight
+        let under = row_of(&rows, "╰") + 1;
+        assert_eq!(rows[under].matches('▲').count(), 3, "{rows:#?}");
+        // and nothing crosses anything: every leg has a column of its own
+        assert!(!rows.iter().any(|r| r.contains('┼')), "{rows:#?}");
+        assert_eq!(
+            rows.iter().filter(|r| r.contains("runs the order")).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_back_edge_goes_under_when_both_its_ends_are_at_the_bottom() {
+        let src = "flowchart LR\nA[Start] --> B{ok?}\nB -->|yes| C[Ship it]\nB -->|no| D[Fix it]\nD --> B";
+        let rows = drawn(src, Dir::Lr);
+        // the loop from the lower box back to the decision runs under the
+        // picture and lands on the decision's underside, crossing nothing
+        assert!(rows.iter().any(|r| r.contains('▲')), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains('▼')));
+        assert!(!rows.iter().any(|r| r.contains('┼')), "{rows:#?}");
+        assert!(rows[row_of(&rows, "Ship it")].ends_with("│─ yes ───▶│ Ship it │"));
+        assert!(rows[row_of(&rows, "Start")].starts_with("│ Start │─────▶│"));
+    }
+
+    #[test]
+    fn a_fan_out_takes_a_column_per_jog_so_nothing_merges() {
+        let src = "flowchart LR\nA -->|one| B\nA -->|two| C\nA -->|three| D";
+        let rows = drawn(src, Dir::Lr);
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.contains('┼') || r.contains('┤') || r.contains('├')),
+            "{rows:#?}"
+        );
+        assert_eq!(rows[row_of(&rows, "one")], "│   │─ one ──────▶│ B │");
+        assert_eq!(rows[row_of(&rows, "two")], "│ A │─ two ────╮  ╰───╯");
+        assert_eq!(rows[row_of(&rows, "three")], "│   │─ three ─╮│");
+    }
+
+    #[test]
+    fn a_top_down_jog_turns_on_a_row_of_its_own() {
+        let src = "graph TD\nA[Start] --> B{ok?}\nB -->|yes| C[Ship it]\nB -->|no| D[Fix it]";
+        let rows = drawn(src, Dir::Td);
+        // the jog to the second box is a corner and a run, not a tee on the
+        // arrow's row
+        assert!(
+            rows.iter().any(|r| r.contains("╰─") && r.contains('╮')),
+            "{rows:#?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains('┤') || r.contains('├')),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.trim() == "▼             ▼"),
+            "{rows:#?}"
+        );
     }
 
     #[test]
