@@ -704,7 +704,14 @@ fn layout_preview(app: &mut App, area: Rect) -> PreviewPage {
     // (first page row, rows, image index) — kept aside from the visible window
     // so a band whose own first row is scrolled off the top is still drawn
     let mut bands: Vec<(usize, u16, usize)> = Vec::new();
+    // wide rows are grouped into blocks — a run of them with nothing else
+    // between is one table or one diagram — and each block pans on its own
+    let mut widths: Vec<usize> = Vec::new();
+    let mut in_block = false;
     for pline in &rendered.lines {
+        if !pline.wide {
+            in_block = false;
+        }
         if let Some(idx) = pline.image {
             let url = rendered.images[idx].url.clone();
             let max_px = rendered.images[idx].width;
@@ -718,7 +725,7 @@ fn layout_preview(app: &mut App, area: Rect) -> PreviewPage {
                         cells: Vec::new(),
                         checkbox: None,
                         src_line: pline.src_line,
-                        wide: false,
+                        wide: None,
                     });
                 }
                 continue;
@@ -726,11 +733,17 @@ fn layout_preview(app: &mut App, area: Rect) -> PreviewPage {
         }
         // a wide row is one row, however long it is: it pans, it never wraps
         if pline.wide {
+            if !in_block {
+                in_block = true;
+                widths.push(0);
+            }
+            let block = widths.len() - 1;
+            widths[block] = widths[block].max(crate::render::cells_width(&pline.cells));
             rows.push(PageRow {
                 cells: pline.cells.clone(),
                 checkbox: pline.checkbox,
                 src_line: pline.src_line,
-                wide: true,
+                wide: Some(block),
             });
             continue;
         }
@@ -742,26 +755,18 @@ fn layout_preview(app: &mut App, area: Rect) -> PreviewPage {
                 cells,
                 checkbox: if i == 0 { pline.checkbox } else { None },
                 src_line: pline.src_line,
-                wide: false,
+                wide: None,
             });
         }
     }
 
-    // the furthest right the page can pan: the widest table on it, less the
-    // page itself. Measured here because only the draw knows the real width.
-    let widest = rows
-        .iter()
-        .filter(|r| r.wide)
-        .map(|r| crate::render::cells_width(&r.cells))
-        .max()
-        .unwrap_or(0);
     PreviewPage {
         key: None,
         rows,
         bands,
         urls: rendered.urls,
         images: rendered.images,
-        widest,
+        widths,
     }
 }
 
@@ -784,11 +789,20 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let page = std::mem::take(&mut app.preview_page);
     let rows = &page.rows;
     let bands = &page.bands;
-    let widest = page.widest;
 
-    app.preview_hmax = widest.saturating_sub(width) as u16;
-    app.preview_hscroll = app.preview_hscroll.min(app.preview_hmax);
-    let pan = app.preview_hscroll as usize;
+    // the furthest right each block can pan: its widest row, less the page
+    // itself. Measured here because only the draw knows the real width.
+    app.preview_hmax = page
+        .widths
+        .iter()
+        .map(|w| w.saturating_sub(width) as u16)
+        .collect();
+    app.preview_pans.truncate(app.preview_hmax.len());
+    for (pan, max) in app.preview_pans.iter_mut().zip(&app.preview_hmax) {
+        *pan = (*pan).min(*max);
+    }
+    let pan_of =
+        |app: &App, block: usize| app.preview_pans.get(block).copied().unwrap_or(0) as usize;
 
     // clamp the scroll so the page can't be scrolled off the bottom
     let height = area.height as usize;
@@ -816,8 +830,10 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     // (rect on screen, image index, rows of the whole band, rows of it above the top)
     let mut images: Vec<(Rect, usize, u16, u16)> = Vec::new();
-    // the chevrons go on the first wide row on screen, and only there
-    let mut marked = false;
+    // the chevrons go on the first row of each wide block on screen, and only
+    // there; the arrow keys pan the first such block
+    let mut marked: Option<usize> = None;
+    app.preview_pan_focus = None;
     for (start, h, idx) in bands {
         // a band only partly on screen is drawn cropped to its visible slice,
         // so a picture scrolls in and out instead of popping into view whole
@@ -835,25 +851,29 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
         let y = area.y + i as u16;
         let rect = Rect::new(area.x, y, area.width, 1);
         let page_row = top + i;
-        // a wide row shows the slice the pan has arrived at; everything else
-        // starts at column zero, so prose never moves when a table does
-        let offset = if row.wide { pan } else { 0 };
-        let mut shown = if row.wide {
-            columns_from(&row.cells, pan, width)
+        // a wide row shows the slice its block's pan has arrived at;
+        // everything else starts at column zero, so prose never moves when a
+        // table does, and nor does the next table down
+        let offset = row.wide.map_or(0, |b| pan_of(app, b));
+        let mut shown = if row.wide.is_some() {
+            columns_from(&row.cells, offset, width)
         } else {
             row.cells.clone()
         };
         // a table that carries on past an edge says so — but once per table,
         // on its topmost visible row. A marker on every row would stripe the
         // whole page with chevrons to say one thing.
-        if row.wide && !marked {
-            marked = true;
-            if pan > 0 {
-                edge(&mut shown, 0, '‹');
-            }
-            if crate::render::cells_width(&row.cells) > pan + width && !shown.is_empty() {
-                let last = shown.len() - 1;
-                edge(&mut shown, last, '›');
+        if let Some(block) = row.wide {
+            if marked != Some(block) {
+                marked = Some(block);
+                app.preview_pan_focus.get_or_insert(block);
+                if offset > 0 {
+                    edge(&mut shown, 0, '‹');
+                }
+                if crate::render::cells_width(&row.cells) > offset + width && !shown.is_empty() {
+                    let last = shown.len() - 1;
+                    edge(&mut shown, last, '›');
+                }
             }
         }
         lines.push(crate::render::to_line(&selected(
@@ -867,6 +887,7 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
             page_row,
             rect,
             pan: offset,
+            block: row.wide,
             src_line: row.src_line,
             cells: shown.clone(),
         });
@@ -1239,7 +1260,7 @@ fn hint_pairs(app: &App) -> Vec<(String, &'static str)> {
     let keys = &app.config.keys;
     let mut pairs: Vec<(String, &'static str)> = Vec::new();
     // ← → only earns a place in the bar when there is something to pan
-    if app.view == View::Preview && app.preview_hmax > 0 {
+    if app.view == View::Preview && app.preview_hmax.iter().any(|&m| m > 0) {
         pairs.push(("← →".to_string(), "table"));
     }
     // in a grid, the keys that behave differently there

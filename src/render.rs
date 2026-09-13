@@ -2076,15 +2076,24 @@ impl Ren {
     /// Split out from `emit_mermaid` so it can be driven by a diagram built by
     /// hand: what the reading view owns here is the styling, the `wide` flag
     /// and the decoration `emit_line` adds, none of which care what drew the
-    /// rows. A row wider than the page is marked `wide` and the page pans
-    /// across it exactly as it pans a wide table.
+    /// rows. A diagram wider than the page has every row marked `wide` — not
+    /// just the rows that overflow — so the page pans the whole picture as
+    /// one piece, exactly as it pans a wide table. A short row left behind
+    /// would sit still while the boxes it joins slid away from it.
     fn emit_diagram(&mut self, d: &crate::mermaid::Rendered) {
-        for row in &d.rows {
-            let mut cells: Vec<PCell> = Vec::new();
-            for run in row {
-                cells.extend(str_cells(&run.text, crate::md::mermaid_style(run.role)));
-            }
-            let wide = cells_width(&cells) > self.width;
+        let rows: Vec<Vec<PCell>> = d
+            .rows
+            .iter()
+            .map(|row| {
+                let mut cells: Vec<PCell> = Vec::new();
+                for run in row {
+                    cells.extend(str_cells(&run.text, crate::md::mermaid_style(run.role)));
+                }
+                cells
+            })
+            .collect();
+        let wide = rows.iter().any(|cells| cells_width(cells) > self.width);
+        for cells in rows {
             self.emit_line(PLine {
                 cells,
                 checkbox: None,
@@ -3279,7 +3288,8 @@ mod tests {
         // page pans across it, exactly as it does for a wide table
         assert!(page.lines[0].wide);
         assert_eq!(cells_width(&page.lines[0].cells), 60);
-        assert!(!page.lines[1].wide);
+        // the short row pans with it: the diagram moves as one piece
+        assert!(page.lines[1].wide);
     }
 
     #[test]

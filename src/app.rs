@@ -493,6 +493,9 @@ pub struct PreviewRow {
     pub page_row: usize,
     pub rect: Rect,
     pub pan: usize,
+    /// The wide block — a scrolling table or diagram — this row belongs to,
+    /// so the wheel over it pans that block and nothing else.
+    pub block: Option<usize>,
     pub src_line: Option<usize>,
     pub cells: Vec<crate::render::PCell>,
 }
@@ -503,8 +506,10 @@ pub struct PageRow {
     pub cells: Vec<crate::render::PCell>,
     pub checkbox: Option<usize>,
     pub src_line: Option<usize>,
-    /// A row of a scrolling table: never soft-wrapped, panned instead.
-    pub wide: bool,
+    /// A row of a scrolling table or diagram: never soft-wrapped, panned
+    /// instead. The number is the block it belongs to — every row of one
+    /// table shares it — and each block pans on its own.
+    pub wide: Option<usize>,
 }
 
 /// The reading view's page as laid out before the scroll window is cut from
@@ -522,8 +527,8 @@ pub struct PreviewPage {
     /// Link targets by index, what a cell's `link` points into.
     pub urls: Vec<String>,
     pub images: Vec<crate::render::ImageSpec>,
-    /// The widest table row, which bounds the sideways pan.
-    pub widest: usize,
+    /// The widest row of each wide block, by block, which bounds its pan.
+    pub widths: Vec<usize>,
 }
 
 /// What a tag walk answers with: the fresh index, and the hits in it.
@@ -547,13 +552,17 @@ pub struct App {
     pub query: String,
     pub selected: usize,
     pub preview_scroll: u16,
-    /// How far the page has panned sideways, in columns. Only lines a table
-    /// marked `wide` move; prose stays where it is, so the note never slides
-    /// out from under you.
-    pub preview_hscroll: u16,
-    /// The furthest right the page can pan, worked out by the last draw from
-    /// the widest table on it. Zero when nothing overflows.
-    pub preview_hmax: u16,
+    /// How far each wide block — a table or diagram too wide for the page —
+    /// has panned sideways, in columns, by block. Only that block's rows
+    /// move; prose and every other table stay where they are, so the note
+    /// never slides out from under you.
+    pub preview_pans: Vec<u16>,
+    /// The furthest right each wide block can pan, worked out by the last
+    /// draw from its widest row. Empty when nothing overflows.
+    pub preview_hmax: Vec<u16>,
+    /// The wide block the arrow keys pan: the topmost one on screen, as the
+    /// last draw found it. `None` when none is in view.
+    pub preview_pan_focus: Option<usize>,
     /// Screen rows of the editor's top line (`editor.scroll`) scrolled off
     /// above the page. A wrapped table row or a picture is one source line
     /// many rows tall; without this the wheel could only stop at line
@@ -866,8 +875,9 @@ impl App {
             query: String::new(),
             selected: 0,
             preview_scroll: 0,
-            preview_hscroll: 0,
-            preview_hmax: 0,
+            preview_pans: Vec::new(),
+            preview_hmax: Vec::new(),
+            preview_pan_focus: None,
             edit_skip: 0,
             theme_checked: Instant::now(),
             theme_rx: None,
@@ -969,7 +979,7 @@ impl App {
             self.editor.move_cursor((row, 0), false);
         }
         self.preview_scroll = 0;
-        self.preview_hscroll = 0;
+        self.preview_pans.clear();
         self.edit_skip = 0;
         self.preview_goto = None;
         self.preview_sel = None;
@@ -3932,7 +3942,7 @@ impl App {
             View::Preview => View::Edit,
         };
         self.preview_scroll = 0;
-        self.preview_hscroll = 0;
+        self.preview_pans.clear();
         // the page opens where the editor was, not at its top
         self.preview_goto = match self.view {
             View::Preview => Some(self.editor.scroll),
@@ -3940,15 +3950,36 @@ impl App {
         };
     }
 
-    /// Pan the page sideways, clamped to what the last draw measured. A
-    /// selection is dropped: it is anchored to columns that are about to mean
-    /// something else on screen.
-    fn pan(&mut self, by: i32) {
-        let to = (self.preview_hscroll as i32 + by).clamp(0, self.preview_hmax as i32);
-        if to as u16 != self.preview_hscroll {
-            self.preview_hscroll = to as u16;
+    /// Pan one wide block sideways, clamped to what the last draw measured
+    /// for it. A selection is dropped: it is anchored to columns that are
+    /// about to mean something else on screen.
+    fn pan(&mut self, block: Option<usize>, by: i32) {
+        let Some(block) = block else { return };
+        let Some(&max) = self.preview_hmax.get(block) else {
+            return;
+        };
+        if self.preview_pans.len() <= block {
+            self.preview_pans.resize(block + 1, 0);
+        }
+        let at = self.preview_pans[block];
+        let to = (at as i32 + by).clamp(0, max as i32) as u16;
+        if to != at {
+            self.preview_pans[block] = to;
             self.preview_sel = None;
         }
+    }
+
+    /// Whether any wide block on the page is panned off its left edge.
+    fn panned(&self) -> bool {
+        self.preview_pans.iter().any(|&p| p > 0)
+    }
+
+    /// The wide block drawn under screen row `y`, if one is.
+    fn wide_block_at(&self, y: u16) -> Option<usize> {
+        self.preview_rows
+            .iter()
+            .find(|r| y >= r.rect.y && y < r.rect.y + r.rect.height)
+            .and_then(|r| r.block)
     }
 
     fn open_palette(&mut self) {
@@ -4107,11 +4138,12 @@ impl App {
     /// A key in the reading view: scrolling, panning and leaving it.
     fn on_preview_key(&mut self, key: KeyEvent) {
         match key.code {
-            // ← and → pan a table too wide for the page; with nothing
-            // to pan they do nothing rather than something surprising
-            KeyCode::Left => self.pan(-4),
-            KeyCode::Right => self.pan(4),
-            KeyCode::Home => self.preview_hscroll = 0,
+            // ← and → pan the topmost table or diagram on screen that is
+            // too wide for the page; with nothing to pan they do nothing
+            // rather than something surprising
+            KeyCode::Left => self.pan(self.preview_pan_focus, -4),
+            KeyCode::Right => self.pan(self.preview_pan_focus, 4),
+            KeyCode::Home => self.preview_pans.clear(),
             KeyCode::Up => self.preview_scroll = self.preview_scroll.saturating_sub(1),
             KeyCode::Down => self.preview_scroll = self.preview_scroll.saturating_add(1),
             KeyCode::PageUp => self.preview_scroll = self.preview_scroll.saturating_sub(10),
@@ -4119,7 +4151,7 @@ impl App {
             // esc drops a selection before it drops the preview, the
             // same order it takes in the editor
             KeyCode::Esc if self.preview_sel.is_some() => self.preview_sel = None,
-            KeyCode::Esc if self.preview_hscroll > 0 => self.preview_hscroll = 0,
+            KeyCode::Esc if self.panned() => self.preview_pans.clear(),
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('e') => self.view = View::Edit,
             _ => {}
         }
@@ -5646,8 +5678,14 @@ impl App {
         match ev.kind {
             MouseEventKind::ScrollUp => self.on_wheel(-step),
             MouseEventKind::ScrollDown => self.on_wheel(step),
-            MouseEventKind::ScrollLeft if self.view == View::Preview => self.pan(-4),
-            MouseEventKind::ScrollRight if self.view == View::Preview => self.pan(4),
+            // sideways, the wheel pans the table or diagram under the
+            // pointer — never one further down the page
+            MouseEventKind::ScrollLeft if self.view == View::Preview => {
+                self.pan(self.wide_block_at(ev.row), -4)
+            }
+            MouseEventKind::ScrollRight if self.view == View::Preview => {
+                self.pan(self.wide_block_at(ev.row), 4)
+            }
             MouseEventKind::Moved => self.on_hover(ev.column, ev.row),
             MouseEventKind::Down(MouseButton::Left) => {
                 self.on_click(ev.column, ev.row, ev.modifiers)
@@ -6297,6 +6335,7 @@ mod tests {
                     page_row: row,
                     rect: ratatui::layout::Rect::new(0, row as u16, width as u16, 1),
                     pan: 0,
+                    block: None,
                     src_line: pline.src_line,
                     cells,
                 });
@@ -7133,6 +7172,7 @@ mod tests {
             page_row,
             rect: Rect::new(0, page_row as u16, 20, 1),
             pan: 0,
+            block: None,
             src_line,
             cells,
         };
