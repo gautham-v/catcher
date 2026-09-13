@@ -563,12 +563,13 @@ pub struct App {
     /// The wide block the arrow keys pan: the topmost one on screen, as the
     /// last draw found it. `None` when none is in view.
     pub preview_pan_focus: Option<usize>,
-    /// The axis the wheel is moving along, and when it last did. A trackpad
-    /// flick is rarely dead straight: a sideways pan sends the odd up or
-    /// down tick as well, and honoured they would jog the page. Once a
-    /// gesture has picked an axis, ticks the other way are dropped until it
-    /// has been still for a moment.
-    wheel_axis: Option<(bool, Instant)>,
+    /// The wheel gesture in progress: the axis it is moving along, when it
+    /// last did, and how many ticks the other way have arrived in a row. A
+    /// trackpad flick is rarely dead straight: a sideways pan sends the odd
+    /// up or down tick as well, and honoured they would jog the page. Once a
+    /// gesture has picked an axis, a stray tick the other way is dropped;
+    /// a run of them is a change of mind and switches the axis.
+    wheel_axis: Option<WheelGesture>,
     /// Screen rows of the editor's top line (`editor.scroll`) scrolled off
     /// above the page. A wrapped table row or a picture is one source line
     /// many rows tall; without this the wheel could only stop at line
@@ -6306,22 +6307,40 @@ fn follows_link(m: KeyModifiers) -> bool {
     m.intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
+/// A wheel gesture under way: see [`wheel_along`].
+#[derive(Clone, Copy, Debug)]
+struct WheelGesture {
+    /// Whether it runs sideways.
+    sideways: bool,
+    /// When its last honoured tick arrived.
+    at: Instant,
+    /// Ticks along the other axis since then, in a row.
+    cross: u8,
+}
+
 /// Whether a wheel tick along an axis — `sideways` or not — is part of the
-/// gesture in progress, `gesture` being its axis and the time of its last
-/// tick. The first tick after a rest starts a gesture and fixes its axis; a
-/// tick along the other axis within `WHEEL_REST` of the last is a wobble and
-/// is dropped, and does not count as a tick.
-fn wheel_along(gesture: &mut Option<(bool, Instant)>, sideways: bool, now: Instant) -> bool {
-    const WHEEL_REST: Duration = Duration::from_millis(250);
-    match *gesture {
-        Some((axis, at)) if now.duration_since(at) < WHEEL_REST => {
-            if axis != sideways {
+/// gesture in progress. The first tick after a rest starts a gesture and
+/// fixes its axis. A tick along the other axis within `WHEEL_REST` of the
+/// last honoured one is a wobble and is dropped — but only the first couple:
+/// `WHEEL_TURN` of them in a row is not a wobble, it is the hand changing
+/// direction, and the gesture turns with it rather than making the user wait
+/// for the momentum ticks of the old direction to die away.
+fn wheel_along(gesture: &mut Option<WheelGesture>, sideways: bool, now: Instant) -> bool {
+    const WHEEL_REST: Duration = Duration::from_millis(150);
+    const WHEEL_TURN: u8 = 3;
+    if let Some(g) = gesture.as_mut() {
+        if now.duration_since(g.at) < WHEEL_REST && g.sideways != sideways {
+            g.cross += 1;
+            if g.cross < WHEEL_TURN {
                 return false;
             }
-            *gesture = Some((axis, now));
         }
-        _ => *gesture = Some((sideways, now)),
     }
+    *gesture = Some(WheelGesture {
+        sideways,
+        at: now,
+        cross: 0,
+    });
     true
 }
 
@@ -6373,9 +6392,36 @@ mod tests {
         assert!(wheel_along(&mut g, true, ms(100)));
         // the wobble did not extend the gesture: it is measured from the
         // last honoured tick, and once that has rested the other axis is free
-        assert!(!wheel_along(&mut g, false, ms(300)));
-        assert!(wheel_along(&mut g, false, ms(400)));
-        assert!(!wheel_along(&mut g, true, ms(500)));
+        assert!(!wheel_along(&mut g, false, ms(200)));
+        assert!(wheel_along(&mut g, false, ms(300)));
+        assert!(!wheel_along(&mut g, true, ms(350)));
+    }
+
+    #[test]
+    fn a_run_of_ticks_the_other_way_turns_the_gesture_without_waiting() {
+        use super::wheel_along;
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut g = None;
+        assert!(wheel_along(&mut g, true, ms(0)));
+        // two ticks up are still a wobble; the third is a change of mind and
+        // goes through, and from then on it is the sideways ticks that are
+        // the wobble
+        assert!(!wheel_along(&mut g, false, ms(20)));
+        assert!(!wheel_along(&mut g, false, ms(40)));
+        assert!(wheel_along(&mut g, false, ms(60)));
+        assert!(!wheel_along(&mut g, true, ms(80)));
+        assert!(wheel_along(&mut g, false, ms(100)));
+        // a sideways tick between two vertical wobbles resets the count:
+        // the run has to be unbroken to count as a turn
+        let mut g = None;
+        assert!(wheel_along(&mut g, true, ms(0)));
+        assert!(!wheel_along(&mut g, false, ms(20)));
+        assert!(!wheel_along(&mut g, false, ms(40)));
+        assert!(wheel_along(&mut g, true, ms(60)));
+        assert!(!wheel_along(&mut g, false, ms(80)));
+        assert!(!wheel_along(&mut g, false, ms(100)));
     }
 
     /// The reading view's rows for `md` at `width`, laid out the way a draw
