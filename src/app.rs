@@ -563,6 +563,12 @@ pub struct App {
     /// The wide block the arrow keys pan: the topmost one on screen, as the
     /// last draw found it. `None` when none is in view.
     pub preview_pan_focus: Option<usize>,
+    /// The axis the wheel is moving along, and when it last did. A trackpad
+    /// flick is rarely dead straight: a sideways pan sends the odd up or
+    /// down tick as well, and honoured they would jog the page. Once a
+    /// gesture has picked an axis, ticks the other way are dropped until it
+    /// has been still for a moment.
+    wheel_axis: Option<(bool, Instant)>,
     /// Screen rows of the editor's top line (`editor.scroll`) scrolled off
     /// above the page. A wrapped table row or a picture is one source line
     /// many rows tall; without this the wheel could only stop at line
@@ -878,6 +884,7 @@ impl App {
             preview_pans: Vec::new(),
             preview_hmax: Vec::new(),
             preview_pan_focus: None,
+            wheel_axis: None,
             edit_skip: 0,
             theme_checked: Instant::now(),
             theme_rx: None,
@@ -5675,6 +5682,17 @@ impl App {
                 return;
             }
         }
+        // one axis per gesture: the first tick picks it, and the other axis
+        // is ignored until the wheel has rested
+        if let Some(sideways) = match ev.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => Some(false),
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => Some(true),
+            _ => None,
+        } {
+            if !wheel_along(&mut self.wheel_axis, sideways, Instant::now()) {
+                return;
+            }
+        }
         match ev.kind {
             MouseEventKind::ScrollUp => self.on_wheel(-step),
             MouseEventKind::ScrollDown => self.on_wheel(step),
@@ -6288,6 +6306,25 @@ fn follows_link(m: KeyModifiers) -> bool {
     m.intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
+/// Whether a wheel tick along an axis — `sideways` or not — is part of the
+/// gesture in progress, `gesture` being its axis and the time of its last
+/// tick. The first tick after a rest starts a gesture and fixes its axis; a
+/// tick along the other axis within `WHEEL_REST` of the last is a wobble and
+/// is dropped, and does not count as a tick.
+fn wheel_along(gesture: &mut Option<(bool, Instant)>, sideways: bool, now: Instant) -> bool {
+    const WHEEL_REST: Duration = Duration::from_millis(250);
+    match *gesture {
+        Some((axis, at)) if now.duration_since(at) < WHEEL_REST => {
+            if axis != sideways {
+                return false;
+            }
+            *gesture = Some((axis, now));
+        }
+        _ => *gesture = Some((sideways, now)),
+    }
+    true
+}
+
 /// Which way ⌥ / ⌥⇧ / ⌘ send a picker row, a peek or a clicked link: a
 /// split right, a split below, a new tab. `None` is a plain open, in place.
 ///
@@ -6323,6 +6360,24 @@ fn beside_key(m: KeyModifiers) -> Option<crate::terminal::Place> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_wheel_gesture_keeps_the_axis_its_first_tick_picked() {
+        use super::wheel_along;
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut g = None;
+        // a sideways pan is under way; a stray vertical tick is a wobble
+        assert!(wheel_along(&mut g, true, ms(0)));
+        assert!(!wheel_along(&mut g, false, ms(50)));
+        assert!(wheel_along(&mut g, true, ms(100)));
+        // the wobble did not extend the gesture: it is measured from the
+        // last honoured tick, and once that has rested the other axis is free
+        assert!(!wheel_along(&mut g, false, ms(300)));
+        assert!(wheel_along(&mut g, false, ms(400)));
+        assert!(!wheel_along(&mut g, true, ms(500)));
+    }
+
     /// The reading view's rows for `md` at `width`, laid out the way a draw
     /// lays them out: rendered, then wrapped, one `PreviewRow` per screen row.
     fn preview_rows(md: &str, width: usize) -> Vec<super::PreviewRow> {
