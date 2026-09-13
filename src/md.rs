@@ -4054,7 +4054,7 @@ fn mermaid_line(rows: &[String], row: usize, width: usize) -> RLine {
         // the caps are the fence, not the diagram
         let body = rows[1..rows.len() - 1].join("\n");
         if let Some(line) =
-            rendered_memo(&body, width).and_then(|d| diagram_line(&d, rows.len(), row, src))
+            rendered_memo(&body, width).and_then(|d| diagram_line(&d, rows.len(), row, src, width))
         {
             return line;
         }
@@ -4096,17 +4096,29 @@ fn rendered_memo(body: &str, width: usize) -> Option<std::rc::Rc<crate::mermaid:
 /// centred in it — or `None` when the diagram is taller than the fence and
 /// there is nowhere to put the rest of it.
 ///
+/// A row wider than `width` is cut at the edge and ends in `›`. The editor
+/// soft-wraps whatever it is handed, and a picture wrapped is a picture
+/// shuffled: the tail of every row lands under its head, and boxes from the
+/// far side of the diagram turn up interleaved with the near ones. The
+/// reading view pans across the whole of it; here the fence is one click away.
+///
 /// Every cell maps back to source column 0, so a click anywhere on the picture
 /// puts the cursor at the start of the source line it was drawn on; the block
 /// then reveals itself and the caret is already in the text that made the
 /// picture. Click the diagram, edit the diagram.
-fn diagram_line(d: &crate::mermaid::Rendered, rows: usize, row: usize, src: &str) -> Option<RLine> {
+fn diagram_line(
+    d: &crate::mermaid::Rendered,
+    rows: usize,
+    row: usize,
+    src: &str,
+    width: usize,
+) -> Option<RLine> {
     if d.height() > rows {
         return None;
     }
     let top = (rows - d.height()) / 2;
     let drawn = row.checked_sub(top).and_then(|i| d.rows.get(i));
-    let cells = drawn
+    let mut cells: Vec<Cell> = drawn
         .into_iter()
         .flatten()
         .flat_map(|run| {
@@ -4114,6 +4126,19 @@ fn diagram_line(d: &crate::mermaid::Rendered, rows: usize, row: usize, src: &str
             run.text.chars().map(move |ch| Cell { ch, style, src: 0 })
         })
         .collect();
+    let width = width.max(1);
+    if cells.iter().map(|c| char_width(c.ch)).sum::<usize>() > width {
+        let mut used = 0;
+        cells.retain(|c| {
+            used += char_width(c.ch);
+            used < width
+        });
+        cells.push(Cell {
+            ch: '›',
+            style: theme::marker(),
+            src: 0,
+        });
+    }
     Some(done(cells, src))
 }
 
@@ -6696,7 +6721,7 @@ mod tests {
     fn the_editor_draws_a_diagram_that_fits_its_fence() {
         // five source lines, three drawn rows: centred, blank above and below
         let d = drawn(&["╭───╮", "│ A │", "╰───╯"]);
-        let row = |r| text(&diagram_line(&d, 5, r, "  A --> B").unwrap());
+        let row = |r| text(&diagram_line(&d, 5, r, "  A --> B", 80).unwrap());
         assert_eq!(row(0), "");
         assert_eq!(row(1), "╭───╮");
         assert_eq!(row(2), "│ A │");
@@ -6709,7 +6734,7 @@ mod tests {
         // one display line per source line is the rule the editor lives by, so
         // a picture with nowhere to put its extra rows is not drawn at all
         let d = drawn(&["a", "b", "c", "d"]);
-        assert!(diagram_line(&d, 3, 0, "```mermaid").is_none());
+        assert!(diagram_line(&d, 3, 0, "```mermaid", 80).is_none());
         // and a kind catcher does not draw is the code it always was
         let lines = buf("```mermaid\ngantt\n  title Ship it\n```\n");
         let block = Block {
@@ -6738,9 +6763,23 @@ mod tests {
     }
 
     #[test]
+    fn a_diagram_wider_than_the_editor_is_cut_at_the_edge_not_wrapped() {
+        // a row the page cannot hold ends in a chevron at the edge, so the
+        // editor never soft-wraps it into a jumble of half rows
+        let d = drawn(&["╭───╮   ╭───╮", "│ A │──▶│ B │", "╰───╯   ╰───╯"]);
+        let row = |r| text(&diagram_line(&d, 3, r, "  A --> B", 8).unwrap());
+        assert_eq!(row(0), "╭───╮  ›");
+        assert_eq!(row(1), "│ A │──›");
+        assert_eq!(str_width(&row(1)), 8);
+        // a row that fits is left whole, chevron and all
+        let d = drawn(&["│ A │"]);
+        assert_eq!(text(&diagram_line(&d, 1, 0, "x", 5).unwrap()), "│ A │");
+    }
+
+    #[test]
     fn a_click_on_a_drawn_diagram_lands_on_its_own_source_line() {
         let d = drawn(&["│ A │"]);
-        let l = diagram_line(&d, 1, 0, "  A --> B").unwrap();
+        let l = diagram_line(&d, 1, 0, "  A --> B", 80).unwrap();
         // every cell of the picture maps to the start of the line it was drawn
         // on, so the click reveals the fence with the caret in the text
         assert!(l.cells.iter().all(|c| c.src == 0));
