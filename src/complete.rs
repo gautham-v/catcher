@@ -4,7 +4,7 @@
 //! token and the text an accepted row inserts are testable without an app;
 //! the app supplies the candidates and keeps the popup's state.
 
-use crate::index::Entry;
+use crate::index::{self, Entry};
 use crate::search;
 use std::collections::HashMap;
 
@@ -156,7 +156,7 @@ pub fn link_candidates(query: &str, entries: &[Entry]) -> Vec<Candidate> {
                     label: name.clone(),
                     stamp: None,
                     detail: e.folder.clone(),
-                    insert: name.clone(),
+                    insert: link_target(entries, e),
                 },
             ));
         }
@@ -183,11 +183,31 @@ pub fn link_candidates(query: &str, entries: &[Entry]) -> Vec<Candidate> {
     }
     let dupes: Vec<bool> = out.iter().map(|c| seen[c.label.as_str()] > 1).collect();
     for (c, dupe) in out.iter_mut().zip(dupes) {
-        if !dupe && !c.detail.starts_with('→') {
+        if !dupe && c.insert == c.label && !c.detail.starts_with('→') {
             c.detail.clear();
         }
     }
     out
+}
+
+/// What a link to `entry` must say to reach `entry` and not some other note
+/// with the same name: its bare name when the resolver already lands there,
+/// and otherwise its full path with the name as display text — the shape
+/// Obsidian writes, `[[interviews/gitlab/why-leave-fw|why-leave-fw]]`, so the
+/// note reads as its name while the link still says which file it meant.
+///
+/// Picking a note out of the popup is a choice of *that file*, so the text
+/// written into the note has to carry the path to survive the resolver's own
+/// tie-break — a bare `[[why-leave-fw]]` would go to whichever of the notes
+/// by that name sits nearer the top of the vault.
+fn link_target(entries: &[Entry], entry: &Entry) -> String {
+    let name = entry.name();
+    let lands = index::resolve(entries, &name).is_some_and(|e| e.path == entry.path);
+    if lands {
+        name
+    } else {
+        format!("{}|{name}", entry.rel)
+    }
 }
 
 /// The headings of a note that answer `query`, in document order, the way
@@ -664,6 +684,39 @@ mod tests {
         let got = link_candidates("pl", &two);
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|c| !c.detail.is_empty()));
+    }
+
+    #[test]
+    fn a_name_two_notes_share_is_offered_as_the_path_that_tells_them_apart() {
+        let entry = |rel: &str| Entry {
+            path: std::path::PathBuf::from(format!("/v/{rel}.md")),
+            title: "Why leave fw".into(),
+            rel: rel.into(),
+            folder: rel.rsplit_once('/').unwrap().0.into(),
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            aliases: Vec::new(),
+            name: "why-leave-fw".into(),
+        };
+        // `nm/why-leave-fw` is the shorter path, so a bare name resolves there
+        let both = [entry("gitlab/why-leave-fw"), entry("nm/why-leave-fw")];
+        let got = link_candidates("why-leave", &both);
+        let insert = |folder: &str| {
+            got.iter()
+                .find(|c| c.detail == folder)
+                .map(|c| c.insert.clone())
+        };
+        assert_eq!(
+            insert("gitlab").as_deref(),
+            Some("gitlab/why-leave-fw|why-leave-fw")
+        );
+        assert_eq!(insert("nm").as_deref(), Some("why-leave-fw"));
+        for c in &got {
+            let target = c.insert.split('|').next().unwrap();
+            assert_eq!(
+                index::resolve(&both, target).map(|e| e.rel.as_str()),
+                Some(format!("{}/why-leave-fw", c.detail).as_str())
+            );
+        }
     }
 
     #[test]
