@@ -183,6 +183,8 @@ pub enum Command {
     InsertTable,
     Table(crate::table::Op),
     TableSource,
+    /// The whole table the cursor is in, gone.
+    DeleteTable,
     InsertCallout,
     InsertMath,
     InsertFootnote,
@@ -325,6 +327,7 @@ impl Command {
             Command::InsertMath => ("Insert math block", "$$ … $$ on lines of their own"),
             Command::InsertFootnote => ("Insert footnote", "[^n] here, its text at the end of the note"),
             Command::TableSource => ("Table: Edit source", "the pipes, until the cursor leaves"),
+            Command::DeleteTable => ("Table: Delete table", "the whole table, every cell of it"),
             Command::Table(op) => {
                 use crate::table::Op;
                 match op {
@@ -378,6 +381,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
                 "⌫ ⌘C ⌘X ⌘V",
                 "on selected cells: clear, copy, cut, paste (tabs and newlines)",
             ),
+            ("⌫ / ⌘X", "with every cell selected: the whole table goes"),
         ],
     ),
     (
@@ -3430,6 +3434,10 @@ impl App {
             commands.extend(TABLE_OPS.iter().map(|op| Command::Table(*op)));
             commands.push(Command::TableSource);
         }
+        // deleting the table needs only the cursor in one, source showing or not
+        if self.view == View::Edit && self.table_block().is_some() {
+            commands.push(Command::DeleteTable);
+        }
         for c in commands {
             if let Some(s) = search::fuzzy(&self.query, c.label().0) {
                 scored.push((s, Item::Command(c)));
@@ -3582,6 +3590,7 @@ impl App {
             Item::Command(Command::InsertFootnote) => self.insert_footnote(),
             Item::Command(Command::Table(op)) => self.table_op(op),
             Item::Command(Command::TableSource) => self.toggle_table_source(),
+            Item::Command(Command::DeleteTable) => self.delete_table(),
             // the rest are plain actions: one path, whether by key or palette;
             // the overlay is already closed, so the toggling ones just open
             Item::Command(c) => {

@@ -247,6 +247,11 @@ impl App {
             self.flash("copy failed — nothing cut".to_string());
             return true;
         }
+        if whole_table(&table, rect) {
+            self.delete_table();
+            self.flash("cut table".to_string());
+            return true;
+        }
         let removed = match kind {
             SelKind::Rows => table.delete_rows(rect.r0, rect.r1),
             SelKind::Cols => table.delete_cols(rect.c0, rect.c1),
@@ -356,6 +361,35 @@ impl App {
             .filter(|(block, ..)| self.table_source != Some(block.start))
     }
 
+    /// The table block the cursor is in, grid or source: what deleting the
+    /// table acts on.
+    pub(super) fn table_block(&self) -> Option<md::Block> {
+        let blocks = self.blocks();
+        md::block_at(&blocks, self.editor.cursor.0)
+            .filter(|b| b.kind == md::BlockKind::Table)
+            .copied()
+    }
+
+    /// The palette's "delete table", and ⌫ over a selection of every cell:
+    /// the whole table goes, and one of the blank lines that set it apart
+    /// with it, so the text around it closes up. The cursor lands where the
+    /// table was.
+    pub(super) fn delete_table(&mut self) {
+        self.enter_edit_view();
+        let Some(block) = self.table_block() else {
+            self.flash("not in a table".to_string());
+            return;
+        };
+        let (from, to) = table_removal(self.editor.lines(), block.start, block.end);
+        self.cell_sel = None;
+        if self.table_source == Some(block.start) {
+            self.table_source = None;
+        }
+        self.editor.replace_lines(from, to, Vec::new(), (from, 0));
+        self.sync_editor_to_note();
+        self.flash("table deleted".to_string());
+    }
+
     /// The table block at `pos`, parsed, with `pos`'s row and column in its
     /// matrix. `None` outside a table or on its separator.
     pub(super) fn table_cell_at(
@@ -441,7 +475,11 @@ impl App {
                 return true;
             }
             KeyCode::Backspace | KeyCode::Delete if selected => {
-                self.clear_selected_cells();
+                // every cell selected: the table itself is what is meant
+                match self.selection_rect() {
+                    Some((_, table, rect)) if whole_table(&table, rect) => self.delete_table(),
+                    _ => self.clear_selected_cells(),
+                }
                 return true;
             }
             KeyCode::Char(_) if selected && !modified => {
@@ -814,6 +852,26 @@ impl App {
     }
 }
 
+/// Does `rect` cover every cell of `table`?
+fn whole_table(table: &crate::table::Table, rect: crate::table::Rect) -> bool {
+    rect.r0 == 0 && rect.c0 == 0 && rect.r1 + 1 >= table.rows.len() && rect.c1 + 1 >= table.cols()
+}
+
+/// The lines to take out for the table on `start..=end` to leave the note
+/// reading cleanly: the table, plus the blank line under it — or, at the end
+/// of the note, the one over it — so the paragraphs on either side are not
+/// left two blank lines apart.
+fn table_removal(lines: &[String], start: usize, end: usize) -> (usize, usize) {
+    let blank = |i: usize| lines.get(i).is_some_and(|l| l.trim().is_empty());
+    if blank(end + 1) {
+        (start, end + 1)
+    } else if start > 0 && blank(start - 1) {
+        (start - 1, end)
+    } else {
+        (start, end)
+    }
+}
+
 /// The text of `cells` between two display columns, as drawn. Columns rather
 /// than indices because that is what a pointer lands on, and a wide character
 /// covers two of them. `offset` is the column the first cell stands for — the
@@ -875,6 +933,55 @@ pub(super) fn screen_to_cell(area: Rect, scroll: usize, x: u16, y: u16) -> (usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_a_table_takes_one_of_the_blank_lines_around_it() {
+        let lines = |s: &str| s.lines().map(str::to_string).collect::<Vec<_>>();
+        // between paragraphs: the table and the blank under it
+        let l = lines("a\n\n| x |\n| - |\n| 1 |\n\nb");
+        assert_eq!(table_removal(&l, 2, 4), (2, 5));
+        // at the end of the note: the blank over it instead
+        let l = lines("a\n\n| x |\n| - |\n| 1 |");
+        assert_eq!(table_removal(&l, 2, 4), (1, 4));
+        // hard against text on both sides, or alone: just the table
+        let l = lines("a\n| x |\n| - |\n| 1 |\nb");
+        assert_eq!(table_removal(&l, 1, 3), (1, 3));
+        let l = lines("| x |\n| - |\n| 1 |");
+        assert_eq!(table_removal(&l, 0, 2), (0, 2));
+    }
+
+    #[test]
+    fn a_selection_of_every_cell_is_the_whole_table() {
+        use crate::table::{Rect, Table};
+        let t = Table::blank(2, 3);
+        assert!(whole_table(
+            &t,
+            Rect {
+                r0: 0,
+                c0: 0,
+                r1: 2,
+                c1: 2
+            }
+        ));
+        assert!(!whole_table(
+            &t,
+            Rect {
+                r0: 0,
+                c0: 0,
+                r1: 2,
+                c1: 1
+            }
+        ));
+        assert!(!whole_table(
+            &t,
+            Rect {
+                r0: 1,
+                c0: 0,
+                r1: 2,
+                c1: 2
+            }
+        ));
+    }
 
     #[test]
     fn a_preview_selection_takes_the_text_it_covers_by_column() {
