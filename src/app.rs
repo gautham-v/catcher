@@ -437,6 +437,24 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
+/// The reading view's vim keys, listed on the card only while
+/// `reading_vim_keys` is on — off, these keys do nothing and a card that
+/// promised them would be lying.
+pub const VIM_SHORTCUTS: (&str, &[(&str, &str)]) = (
+    "preview · vim",
+    &[
+        ("j  k", "a line down, a line up"),
+        ("d  u", "half a page"),
+        ("b   space", "a whole page"),
+        ("f", "label every link, then type a label to open it"),
+        ("gg  G", "the top, the end"),
+        ("{  }", "the heading before, the heading after"),
+        ("h  l   0", "pan a wide table  ·  0 puts it back"),
+        ("/", "find in this note, the page staying up"),
+        ("n  N", "the next match, the one before"),
+    ],
+);
+
 #[derive(Clone, PartialEq)]
 pub enum Item {
     /// A file from the quick-open index, which may live in another folder and
@@ -563,6 +581,14 @@ pub struct App {
     /// The wide block the arrow keys pan: the topmost one on screen, as the
     /// last draw found it. `None` when none is in view.
     pub preview_pan_focus: Option<usize>,
+    /// True once `g` has been pressed in the reading view and the vim set is
+    /// waiting to see whether the next key is the second `g` of `gg`.
+    preview_pending_g: bool,
+    /// The heading `{` and `}` last landed on, so a run of them walks the
+    /// note instead of snapping back to whatever is at the top of the page.
+    /// Cleared by any other scroll, which makes the next one start from the
+    /// view again.
+    preview_heading_at: Option<usize>,
     /// The wheel gesture in progress: the axis it is moving along, when it
     /// last did, and how many ticks the other way have arrived in a row. A
     /// trackpad flick is rarely dead straight: a sideways pan sends the odd
@@ -731,6 +757,19 @@ pub struct App {
     /// is up, and which of them is the current one.
     find_matches: Vec<crate::find::Match>,
     pub find_at: Option<usize>,
+    /// True while the find prompt was opened with `/` from the reading view:
+    /// each match scrolls the page rather than only the editor behind it.
+    find_in_preview: bool,
+    /// True while the reading view keeps the last query's matches lit, the
+    /// way a pager does: `/` turns it on, esc over the page turns it off.
+    find_lit: bool,
+    /// True while `f` has put a label on every link on the page and the
+    /// reading view is waiting to be told which one. Every plain key belongs
+    /// to the labels until one is picked or esc calls it off.
+    pub hinting: bool,
+    /// The label typed so far, for the two-letter labels a page of many
+    /// links needs.
+    pub hint_typed: String,
     /// Where you have been, for ⌥[ and ⌥].
     pub history: crate::history::History,
     /// What has been typed into the shortcuts card, which filters its rows.
@@ -865,6 +904,10 @@ impl App {
             find_replacing: false,
             find_matches: Vec::new(),
             find_at: None,
+            find_in_preview: false,
+            find_lit: false,
+            hinting: false,
+            hint_typed: String::new(),
             help_query: String::new(),
             images: Images::new(Lookup::new(
                 config.attachments_dir.clone(),
@@ -885,6 +928,8 @@ impl App {
             preview_pans: Vec::new(),
             preview_hmax: Vec::new(),
             preview_pan_focus: None,
+            preview_pending_g: false,
+            preview_heading_at: None,
             wheel_axis: None,
             edit_skip: 0,
             theme_checked: Instant::now(),
@@ -991,6 +1036,11 @@ impl App {
         self.edit_skip = 0;
         self.preview_goto = None;
         self.preview_sel = None;
+        self.preview_pending_g = false;
+        self.preview_heading_at = None;
+        self.find_lit = false;
+        self.hinting = false;
+        self.hint_typed.clear();
         // a note switched to may have changed since its folds were made — a
         // link rewrite put a fresh copy in `notes` — so the folds are settled
         // against the text about to be shown, not the text they were made on
@@ -3631,6 +3681,11 @@ impl App {
         self.editor.clear_selection();
         self.editor.set_cursor((row, s));
         self.editor.move_cursor((row, e), true);
+        // `/` from the reading view leaves the page up: the match has to be
+        // brought onto it, since the editor behind it is not what is showing
+        if self.find_in_preview {
+            self.preview_goto = Some(row);
+        }
     }
 
     /// Step to the next match, or the previous one, wrapping.
@@ -3642,6 +3697,19 @@ impl App {
         let i = self.find_at.unwrap_or(0);
         self.find_at = Some(if back { (i + n - 1) % n } else { (i + 1) % n });
         self.select_find_match();
+    }
+
+    /// What the reading view lights: every match of the live query, and
+    /// which of them `n` is standing on. Worked out from the text each draw
+    /// rather than kept, so an edit behind the page can't leave a mark
+    /// hanging over a character that has moved.
+    pub fn preview_find_hits(&self) -> (Vec<crate::find::Match>, Option<usize>) {
+        if !self.find_lit || self.find_input.is_empty() {
+            return (Vec::new(), None);
+        }
+        let hits = crate::find::matches(self.editor.lines(), &self.find_input);
+        let at = self.find_at.filter(|i| *i < hits.len());
+        (hits, at)
     }
 
     /// The char ranges of `row` the find prompt lights up.
@@ -3691,6 +3759,7 @@ impl App {
 
     fn close_find(&mut self) {
         self.overlay = Overlay::None;
+        self.find_in_preview = false;
         self.find_matches.clear();
         self.find_at = None;
         // leave the cursor on the match, not a selection of it
@@ -4062,7 +4131,10 @@ impl App {
         // anywhere else the editor gets the key and moves by word, as before
         if let Some(action) = self.config.keys.action(&key) {
             let fold_key = matches!(action, Action::FoldSection | Action::UnfoldSection);
-            if !fold_key || self.fold_key_applies(&key) {
+            // the vim keys are bare, so they clash with nothing catcher
+            // ships; should someone bind a bare key themselves, the reading
+            // view is the one place its vim meaning wins
+            if !self.reading_vim_key(&key) && (!fold_key || self.fold_key_applies(&key)) {
                 self.run_action(action);
                 return;
             }
@@ -4143,8 +4215,37 @@ impl App {
         }
     }
 
+    /// True when `key` is one the vim set claims for the reading view right
+    /// now: the set is on, the reading view is what is on screen, and nothing
+    /// is over it. Checked before the keymap so those keys reach
+    /// `on_preview_key` rather than the action they are bound to elsewhere.
+    fn reading_vim_key(&self, key: &KeyEvent) -> bool {
+        if self.view != View::Preview || self.overlay != Overlay::None {
+            return false;
+        }
+        // with the labels up every plain key is a label being typed, whatever
+        // it is bound to elsewhere
+        if self.hinting {
+            return hint_char(key).is_some();
+        }
+        self.config.reading_vim_keys && vim_key(key, self.preview_pending_g).is_some()
+    }
+
     /// A key in the reading view: scrolling, panning and leaving it.
     fn on_preview_key(&mut self, key: KeyEvent) {
+        if self.hinting {
+            self.hint_key(key);
+            return;
+        }
+        if self.config.reading_vim_keys {
+            // a pending `g` lasts exactly one key: the second `g` of `gg`
+            // takes it, and anything else spends it and means itself
+            let pending = std::mem::take(&mut self.preview_pending_g);
+            if let Some(motion) = vim_key(&key, pending) {
+                self.run_vim(motion);
+                return;
+            }
+        }
         match key.code {
             // ← and → pan the topmost table or diagram on screen that is
             // too wide for the page; with nothing to pan they do nothing
@@ -4159,10 +4260,210 @@ impl App {
             // esc drops a selection before it drops the preview, the
             // same order it takes in the editor
             KeyCode::Esc if self.preview_sel.is_some() => self.preview_sel = None,
+            KeyCode::Esc if self.find_lit => self.find_lit = false,
             KeyCode::Esc if self.panned() => self.preview_pans.clear(),
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('e') => self.view = View::Edit,
             _ => {}
         }
+    }
+
+    /// The links on the page a label can go on: the ones that lead somewhere.
+    /// The page's own furniture — the properties box's edge, the mentions
+    /// footer's headings — is drawn as links so a click can fold it, and
+    /// labelling those would offer you a door that goes nowhere.
+    pub fn hint_targets(&self) -> Vec<(Rect, String)> {
+        self.preview_links
+            .iter()
+            .filter(|(_, url)| {
+                !matches!(
+                    url.as_str(),
+                    crate::render::PROPERTIES_HREF
+                        | crate::render::LINKED_HREF
+                        | crate::render::UNLINKED_HREF
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// What the page draws while the labels are up: each label and the link
+    /// it stands on, narrowed to the ones the typing can still reach. Empty
+    /// when no labels are up, so the draw asks this and nothing else.
+    pub fn hint_marks(&self) -> Vec<(Rect, String)> {
+        if !self.hinting {
+            return Vec::new();
+        }
+        let targets = self.hint_targets();
+        hint_labels(targets.len())
+            .into_iter()
+            .zip(targets)
+            .filter(|(label, _)| label.starts_with(&self.hint_typed))
+            .map(|(label, (rect, _))| (rect, label))
+            .collect()
+    }
+
+    /// `f`: put a label on every link on the page.
+    fn open_hints(&mut self) {
+        let n = self.hint_targets().len();
+        if n == 0 {
+            self.flash("no links on this page".to_string());
+            return;
+        }
+        self.hinting = true;
+        self.hint_typed.clear();
+        self.flash(format!("{n} links — type a label · esc cancels"));
+    }
+
+    /// A key while the labels are up. Esc calls it off, a letter narrows the
+    /// labels down, and a label typed in full opens its link. A key no label
+    /// can start is a miss: the labels go away rather than sit there
+    /// swallowing everything that follows.
+    fn hint_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.hinting = false;
+            self.hint_typed.clear();
+            return;
+        }
+        let Some(c) = hint_char(&key) else { return };
+        let targets = self.hint_targets();
+        let labels = hint_labels(targets.len());
+        self.hint_typed.push(c);
+        if let Some(i) = labels.iter().position(|l| *l == self.hint_typed) {
+            self.hinting = false;
+            self.hint_typed.clear();
+            let url = targets[i].1.clone();
+            self.follow(md::LinkTarget::parse(&url));
+            return;
+        }
+        if !labels.iter().any(|l| l.starts_with(&self.hint_typed)) {
+            self.hinting = false;
+            self.hint_typed.clear();
+            self.flash("no link with that label".to_string());
+        }
+    }
+
+    /// Carry out a vim motion in the reading view. The page height comes from
+    /// the last draw, so a half page is half of what you can actually see.
+    fn run_vim(&mut self, motion: Vim) {
+        let height = self.editor_area.height.max(1) as i32;
+        // a full page keeps two rows of what you were reading, the way a
+        // pager does, so the jump has something to land against
+        let page = (height - 2).max(1);
+        let half = (height / 2).max(1);
+        match motion {
+            Vim::Down => self.preview_scroll_by(1),
+            Vim::Up => self.preview_scroll_by(-1),
+            Vim::HalfDown => self.preview_scroll_by(half),
+            Vim::HalfUp => self.preview_scroll_by(-half),
+            Vim::PageDown => self.preview_scroll_by(page),
+            Vim::PageUp => self.preview_scroll_by(-page),
+            Vim::Top => self.preview_scroll_by(i32::MIN),
+            // the draw clamps to the last page, so asking for more than the
+            // note has is how you ask for its end
+            Vim::Bottom => self.preview_scroll_by(i32::MAX),
+            Vim::PanLeft => self.pan(self.preview_pan_focus, -4),
+            Vim::PanRight => self.pan(self.preview_pan_focus, 4),
+            Vim::PanHome => self.preview_pans.clear(),
+            Vim::NextHeading => self.preview_heading_step(true),
+            Vim::PrevHeading => self.preview_heading_step(false),
+            Vim::Find => self.open_find_in_preview(),
+            Vim::NextMatch => self.preview_find_step(false),
+            Vim::PrevMatch => self.preview_find_step(true),
+            Vim::Hints => self.open_hints(),
+            Vim::PendingG => self.preview_pending_g = true,
+        }
+    }
+
+    /// Scroll the page by `by` rows, saturating at the top; the draw is what
+    /// clamps the bottom, since only it knows how tall the page came out.
+    /// Any scroll gives up the heading `{` and `}` were walking from.
+    fn preview_scroll_by(&mut self, by: i32) {
+        let at = self.preview_scroll as i32;
+        self.preview_scroll = at.saturating_add(by).clamp(0, u16::MAX as i32) as u16;
+        self.preview_heading_at = None;
+    }
+
+    /// `}` and `{`: the next heading down the note, or the one before it.
+    /// Where you are is the heading the last jump landed on, or failing that
+    /// the first source line the page is showing.
+    fn preview_heading_step(&mut self, forward: bool) {
+        let headings = self.outline_headings();
+        if headings.is_empty() {
+            self.flash("no headings in this note".to_string());
+            return;
+        }
+        let here = self
+            .preview_heading_at
+            .or_else(|| self.preview_rows.iter().find_map(|r| r.src_line))
+            .unwrap_or(0);
+        let found = if forward {
+            headings.iter().find(|h| h.line > here)
+        } else {
+            headings.iter().rev().find(|h| h.line < here)
+        };
+        match found {
+            Some(h) => {
+                let line = h.line;
+                self.goto_heading(line);
+                self.preview_heading_at = Some(line);
+            }
+            // no wrap: walking off either end of a note is a mistake worth
+            // being told about, not a silent jump to the other end
+            None if forward => self.flash("last heading".to_string()),
+            None => self.flash("first heading".to_string()),
+        }
+    }
+
+    /// `/` in the reading view: the same find prompt, over the page rather
+    /// than the editor, with each match scrolling the page to it.
+    fn open_find_in_preview(&mut self) {
+        // set before opening: `open_find` looks for the first match straight
+        // away, and that one should scroll the page like the rest
+        self.find_in_preview = true;
+        self.find_lit = true;
+        self.open_find();
+        self.view = View::Preview;
+    }
+
+    /// `n` and `N`: step through the last query's matches without the prompt.
+    /// With no current match the search starts from the top of the page, so
+    /// `n` after scrolling finds the next one from where you are looking.
+    fn preview_find_step(&mut self, back: bool) {
+        if self.find_input.is_empty() {
+            self.flash("nothing looked for yet — / searches this note".to_string());
+            return;
+        }
+        self.find_matches = crate::find::matches(self.editor.lines(), &self.find_input);
+        let n = self.find_matches.len();
+        if n == 0 {
+            self.flash(format!("no match for {}", self.find_input));
+            return;
+        }
+        let at = match self.find_at.map(|i| i.min(n - 1)) {
+            Some(i) if back => (i + n - 1) % n,
+            Some(i) => (i + 1) % n,
+            None => {
+                let top = self
+                    .preview_rows
+                    .iter()
+                    .find_map(|r| r.src_line)
+                    .unwrap_or(0);
+                let i = crate::find::next_from(&self.find_matches, (top, 0)).unwrap_or(0);
+                if back {
+                    (i + n - 1) % n
+                } else {
+                    i
+                }
+            }
+        };
+        self.find_at = Some(at);
+        self.find_lit = true;
+        let (row, col, _) = self.find_matches[at];
+        self.editor.set_cursor((row, col));
+        self.reveal_cursor();
+        self.preview_goto = Some(row);
+        self.preview_heading_at = None;
+        self.flash(format!("{} of {n}", at + 1));
     }
 
     /// A key in the editor. Up/Down move by display row, which only the view
@@ -4540,6 +4841,11 @@ impl App {
     /// binding leads, so the palette, the help card and the settings all agree
     /// about what a key does.
     fn run_action(&mut self, action: Action) {
+        // a binding that got past the labels — ^K, ^P — is you doing
+        // something else, and the labels should not still be up on the way
+        // back
+        self.hinting = false;
+        self.hint_typed.clear();
         match action {
             Action::Palette => {
                 if matches!(self.overlay, Overlay::Palette | Overlay::QuickOpen) {
@@ -5175,6 +5481,9 @@ impl App {
     /// impossible to drag out a quote and copy it. `preview_click: edit` in the
     /// settings puts the old behaviour back.
     fn click_preview(&mut self, x: u16, y: u16, modifiers: KeyModifiers) {
+        // the pointer picked a link the labels were offering to pick
+        self.hinting = false;
+        self.hint_typed.clear();
         let at = ratatui::layout::Position { x, y };
         if let Some((_, url)) = self.preview_links.iter().find(|(r, _)| r.contains(at)) {
             let url = url.clone();
@@ -6051,6 +6360,118 @@ fn view_line(
     } else {
         md::style_line_in(lines, row)
     }
+}
+
+/// The letters a link label is spelled with, in the order they are handed
+/// out: the home row first, since those are the labels you will type most.
+const HINT_KEYS: &[char] = &[
+    'a', 's', 'd', 'g', 'h', 'j', 'k', 'l', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'z',
+    'x', 'c', 'v', 'b', 'n', 'm',
+];
+
+/// A label for each of `n` links. One letter each while the alphabet lasts;
+/// past that every label is two letters, so that no label is a prefix of
+/// another and a typed label is never ambiguous.
+fn hint_labels(n: usize) -> Vec<String> {
+    let k = HINT_KEYS.len();
+    if n <= k {
+        return HINT_KEYS.iter().take(n).map(|c| c.to_string()).collect();
+    }
+    (0..n)
+        .map(|i| {
+            let (a, b) = (i / k, i % k);
+            // more links than the alphabet squared is not a page anyone is
+            // reading; those last few keep the last label rather than panic
+            let a = HINT_KEYS[a.min(k - 1)];
+            format!("{a}{}", HINT_KEYS[b])
+        })
+        .collect()
+}
+
+/// The character a key types into a label, or `None` for a key that is not
+/// one: the labels are letters, so a chord belongs to the settings as usual.
+fn hint_char(key: &KeyEvent) -> Option<char> {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::CONTROL)
+    {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(c) if c.is_ascii_alphabetic() => Some(c.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+/// A motion the reading view answers when the vim keys are on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Vim {
+    Down,
+    Up,
+    HalfDown,
+    HalfUp,
+    PageDown,
+    PageUp,
+    Top,
+    Bottom,
+    PanLeft,
+    PanRight,
+    PanHome,
+    NextHeading,
+    PrevHeading,
+    Find,
+    NextMatch,
+    PrevMatch,
+    Hints,
+    /// The first `g` of `gg`, waiting for the second.
+    PendingG,
+}
+
+/// What a key means in the reading view once the vim set is on. Pure, and
+/// told about the pending `g` rather than reading it, so the whole table can
+/// be checked without an `App`.
+///
+/// `None` is a key the vim set has no opinion about, which then goes on to
+/// mean whatever it meant before — `e`, esc and the arrows all still work.
+fn vim_key(key: &KeyEvent, pending_g: bool) -> Option<Vim> {
+    // shift is what makes `G`, `N`, `{` and `}` the characters they are, so
+    // it is never in the way. Every other modifier is someone else's: the
+    // reading view's vim keys are all bare, so ^O, ^F and the rest keep
+    // whatever the settings already make of them.
+    if key
+        .modifiers
+        .intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::CONTROL)
+    {
+        return None;
+    }
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    Some(match c {
+        'j' => Vim::Down,
+        'k' => Vim::Up,
+        'h' => Vim::PanLeft,
+        'l' => Vim::PanRight,
+        '0' => Vim::PanHome,
+        // a pager's keys rather than vim's chords: d and u are half a page,
+        // the space bar and b a whole one. `f` is the link labels — vim's
+        // own `f` finds a character on a line, which a page with no cursor
+        // has nothing to do with.
+        'd' => Vim::HalfDown,
+        'u' => Vim::HalfUp,
+        ' ' => Vim::PageDown,
+        'b' => Vim::PageUp,
+        'f' => Vim::Hints,
+        'g' if pending_g => Vim::Top,
+        'g' => Vim::PendingG,
+        'G' => Vim::Bottom,
+        '}' => Vim::NextHeading,
+        '{' => Vim::PrevHeading,
+        '/' => Vim::Find,
+        'n' => Vim::NextMatch,
+        'N' => Vim::PrevMatch,
+        _ => return None,
+    })
 }
 
 /// Does a fold key fold here, or fall through to the editor as the word
@@ -7021,6 +7442,79 @@ mod tests {
             // the rows cover the whole line, in order
             assert_eq!(rows.last().unwrap().end_src, len);
         }
+    }
+
+    #[test]
+    fn the_vim_keys_read_the_motions_the_reading_view_answers() {
+        let k = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        assert_eq!(vim_key(&k('j'), false), Some(Vim::Down));
+        assert_eq!(vim_key(&k('k'), false), Some(Vim::Up));
+        assert_eq!(vim_key(&k('d'), false), Some(Vim::HalfDown));
+        assert_eq!(vim_key(&k('u'), false), Some(Vim::HalfUp));
+        assert_eq!(vim_key(&k(' '), false), Some(Vim::PageDown));
+        assert_eq!(vim_key(&k('f'), false), Some(Vim::Hints));
+        assert_eq!(vim_key(&k('b'), false), Some(Vim::PageUp));
+        assert_eq!(vim_key(&k('G'), false), Some(Vim::Bottom));
+        assert_eq!(vim_key(&k('}'), false), Some(Vim::NextHeading));
+        assert_eq!(vim_key(&k('/'), false), Some(Vim::Find));
+        assert_eq!(vim_key(&k('n'), false), Some(Vim::NextMatch));
+        // `e` still leaves the reading view, and a key the set skips is not
+        // suddenly a motion
+        assert_eq!(vim_key(&k('e'), false), None);
+        assert_eq!(vim_key(&k('x'), false), None);
+        // every modified key belongs to the settings: ^O opens a note, ^F
+        // finds in it, and the reading view does not take either away
+        for m in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+        ] {
+            for c in ['o', 'f', 'b', 'd', 'u', 'n', 'j'] {
+                assert_eq!(vim_key(&KeyEvent::new(KeyCode::Char(c), m), false), None);
+            }
+        }
+        assert_eq!(
+            vim_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL), false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_page_of_links_gets_one_letter_labels_until_the_alphabet_runs_out() {
+        let k = HINT_KEYS.len();
+        assert_eq!(hint_labels(3), vec!["a", "s", "d"]);
+        assert_eq!(hint_labels(k).len(), k);
+        assert!(hint_labels(k).iter().all(|l| l.chars().count() == 1));
+        // one link past the alphabet and every label is two letters, so that
+        // no label is the start of another and none of them is ambiguous
+        let many = hint_labels(k + 1);
+        assert_eq!(many.len(), k + 1);
+        assert!(many.iter().all(|l| l.chars().count() == 2));
+        assert_eq!(many[0], "aa");
+        assert_eq!(many[k], "sa");
+        // whatever the count, no two links share a label
+        let set: std::collections::HashSet<_> = many.iter().collect();
+        assert_eq!(set.len(), many.len());
+    }
+
+    #[test]
+    fn only_a_plain_letter_types_into_a_label() {
+        let plain = KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT);
+        assert_eq!(hint_char(&plain), Some('j'));
+        let ctrl = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert_eq!(hint_char(&ctrl), None);
+        let digit = KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE);
+        assert_eq!(hint_char(&digit), None);
+    }
+
+    #[test]
+    fn the_first_g_waits_for_the_second_and_only_then_goes_to_the_top() {
+        let g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        assert_eq!(vim_key(&g, false), Some(Vim::PendingG));
+        assert_eq!(vim_key(&g, true), Some(Vim::Top));
+        // a pending g does not turn some other key into a motion it isn't
+        let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(vim_key(&j, true), Some(Vim::Down));
     }
 
     #[test]

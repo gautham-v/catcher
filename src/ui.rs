@@ -826,6 +826,7 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     app.preview_checkboxes.clear();
     app.preview_rows.clear();
     let span = app.preview_span();
+    let (hits, hit_at) = app.preview_find_hits();
 
     let mut lines: Vec<Line> = Vec::new();
     // (rect on screen, image index, rows of the whole band, rows of it above the top)
@@ -876,8 +877,10 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
         }
-        lines.push(crate::render::to_line(&selected(
-            &shown, page_row, offset, span,
+        lines.push(crate::render::to_line(&lit(
+            selected(&shown, page_row, offset, span),
+            &hits,
+            hit_at,
         )));
         // every drawn row is recorded, source line or not: a row the renderer
         // invented — a blank line, a footer row — is still a row a selection
@@ -905,6 +908,20 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     f.render_widget(Paragraph::new(lines), area);
+    // the link labels sit on the first cells of each link, in the accent the
+    // way a selected row is: a label has to be found at a glance, and it is
+    // covering text you are about to leave anyway
+    for (rect, label) in app.hint_marks() {
+        let w = crate::md::str_width(&label) as u16;
+        let width = w.min(rect.width).min(area.right().saturating_sub(rect.x));
+        if width == 0 {
+            continue;
+        }
+        f.render_widget(
+            Span::styled(label, crate::theme::highlight()),
+            Rect::new(rect.x, rect.y, width, 1),
+        );
+    }
 
     let dir = app.note_dir();
     for (rect, idx, band, hidden) in images {
@@ -1092,6 +1109,34 @@ fn selected(
         out.push(c);
     }
     out
+}
+
+/// The find matches on this row, lit: each one in the accent and underlined,
+/// the way the editor marks them, and the one `n` is standing on reversed as
+/// well so a page of matches still says where you are. Matched by source
+/// position, so a panned table lights the right characters.
+fn lit(cells: Vec<PCell>, hits: &[crate::find::Match], at: Option<usize>) -> Vec<PCell> {
+    if hits.is_empty() {
+        return cells;
+    }
+    let current = at.map(|i| hits[i]);
+    cells
+        .into_iter()
+        .map(|mut c| {
+            let Some((row, col)) = c.src else { return c };
+            let on = |&(r, s, e): &crate::find::Match| r == row && col >= s && col < e;
+            if hits.iter().any(on) {
+                c.style = c
+                    .style
+                    .patch(crate::theme::state())
+                    .add_modifier(Modifier::UNDERLINED);
+                if current.as_ref().is_some_and(on) {
+                    c.style = c.style.add_modifier(Modifier::REVERSED);
+                }
+            }
+            c
+        })
+        .collect()
 }
 
 /// The image widget for one band. Cropping, not fitting: the protocol state
@@ -2101,14 +2146,23 @@ fn draw_help(f: &mut Frame, app: &App) {
     // the settable bindings first, as the settings currently have them
     let bound = app.config.keys.card_rows();
     let groups: Vec<(&str, Vec<(String, &str)>)> = std::iter::once(("keys", bound))
-        .chain(crate::app::SHORTCUTS.iter().map(|(g, rows)| {
-            (
-                *g,
-                rows.iter()
-                    .map(|(k, w)| (k.to_string(), *w))
-                    .collect::<Vec<_>>(),
-            )
-        }))
+        .chain(
+            crate::app::SHORTCUTS
+                .iter()
+                .chain(std::iter::once(&crate::app::VIM_SHORTCUTS).filter(|_| {
+                    // turned off, those keys do nothing; the card only
+                    // promises what the reading view will actually answer
+                    app.config.reading_vim_keys
+                }))
+                .map(|(g, rows)| {
+                    (
+                        *g,
+                        rows.iter()
+                            .map(|(k, w)| (k.to_string(), *w))
+                            .collect::<Vec<_>>(),
+                    )
+                }),
+        )
         .collect();
 
     // the widest key column, so the descriptions line up down the whole card
@@ -2411,6 +2465,49 @@ mod tests {
                 src: None,
             })
             .collect()
+    }
+
+    /// `text` as cells carrying source columns on line `row`.
+    fn sourced(text: &str, row: usize) -> Vec<PCell> {
+        text.chars()
+            .enumerate()
+            .map(|(col, ch)| PCell {
+                ch,
+                style: Style::default(),
+                link: None,
+                src: Some((row, col)),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_lit_match_is_underlined_and_the_one_n_is_on_is_reversed_too() {
+        // "the cat sat": both `at`s light, the second is the current one
+        let hits = vec![(7, 5, 7), (7, 9, 11)];
+        let out = lit(sourced("the cat sat", 7), &hits, Some(1));
+        let marks: String = out
+            .iter()
+            .map(|c| {
+                let u = c.style.add_modifier.contains(Modifier::UNDERLINED);
+                let r = c.style.add_modifier.contains(Modifier::REVERSED);
+                match (u, r) {
+                    (true, true) => 'R',
+                    (true, false) => 'u',
+                    _ => '.',
+                }
+            })
+            .collect();
+        assert_eq!(marks, ".....uu..RR");
+    }
+
+    #[test]
+    fn nothing_is_lit_without_matches_or_on_a_row_the_renderer_invented() {
+        let plain = lit(sourced("the cat sat", 7), &[], None);
+        assert!(plain.iter().all(|c| c.style.add_modifier.is_empty()));
+        // a row with no source — a blank spacer, the mentions footer — is
+        // never lit, whatever the match rows say
+        let invented = lit(cells("the cat sat"), &[(7, 5, 7)], Some(0));
+        assert!(invented.iter().all(|c| c.style.add_modifier.is_empty()));
     }
 
     #[test]

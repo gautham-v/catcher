@@ -291,6 +291,10 @@ pub struct Config {
     /// Whether typing `[[` or `#` pops up notes, headings and tags to pick
     /// from.
     pub autocomplete: bool,
+    /// Whether the reading view answers the vim motions — j/k, d/u, gg/G,
+    /// { }, / and n — on top of the arrows. All of them are bare keys: the
+    /// reading view takes no ^chord away from the settings.
+    pub reading_vim_keys: bool,
     /// Whether quick-open walks subfolders or offers only the current folder.
     pub quick_open_recursive: bool,
     /// Whether ^O opens on the folder tree rather than the ranked list. Which
@@ -349,6 +353,7 @@ impl Default for Config {
             list_guides: true,
             linked_mentions: true,
             autocomplete: true,
+            reading_vim_keys: true,
             quick_open_recursive: true,
             quick_open_browse: false,
             quick_open_dirs: Vec::new(),
@@ -678,6 +683,7 @@ impl Config {
         c.preview_click = word(text, "preview_click").unwrap_or(c.preview_click);
         c.linked_mentions = flag(text, "linked_mentions", c.linked_mentions);
         c.autocomplete = flag(text, "autocomplete", c.autocomplete);
+        c.reading_vim_keys = flag(text, "reading_vim_keys", c.reading_vim_keys);
         c.front_matter = word(text, "front_matter").unwrap_or(c.front_matter);
         c.properties = word(text, "properties").unwrap_or(c.properties);
         c
@@ -886,6 +892,11 @@ impl Config {
             "autocomplete",
             yn(self.autocomplete),
             "suggest notes after [[ and tags after #",
+        );
+        d.row(
+            "reading_vim_keys",
+            yn(self.reading_vim_keys),
+            "j k, d u, gg G, { }, / and n in the reading view",
         );
         d.row(
             "quick_open",
@@ -1314,6 +1325,17 @@ mod tests {
             ..Default::default()
         };
         assert!(Config::from_str(&c.to_document()).quick_open_browse);
+    }
+
+    #[test]
+    fn the_reading_view_answers_the_vim_keys_unless_they_are_turned_off() {
+        assert!(Config::default().reading_vim_keys);
+        assert!(!Config::from_str("- reading_vim_keys: no\n").reading_vim_keys);
+        let c = Config {
+            reading_vim_keys: false,
+            ..Default::default()
+        };
+        assert!(!Config::from_str(&c.to_document()).reading_vim_keys);
     }
 
     #[test]
