@@ -716,6 +716,11 @@ pub struct App {
     /// A source line the reading view should scroll to on its next draw. Only
     /// the draw knows which page row a line lands on once wrapped.
     pub preview_goto: Option<usize>,
+    /// A source line the reading view should put exactly at its top on the
+    /// next draw: where the page was when the note was last left. Unlike
+    /// `preview_goto` it is not eased down a couple of rows, so going back
+    /// and forth does not creep the page upward each time.
+    pub preview_top: Option<usize>,
     /// ^O opened by following a `#tag`: the tag, and which index entries
     /// carry it. The list is cut to those and the query narrows within them.
     pub tag_filter: Option<(String, Vec<usize>)>,
@@ -772,6 +777,9 @@ pub struct App {
     pub hint_typed: String,
     /// Where you have been, for ⌥[ and ⌥].
     pub history: crate::history::History,
+    /// Where you were in each note you have left, so returning to one lands
+    /// there rather than at its top.
+    pub places: crate::places::Places,
     /// What has been typed into the shortcuts card, which filters its rows.
     pub help_query: String,
     /// The wikilink the pointer is resting on in the reading view, and when
@@ -992,6 +1000,8 @@ impl App {
             preview_sel: None,
             preview_dragging: false,
             history: crate::history::History::default(),
+            places: crate::places::Places::default(),
+            preview_top: None,
             folds: crate::fold::Folds::default(),
             visible: crate::fold::Visible::default(),
         };
@@ -1035,6 +1045,7 @@ impl App {
         self.preview_pans.clear();
         self.edit_skip = 0;
         self.preview_goto = None;
+        self.preview_top = None;
         self.preview_sel = None;
         self.preview_pending_g = false;
         self.preview_heading_at = None;
@@ -1051,8 +1062,40 @@ impl App {
         self.folds
             .seed(&self.notes[self.active].path, self.editor.lines(), &blocks);
         self.refresh_visible();
+        // a note left earlier this session opens where it was left, in both
+        // views, rather than at its top
+        let path = &self.notes[self.active].path;
+        if let Some(place) = self.places.recall(path, self.editor.lines().len()) {
+            self.editor.set_cursor(place.cursor);
+            self.editor.scroll = place.scroll;
+            self.preview_top = place.top;
+            self.reveal_cursor();
+        }
         self.sync_title();
         self.refresh_file_resolver();
+    }
+
+    /// Note where the note on screen is being left, before another takes
+    /// its place. The reading view's place is the source line at the top of
+    /// the page as last drawn, and only while reading: in the editor the
+    /// laid-out page may belong to another note, or to nothing yet.
+    fn leave_active(&mut self) {
+        let top = match self.view {
+            View::Preview => self
+                .preview_page
+                .rows
+                .iter()
+                .skip(self.preview_scroll as usize)
+                .find_map(|r| r.src_line),
+            View::Edit => None,
+        };
+        let place = crate::places::Place {
+            cursor: self.editor.cursor,
+            scroll: self.editor.scroll,
+            top,
+        };
+        let path = self.notes[self.active].path.clone();
+        self.places.remember(&path, place);
     }
 
     /// Rebuild the line → row mapping from the buffer and the note's folds.
@@ -1695,6 +1738,7 @@ impl App {
     /// (^N, a link's offer to create) and the settings note force the editor.
     fn switch_to(&mut self, idx: usize) {
         self.save_now();
+        self.leave_active();
         self.active = idx;
         self.load_active_into_editor();
         self.remember_active();
@@ -1753,6 +1797,7 @@ impl App {
         match notes::load_one(&target) {
             Ok(note) => {
                 self.save_now();
+                self.leave_active();
                 self.notes.insert(0, note);
                 self.active = 0;
                 self.load_active_into_editor();
@@ -3147,6 +3192,7 @@ impl App {
         self.save_now();
         match notes::create_with(&self.dir, content) {
             Ok(n) => {
+                self.leave_active();
                 self.notes.insert(0, n);
                 self.active = 0;
                 self.view = View::Edit;

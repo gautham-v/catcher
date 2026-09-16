@@ -817,6 +817,16 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
             app.preview_scroll = at.saturating_sub(2) as u16;
         }
     }
+    // the line that was at the top when this note was last left goes back
+    // exactly there, however the page has since been wrapped
+    if let Some(line) = app.preview_top.take() {
+        if let Some(at) = rows
+            .iter()
+            .position(|r| r.src_line.is_some_and(|l| l >= line))
+        {
+            app.preview_scroll = at as u16;
+        }
+    }
     app.preview_scroll = app.preview_scroll.min(max_scroll);
     let top = app.preview_scroll as usize;
 

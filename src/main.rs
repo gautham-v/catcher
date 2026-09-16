@@ -25,6 +25,7 @@ mod mermaid;
 mod notes;
 mod opener;
 mod outline;
+mod places;
 mod render;
 mod search;
 mod table;
