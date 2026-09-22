@@ -6011,6 +6011,25 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
+        // the mouse's side buttons walk the history, as they do in a browser,
+        // from under whatever is open; their release is nothing
+        if let Some(back) = side_button(ev) {
+            if matches!(ev.kind, MouseEventKind::Down(_)) {
+                self.complete = None;
+                self.opener = None;
+                if self.zoom.is_some() {
+                    self.unzoom();
+                }
+                self.overlay = Overlay::None;
+                self.run_action(if back {
+                    Action::NavBack
+                } else {
+                    Action::NavForward
+                });
+            }
+            return;
+        }
+        let ev = shift_wheel(ev);
         if self.complete_mouse(ev) {
             return;
         }
@@ -6783,6 +6802,38 @@ fn follows_link(m: KeyModifiers) -> bool {
     m.intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
+/// Whether a mouse event is a side button — `Some(true)` back, `Some(false)`
+/// forward — pressed or released. The patched crossterm in vendor/ reports
+/// them as the left and right buttons marked HYPER, which a real click never
+/// carries.
+fn side_button(ev: MouseEvent) -> Option<bool> {
+    if !ev.modifiers.contains(KeyModifiers::HYPER) {
+        return None;
+    }
+    match ev.kind {
+        MouseEventKind::Down(b) | MouseEventKind::Up(b) => match b {
+            MouseButton::Left => Some(true),
+            MouseButton::Right => Some(false),
+            MouseButton::Middle => None,
+        },
+        _ => None,
+    }
+}
+
+/// ⇧ turns a plain wheel sideways, so a mouse with one wheel can pan a wide
+/// table or diagram. macOS does the same for some apps and not others; a
+/// terminal that already sent it sideways is left alone.
+fn shift_wheel(mut ev: MouseEvent) -> MouseEvent {
+    if ev.modifiers.contains(KeyModifiers::SHIFT) {
+        ev.kind = match ev.kind {
+            MouseEventKind::ScrollUp => MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollDown => MouseEventKind::ScrollRight,
+            k => k,
+        };
+    }
+    ev
+}
+
 /// A wheel gesture under way: see [`wheel_along`].
 #[derive(Clone, Copy, Debug)]
 struct WheelGesture {
@@ -6898,6 +6949,67 @@ mod tests {
         assert!(wheel_along(&mut g, true, ms(60)));
         assert!(!wheel_along(&mut g, false, ms(80)));
         assert!(!wheel_along(&mut g, false, ms(100)));
+    }
+
+    #[test]
+    fn the_side_buttons_are_back_and_forward_and_a_click_is_neither() {
+        use super::side_button;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let ev = |kind, modifiers| MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers,
+        };
+        let h = KeyModifiers::HYPER;
+        assert_eq!(
+            side_button(ev(MouseEventKind::Down(MouseButton::Left), h)),
+            Some(true)
+        );
+        assert_eq!(
+            side_button(ev(MouseEventKind::Down(MouseButton::Right), h)),
+            Some(false)
+        );
+        assert_eq!(
+            side_button(ev(MouseEventKind::Up(MouseButton::Left), h)),
+            Some(true)
+        );
+        let none = KeyModifiers::empty();
+        assert_eq!(
+            side_button(ev(MouseEventKind::Down(MouseButton::Left), none)),
+            None
+        );
+        assert_eq!(side_button(ev(MouseEventKind::ScrollUp, h)), None);
+    }
+
+    #[test]
+    fn shift_turns_the_wheel_sideways() {
+        use super::shift_wheel;
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+        let ev = |kind, modifiers| MouseEvent {
+            kind,
+            column: 3,
+            row: 4,
+            modifiers,
+        };
+        let s = KeyModifiers::SHIFT;
+        assert_eq!(
+            shift_wheel(ev(MouseEventKind::ScrollUp, s)).kind,
+            MouseEventKind::ScrollLeft
+        );
+        assert_eq!(
+            shift_wheel(ev(MouseEventKind::ScrollDown, s)).kind,
+            MouseEventKind::ScrollRight
+        );
+        assert_eq!(
+            shift_wheel(ev(MouseEventKind::ScrollRight, s)).kind,
+            MouseEventKind::ScrollRight
+        );
+        let plain = KeyModifiers::empty();
+        assert_eq!(
+            shift_wheel(ev(MouseEventKind::ScrollDown, plain)).kind,
+            MouseEventKind::ScrollDown
+        );
     }
 
     /// The reading view's rows for `md` at `width`, laid out the way a draw

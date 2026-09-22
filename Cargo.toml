@@ -8,6 +8,7 @@ repository = "https://github.com/gautham-v/catcher"
 readme = "README.md"
 keywords = ["notes", "markdown", "tui", "terminal"]
 categories = ["command-line-utilities", "text-editors"]
+exclude = ["vendor"]
 
 [dependencies]
 ratatui = "0.29"
@@ -28,3 +29,9 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# crossterm drops the mouse's back and forward buttons; this copy passes them
+# through (see vendor/crossterm/README.md). Patches don't travel with
+# `cargo publish`, so a crates.io install builds without the side buttons.
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }

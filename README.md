@@ -48,7 +48,7 @@ catcher path             print the notes directory
 | `⌥D` | Today's note |
 | `^P` | Reading view |
 | `⌥⏎` / `⌥P` | Follow / peek at a link |
-| `⌥[` / `⌥]` | Back / forward |
+| `⌥[` / `⌥]` | Back / forward (or the mouse's side buttons) |
 | `^/` | Help card |
 | `^,` | Settings |
 | `^Q` | Quit |
