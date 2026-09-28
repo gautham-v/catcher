@@ -384,17 +384,38 @@ impl Table {
 }
 
 /// Clipboard text as a block of cells: tabs split columns, newlines rows.
-/// One line with no tab is a single cell.
+/// One line with no tab is a single cell. A bare `|` in the text is escaped,
+/// so it lands as text in its cell rather than as a border.
 pub fn parse_tsv(text: &str) -> Vec<Vec<String>> {
     let text = text.strip_suffix('\n').unwrap_or(text);
     text.split('\n')
         .map(|l| {
             l.trim_end_matches('\r')
                 .split('\t')
-                .map(str::to_string)
+                .map(escape_pipes)
                 .collect()
         })
         .collect()
+}
+
+/// `text` with every `|` that is not already escaped written `\|`, the way a
+/// table cell holds one.
+pub fn escape_pipes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                out.push(ch);
+                if let Some(next) = chars.next_if(|c| c.is_ascii_punctuation()) {
+                    out.push(next);
+                }
+            }
+            '|' => out.push_str("\\|"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Which cell of a source row column `col` is in, or would be: the index of
@@ -496,6 +517,13 @@ mod tests {
         let t = Table::parse(&lines("| a |\n|---|\n| c | d |")).unwrap();
         assert_eq!(t.cols(), 2);
         assert_eq!(t.rows[0], vec!["a", ""]);
+    }
+
+    #[test]
+    fn pasted_pipes_are_escaped_into_their_cell_once() {
+        assert_eq!(parse_tsv("[[a|b]]\tx"), [["[[a\\|b]]", "x"]]);
+        // copied out of a cell already escaped, it goes back as it was
+        assert_eq!(escape_pipes("[[a\\|b]] \\\\"), "[[a\\|b]] \\\\");
     }
 
     #[test]

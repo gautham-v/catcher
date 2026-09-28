@@ -209,7 +209,9 @@ fn fragment_span(src: &[char], w: &crate::md::Wikilink) -> Option<(usize, usize)
     if src[hash] != '#' {
         return None;
     }
-    let end = (hash + 1..close).find(|&k| src[k] == '|').unwrap_or(close);
+    let end = (hash + 1..close)
+        .find(|&k| src[k] == '|')
+        .map_or(close, |p| crate::md::alias_sep(src, p));
     Some((hash + 1, end))
 }
 
@@ -292,7 +294,7 @@ fn target_span(src: &[char], w: &crate::md::Wikilink) -> (usize, usize) {
     let close = w.end - 2;
     let mut end = (body..close)
         .find(|&k| matches!(src[k], '|' | '#'))
-        .unwrap_or(close);
+        .map_or(close, |k| crate::md::alias_sep(src, k));
     let mut start = body;
     while start < end && src[start].is_whitespace() {
         start += 1;
@@ -643,6 +645,23 @@ mod tests {
         assert_eq!(
             read(&other),
             "[[shopping|the list]] [[shopping#Fruit]] [[shopping#Fruit|fruit]] [[ shopping ]]\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_alias_escaped_in_a_table_cell_survives_the_rewrite() {
+        let dir = tmpdir("table-alias");
+        write(&dir, "groceries.md", "# Groceries\n");
+        let other = write(
+            &dir,
+            "other.md",
+            "| a | b |\n| --- | --- |\n| [[groceries\\|the list]] | [[groceries#Fruit\\|fruit]] |\n",
+        );
+        renamed(&dir, "groceries.md", "shopping.md");
+        assert_eq!(
+            read(&other),
+            "| a | b |\n| --- | --- |\n| [[shopping\\|the list]] | [[shopping#Fruit\\|fruit]] |\n"
         );
         let _ = fs::remove_dir_all(&dir);
     }

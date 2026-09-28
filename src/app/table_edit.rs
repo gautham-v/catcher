@@ -287,7 +287,7 @@ impl App {
         if single {
             // one cell's worth: type it in, newlines and all flattened
             self.cell_sel = None;
-            let flat = text.replace(['\n', '\r'], " ");
+            let flat = block_cells[0][0].replace('\r', " ");
             self.editor.insert_str(&flat);
             self.sync_editor_to_note();
             return true;
@@ -559,6 +559,14 @@ impl App {
                 self.table_op(crate::table::Op::RowBelow);
                 true
             }
+            KeyCode::Char('|') if !modified => {
+                // a grid's pipes are its borders, so one typed into a cell is
+                // text, escaped the GFM way — `[[note\|alias]]` stays in its cell
+                self.editor.insert_str("\\|");
+                self.sync_editor_to_note();
+                self.refresh_complete();
+                true
+            }
             KeyCode::Down
                 if !modified
                     && !key.modifiers.contains(KeyModifiers::SHIFT)
@@ -568,14 +576,18 @@ impl App {
             }
             KeyCode::Backspace | KeyCode::Delete => {
                 let line = &self.editor.lines()[row];
-                // a line break goes in one piece, the way it was drawn
-                let tag = md::br_tags(line, 0).into_iter().find(|(s, e)| {
-                    if key.code == KeyCode::Backspace {
-                        *e == col
-                    } else {
-                        *s == col
-                    }
-                });
+                // a line break goes in one piece, the way it was drawn, and
+                // so does an escaped pipe, which was typed as one key
+                let tag = md::br_tags(line, 0)
+                    .into_iter()
+                    .chain(escaped_pipes(line))
+                    .find(|(s, e)| {
+                        if key.code == KeyCode::Backspace {
+                            *e == col
+                        } else {
+                            *s == col
+                        }
+                    });
                 if let Some((s, e)) = tag.filter(|_| !modified && self.editor.selection().is_none())
                 {
                     self.editor.anchor = Some((row, s));
@@ -850,6 +862,16 @@ impl App {
             self.write_table(block, &table, to);
         }
     }
+}
+
+/// The source spans of every `\|` on a table row.
+fn escaped_pipes(line: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = line.chars().collect();
+    let (_, pipes) = md::split_row(line);
+    (1..chars.len())
+        .filter(|&k| chars[k] == '|' && chars[k - 1] == '\\' && !pipes.contains(&k))
+        .map(|k| (k - 1, k + 1))
+        .collect()
 }
 
 /// Does `rect` cover every cell of `table`?

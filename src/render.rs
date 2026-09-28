@@ -1648,11 +1648,10 @@ impl Ren {
     /// to `md::wikilink_at` because the char slice below starts at `off` and
     /// cannot see the character before it.
     ///
-    /// One limitation worth knowing: inside a GFM table cell an unescaped `|`
-    /// is the cell delimiter, so `[[note|label]]` is cut into two cells before
-    /// the renderer ever sees it. Obsidian has the same problem and the same
-    /// answer (`\|`), and escaping it splits the events so the whole thing
-    /// stays literal. Plain and `#heading` wikilinks in a cell are fine.
+    /// Inside a GFM table cell an unescaped `|` is the cell delimiter, so a
+    /// cell writes its alias `[[note\|label]]`, as Obsidian does. pulldown
+    /// splits the escape into events of its own, but the link is read from
+    /// the source and every event inside it skipped, so that does not matter.
     fn wikilink_here(&self, off: usize) -> Option<(usize, String, usize, usize)> {
         if !crate::md::links::enabled() || !self.src[off..].starts_with("[[") {
             return None;

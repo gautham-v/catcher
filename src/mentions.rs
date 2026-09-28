@@ -322,14 +322,13 @@ pub fn excerpt(line: &str, at: usize, end: usize) -> (String, (usize, usize)) {
     let mut end = end.min(chars.len());
     // a table row: keep only the cell the link is in
     if line.trim_start().starts_with('|') {
-        let prev = chars[..at]
+        // the row's own pipes, not the escaped `\|` a cell may hold
+        let (_, pipes) = crate::md::split_row(line);
+        let prev = pipes.iter().rev().find(|&&p| p < at).map_or(0, |p| p + 1);
+        let next = pipes
             .iter()
-            .rposition(|c| *c == '|')
-            .map_or(0, |p| p + 1);
-        let next = chars[end..]
-            .iter()
-            .position(|c| *c == '|')
-            .map_or(chars.len(), |p| end + p);
+            .find(|&&p| p >= end)
+            .map_or(chars.len(), |&p| p);
         chars = chars[prev..next].to_vec();
         at -= prev;
         end -= prev;
@@ -863,6 +862,13 @@ mod tests {
         let (e, span) = excerpt_of("| Projects | see [[spec]] here | tight deadline |");
         assert_eq!(e, "see [[spec]] here");
         assert_eq!(spanned(&e, span), "[[spec]]");
+    }
+
+    #[test]
+    fn an_escaped_pipe_does_not_cut_the_cell_holding_the_link() {
+        let (e, span) = excerpt_of("| Projects | a \\| b [[spec\\|the spec]] | c |");
+        assert_eq!(e, "a \\| b [[spec\\|the spec]]");
+        assert_eq!(spanned(&e, span), "[[spec\\|the spec]]");
     }
 
     #[test]

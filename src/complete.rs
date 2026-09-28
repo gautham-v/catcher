@@ -407,6 +407,15 @@ pub fn accept(
     let head: String = chars[..token.start.min(col)].iter().collect();
     let rest: String = chars[col..].iter().collect();
     let mut out = head;
+    // a table cell ends at a bare pipe, so the one a candidate carries between
+    // path and name goes in escaped
+    let escaped;
+    let insert = if crate::md::is_table_row(line) {
+        escaped = insert.replace('|', "\\|");
+        escaped.as_str()
+    } else {
+        insert
+    };
     // a block picked from `[[^` or `[[note^` — the `#` left unsaid — lands as
     // `[[#^id]]` / `[[note#^id]]`, the link that names a block
     if insert.starts_with('^') && token.query.starts_with('^') && !out.ends_with('#') {
@@ -538,6 +547,16 @@ mod tests {
         assert_eq!(
             accept("[[gro and [[b]]", 5, &t, "groceries", false),
             ("[[groceries]] and [[b]]".into(), 13)
+        );
+    }
+
+    #[test]
+    fn a_link_taken_in_a_table_cell_escapes_its_pipe() {
+        let line = "| a | [[why | c |";
+        let t = token_at(line, 11).unwrap();
+        assert_eq!(
+            accept(line, 11, &t, "gitlab/why-leave-fw|why-leave-fw", false).0,
+            "| a | [[gitlab/why-leave-fw\\|why-leave-fw]] | c |"
         );
     }
 

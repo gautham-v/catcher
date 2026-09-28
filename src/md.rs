@@ -790,8 +790,9 @@ fn style_line_inner(
         let rule = trimmed
             .chars()
             .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'));
-        for (idx, ch) in chars.iter().enumerate() {
-            let style = if rule || *ch == '|' {
+        let (_, pipes) = split_row(src);
+        for idx in 0..chars.len() {
+            let style = if rule || pipes.contains(&idx) {
                 theme::marker()
             } else {
                 theme::PLAIN
@@ -2204,13 +2205,18 @@ pub fn wikilink_at(src: &[char], i: usize) -> Option<Wikilink> {
     if src[body_start..close].iter().all(|c| c.is_whitespace()) {
         return None;
     }
-    // the FIRST pipe splits target from label, so a label may contain one
+    // the FIRST pipe splits target from label, so a label may contain one;
+    // inside a table cell it is written `\|`, and the backslash is part of
+    // the separator rather than the end of the target
     let pipe = (body_start..close).find(|&k| src[k] == '|');
     let (target_end, label) = match pipe {
         // `[[note|]]` has no label to show, so the target is what is drawn —
         // up to the pipe, and not the pipe itself or the blank after it
-        Some(p) if src[p + 1..close].iter().all(|c| c.is_whitespace()) => (p, (body_start, p)),
-        Some(p) => (p, (p + 1, close)),
+        Some(p) if src[p + 1..close].iter().all(|c| c.is_whitespace()) => {
+            let t = alias_sep(src, p);
+            (t, (body_start, t))
+        }
+        Some(p) => (alias_sep(src, p), (p + 1, close)),
         None => (close, (body_start, close)),
     };
     let raw: String = src[body_start..target_end].iter().collect();
@@ -2233,6 +2239,17 @@ pub fn wikilink_at(src: &[char], i: usize) -> Option<Wikilink> {
         label_start: label.0,
         label_end: label.1,
     })
+}
+
+/// Where the separator ending a wikilink's target starts, given the column of
+/// its pipe: the pipe itself, or the backslash of a table cell's `\|`. Any
+/// other column is returned as it is.
+pub(crate) fn alias_sep(src: &[char], pipe: usize) -> usize {
+    if src[pipe] == '|' && pipe > 0 && src[pipe - 1] == '\\' {
+        pipe - 1
+    } else {
+        pipe
+    }
 }
 
 /// Every wikilink on one source line, left to right.
@@ -3474,7 +3491,7 @@ pub(crate) fn is_table_rule(line: &str) -> bool {
         && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
 }
 
-fn is_table_row(line: &str) -> bool {
+pub(crate) fn is_table_row(line: &str) -> bool {
     line.trim().starts_with('|') && line.trim().chars().count() > 1
 }
 
@@ -4733,14 +4750,21 @@ impl TCell {
 }
 
 /// Split `| a | b |` into its cells and the source columns of its pipes.
+/// An escaped `\|` is text inside its cell, as GFM has it — the way a cell
+/// holds `[[note\|alias]]` — and `\\|` is an escaped backslash before a real
+/// pipe, so escapes are stepped over in pairs.
 pub(crate) fn split_row(src: &str) -> (Vec<TCell>, Vec<usize>) {
     let chars: Vec<char> = src.chars().collect();
-    let pipes: Vec<usize> = chars
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| **c == '|')
-        .map(|(i, _)| i)
-        .collect();
+    let mut pipes = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' if chars.get(i + 1).is_some_and(|c| c.is_ascii_punctuation()) => i += 1,
+            '|' => pipes.push(i),
+            _ => {}
+        }
+        i += 1;
+    }
     let mut cells = Vec::new();
     for w in pipes.windows(2) {
         let (a, b) = (w[0] + 1, w[1]);
@@ -7086,6 +7110,33 @@ mod tests {
         let chars: Vec<char> = "[[note|]]".chars().collect();
         let w = wikilink_at(&chars, 0).unwrap();
         assert_eq!((w.label_start, w.label_end), (2, 6));
+    }
+
+    #[test]
+    fn an_escaped_pipe_aliases_a_wikilink_and_keeps_it_in_its_table_cell() {
+        // `\|` is how a table cell writes an alias, in GFM and in Obsidian
+        let src = "[[note#Plan\\|the plan]]";
+        assert_eq!(text(&style_line(src)), "the plan");
+        let w = wikilink_at(&src.chars().collect::<Vec<_>>(), 0).unwrap();
+        assert_eq!(w.target, "note");
+        assert_eq!(w.fragment.as_deref(), Some("Plan"));
+        assert_eq!(text(&style_line("[[note\\|]]")), "note");
+        // the row splits at its own pipes only; `\\|` is a backslash, then one
+        let (cells, pipes) = split_row("| [[note\\|alias]] | b\\\\| c |");
+        let cells: Vec<String> = cells.into_iter().map(|c| c.text).collect();
+        assert_eq!(cells, ["[[note\\|alias]]", "b\\\\", "c"]);
+        assert_eq!(pipes.len(), 4);
+        // the grid draws the alias in its one cell, as the reading view does
+        let rows = buf("| a | b |\n| --- | --- |\n| [[note\\|alias]] | x |");
+        assert_eq!(text(&table_line(&rows, 2, 80)), "alias │ x");
+        let r = crate::render::render("| a | b |\n| --- | --- |\n| [[note\\|alias]] | x |\n");
+        let drawn: Vec<String> = r
+            .lines
+            .iter()
+            .map(|l| l.cells.iter().map(|c| c.ch).collect::<String>())
+            .filter(|t| t.contains('x'))
+            .collect();
+        assert_eq!(drawn, ["alias │ x"]);
     }
 
     #[test]
