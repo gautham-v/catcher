@@ -418,6 +418,19 @@ pub fn link() -> Style {
         .fg(palette().link)
         .add_modifier(Modifier::UNDERLINED)
 }
+/// A link drawn inside a heading takes the heading's colour and keeps its
+/// underline, so the line still reads as one heading. A link to a note that
+/// isn't there stays grey.
+pub fn in_heading(style: Style, level: usize) -> Style {
+    if style.fg == link().fg {
+        Style {
+            fg: heading(level).fg,
+            ..style
+        }
+    } else {
+        style
+    }
+}
 pub fn highlight() -> Style {
     Style::new().fg(palette().ground).bg(palette().accent)
 }

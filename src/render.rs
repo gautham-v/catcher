@@ -2265,9 +2265,12 @@ impl Ren {
                 self.src_line = Some(src_line);
                 self.styles.push(theme::heading(level as usize));
             }
-            Event::End(TagEnd::Heading(_)) => {
+            Event::End(TagEnd::Heading(level)) => {
                 self.close_html();
                 self.styles.pop();
+                for c in &mut self.cells {
+                    c.style = theme::in_heading(c.style, level as usize);
+                }
                 self.flush();
             }
             Event::Start(Tag::Paragraph) => {
@@ -4392,6 +4395,22 @@ mod tests {
         let r = render("[[stories/story-matrix#Method|the matrix]]\n");
         assert_eq!(flat(&r).trim(), "the matrix");
         assert_eq!(r.url(0), Some("wikilink:stories/story-matrix#Method"));
+    }
+
+    #[test]
+    fn a_link_in_a_heading_takes_the_headings_colour_and_keeps_its_underline() {
+        let r = render("## Meta · [[#Method]] · [site](https://example.com)\n");
+        let cells = &r.lines.iter().find(|l| !l.cells.is_empty()).unwrap().cells;
+        let linked: Vec<_> = cells.iter().filter(|c| c.link.is_some()).collect();
+        assert!(!linked.is_empty());
+        for c in linked {
+            assert_eq!(c.style.fg, theme::heading(2).fg);
+            assert!(c.style.add_modifier.contains(Modifier::UNDERLINED));
+        }
+        // outside a heading a link is still the link colour
+        let r = render("see [[#Method]]\n");
+        let c = r.lines[0].cells.iter().find(|c| c.link.is_some()).unwrap();
+        assert_eq!(c.style.fg, theme::link().fg);
     }
 
     #[test]

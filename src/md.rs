@@ -907,7 +907,8 @@ fn style_line_inner(
             h += 1;
         }
         if h < chars.len() && chars[h] == ' ' {
-            base = theme::heading(h - i);
+            let level = h - i;
+            base = theme::heading(level);
             // the marker stands its ground while the cursor is on the line:
             // hiding it there would shift the text sideways under the cursor
             // on the very keystroke — the space — that makes it a heading
@@ -920,6 +921,9 @@ fn style_line_inner(
             }
             i = h + 1;
             inline(&mut b, i, base);
+            for c in &mut b.cells {
+                c.style = theme::in_heading(c.style, level);
+            }
             return RLine {
                 cells: b.cells,
                 src_len,
@@ -3821,6 +3825,9 @@ fn setext_line(src: &str, level: usize, underline: bool) -> RLine {
             i += 1;
         }
         inline(&mut b, i, base);
+        for c in &mut b.cells {
+            c.style = theme::in_heading(c.style, level);
+        }
     }
     RLine {
         cells: b.cells,
@@ -6554,6 +6561,19 @@ mod tests {
         let bs = blocks(&buf("---\n---\n"));
         assert!(bs.iter().all(|b| b.kind == BlockKind::Rule));
         assert_eq!(bs.len(), 2);
+    }
+
+    #[test]
+    fn a_link_in_a_heading_is_drawn_in_the_headings_colour() {
+        let l = style_line("## Meta · [[#Method]]");
+        let m = l.cells.iter().find(|c| c.ch == 'M' && c.src > 8).unwrap();
+        assert_eq!(m.style.fg, theme::heading(2).fg);
+        assert!(m.style.add_modifier.contains(Modifier::UNDERLINED));
+        let lines = buf("Big [site](https://example.com)\n===\n");
+        let bs = blocks(&lines);
+        let l = style_block_line(&lines, &bs[0], 0, 80);
+        let s = l.cells.iter().find(|c| c.ch == 's').unwrap();
+        assert_eq!(s.style.fg, theme::heading(1).fg);
     }
 
     #[test]
