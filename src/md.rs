@@ -4448,11 +4448,21 @@ pub fn embed_card(embed: &NoteEmbed) -> EmbedCard {
             }
         },
         None => {
-            // the title line is already the card's first row
+            // the title line is already the card's first row, unless it links
+            // somewhere: the title row is one link to the note, so a heading
+            // with links of its own stays in the body, drawn like any other,
+            // and the card is named after the file instead
             let first = lines.iter().position(|l| !l.trim().is_empty());
             match first {
                 Some(i) if heading_text(lines[i]).is_some_and(|t| t == card.title) => {
-                    lines[i + 1..].to_vec()
+                    if has_link(&card.title) {
+                        if let Some(stem) = path.file_stem() {
+                            card.title = stem.to_string_lossy().into_owned();
+                        }
+                        lines
+                    } else {
+                        lines[i + 1..].to_vec()
+                    }
                 }
                 _ => lines,
             }
@@ -4471,6 +4481,11 @@ pub fn embed_card(embed: &NoteEmbed) -> EmbedCard {
         }
     };
     card
+}
+
+/// Does `text` hold a `[[wikilink]]` or a `[label](url)`?
+fn has_link(text: &str) -> bool {
+    text.contains("[[") || text.contains("](")
 }
 
 /// The line without its trailing ` ^blockid` — an address, not prose, and
@@ -6255,6 +6270,28 @@ mod tests {
             "---\ntags: x\n---\n# Plan\n\nFirst line.\nSecond **line**.\n\n## Goals\n- ship it\n- test it\n\n- doc it\n- more\n- and more\n\n## Later\nNothing.\n",
         );
         dir
+    }
+
+    #[test]
+    fn an_embed_whose_first_heading_links_keeps_it_in_the_body() {
+        let _turn = embeds::turn();
+        let dir = crate::testutil::tmpdir("md", "card-linked-heading");
+        crate::testutil::write(
+            &dir,
+            "story-matrix.md",
+            "---\ntags: x\n---\n\n## [[meta-role|Meta]] > [[release|Release]]\n\nStories.\n",
+        );
+        embeds::install_dir(&dir);
+        let card = embed_card(&note_embed_line("![[story-matrix]]").unwrap());
+        assert_eq!(card.head(), "story-matrix");
+        assert_eq!(
+            card.lines,
+            vec![
+                "## [[meta-role|Meta]] > [[release|Release]]",
+                "",
+                "Stories."
+            ]
+        );
     }
 
     #[test]
