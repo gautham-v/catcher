@@ -219,8 +219,56 @@ pub fn render_page_at(
     r.cuts = cuts;
     r.tail_start = rewritten.len() - notes.iter().map(|n| n.tail_len).sum::<usize>();
     r.inline_notes = notes;
-    r.run(&rewritten);
+    r.run(&unpair_prices(&rewritten));
     r.finish()
+}
+
+/// Stands in for a `$` that pulldown must not read as a maths delimiter. The
+/// events that carry text turn it back into a `$` before anything is drawn.
+const STAND_IN: char = '\u{1a}';
+
+/// `markdown` with each `$` that closed a maths span only because pulldown
+/// ignores Pandoc's rule — a closing `$` is never followed by a digit, which
+/// Obsidian keeps too — swapped for `STAND_IN`. `**$40M** and **~$3M**` is two
+/// prices, not a formula. Swapping one closer can pair its opener with a later
+/// `$`, so the text is parsed again until nothing changes. One byte for one,
+/// so every offset pulldown reports still points at the same place.
+fn unpair_prices(markdown: &str) -> String {
+    let mut out = markdown.to_string();
+    let price = |w: &[u8]| w[0] == b'$' && w[1].is_ascii_digit();
+    if !out.as_bytes().windows(2).any(price) {
+        return out;
+    }
+    loop {
+        let closers: Vec<usize> = Parser::new_ext(&out, options())
+            .into_offset_iter()
+            .filter(|(e, r)| {
+                matches!(e, Event::InlineMath(_))
+                    && out.as_bytes().get(r.end).is_some_and(u8::is_ascii_digit)
+            })
+            .map(|(_, r)| r.end - 1)
+            .collect();
+        if closers.is_empty() {
+            return out;
+        }
+        let mut bytes = out.into_bytes();
+        for at in closers {
+            bytes[at] = STAND_IN as u8;
+        }
+        out = String::from_utf8(bytes).expect("an ASCII byte swapped for another");
+    }
+}
+
+/// `event` with every `STAND_IN` in its text back to the `$` it was.
+fn restore_prices(event: Event<'_>) -> Event<'_> {
+    let back = |t: &str| t.replace(STAND_IN, "$").into();
+    match event {
+        Event::Text(t) if t.contains(STAND_IN) => Event::Text(back(&t)),
+        Event::Code(t) if t.contains(STAND_IN) => Event::Code(back(&t)),
+        Event::InlineMath(t) if t.contains(STAND_IN) => Event::InlineMath(back(&t)),
+        Event::DisplayMath(t) if t.contains(STAND_IN) => Event::DisplayMath(back(&t)),
+        e => e,
+    }
 }
 
 /// `markdown` with every trailing ` ^blockid` replaced by spaces of the same
@@ -2242,7 +2290,7 @@ impl Ren {
             if self.cells.is_empty() && matches!(self.sink, Sink::Page) {
                 self.src_line = Some(src_line);
             }
-            self.event(event, src_line, range);
+            self.event(restore_prices(event), src_line, range);
         }
         self.flush();
     }
@@ -3648,6 +3696,39 @@ mod tests {
                 .all(|t| !t.contains("[^1]") && !t.contains("$$")),
             "{rows:?}"
         );
+    }
+
+    #[test]
+    fn prices_on_one_line_are_not_maths() {
+        let r = render_wide("2. **$40M** protected, **~$3M** avoided.\n", 60);
+        let row = r
+            .lines
+            .iter()
+            .find(|l| l.text().contains("protected"))
+            .unwrap();
+        assert_eq!(row.text(), "2. $40M protected, ~$3M avoided.");
+        let four = row.cells.iter().find(|c| c.ch == '4').unwrap();
+        let p = row.cells.iter().find(|c| c.ch == 'p').unwrap();
+        assert!(
+            four.style.add_modifier.contains(Modifier::BOLD),
+            "bold price"
+        );
+        assert!(
+            !p.style.add_modifier.contains(Modifier::BOLD),
+            "plain words"
+        );
+        assert!(
+            !p.style.add_modifier.contains(Modifier::ITALIC),
+            "not maths"
+        );
+        // a closer before a digit closes nothing; a later formula still does
+        let r = render_wide("so $x$2 is $y$.\n", 60);
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(rows.iter().any(|t| t == "so $x$2 is y."), "{rows:?}");
+        // a formula that starts with a digit still is one
+        let r = render_wide("area $2r$ here\n", 60);
+        let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
+        assert!(rows.iter().any(|t| t == "area 2r here"), "{rows:?}");
     }
 
     #[test]

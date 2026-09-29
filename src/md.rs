@@ -1239,7 +1239,10 @@ fn span_at(b: &mut Builder, i: usize, base: Style) -> Option<usize> {
         if b.src.get(start).is_some_and(|ch| !ch.is_whitespace()) {
             let mut k = start;
             while k < b.src.len() {
-                if b.src[k] == '$' && (n == 1 || b.src.get(k + 1) == Some(&'$')) {
+                // `~$3M` closes nothing: a closing `$` is never followed by a
+                // digit, so the scan goes on past it, as the reading view's does
+                let price = n == 1 && b.src.get(k + 1).is_some_and(char::is_ascii_digit);
+                if b.src[k] == '$' && !price && (n == 1 || b.src.get(k + 1) == Some(&'$')) {
                     if k > start && !b.src[k - 1].is_whitespace() {
                         let style = base.patch(theme::math());
                         return Some(delimited(b, i, start, k, k + n, style));
@@ -5986,6 +5989,10 @@ mod tests {
         // inline maths loses its dollars
         assert_eq!(text(&style_line("so $x^2$ and $$y$$.")), "so x^2 and y.");
         assert_eq!(text(&style_line("$5 and $6")), "$5 and $6");
+        assert_eq!(
+            text(&style_line("**$40M** kept, **~$3M** saved")),
+            "$40M kept, ~$3M saved"
+        );
         // a maths block: caps blank, body centred in italics
         let lines: Vec<String> = "$$\nE = mc^2\n$$".lines().map(String::from).collect();
         let blocks = blocks(&lines);
