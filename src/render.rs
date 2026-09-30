@@ -527,7 +527,7 @@ fn append_mention_heading(
         theme::UNFOLDED
     };
     let mut cells = str_cells(marker, dim);
-    // bright and bold the way a third-level heading is, so the two titles
+    // coloured and bold the way a third-level heading is, so the two titles
     // stand above the notes listed under them
     cells.extend(str_cells(title, theme::heading(3)));
     let count = n.to_string();
@@ -4907,7 +4907,7 @@ mod tests {
         // the whole heading is the click that folds it
         assert!(head.cells.iter().all(|c| c.link.is_some()));
         assert_eq!(r.url(head.cells[0].link.unwrap()), Some(LINKED_HREF));
-        // the title is bright and bold like a heading on the page
+        // the title is coloured and bold like a heading on the page
         let t = head.cells.iter().find(|c| c.ch == 'L').unwrap();
         assert_eq!(t.style, theme::heading(3));
         // unlinked starts folded: its heading, and nothing under it

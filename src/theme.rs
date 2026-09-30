@@ -36,6 +36,9 @@ pub struct Palette {
     /// `##` headings. The complement of the accent, so the two top
     /// levels can never be mistaken for one another.
     pub heading: Color,
+    /// `###` headings. Near the ink, with a warm cast: bold alone read as
+    /// bold body text, and a third full hue would crowd the two above it.
+    pub subheading: Color,
     /// Markers, rules, quotes: present but never read first.
     pub dim: Color,
     /// Links, which lean on the underline rather than the colour.
@@ -107,15 +110,16 @@ pub struct ColorKey {
 /// Every colour the settings file accepts, in the order the settings document
 /// lists them. The single source of truth: a name that isn't here can't be
 /// set and isn't documented.
-pub const COLORS: [ColorKey; 24] = [
+pub const COLORS: [ColorKey; 25] = [
     color(
         "accent",
         |p| &mut p.accent,
         "h1, ticked boxes, the status bar",
     ),
-    color("bright", |p| &mut p.bright, "h3, and the step that leads"),
+    color("bright", |p| &mut p.bright, "the step that leads"),
     color("grey", |p| &mut p.grey, "structure that recedes"),
     color("heading", |p| &mut p.heading, "h2"),
+    color("subheading", |p| &mut p.subheading, "h3"),
     color("dim", |p| &mut p.dim, "markers, rules, quotes"),
     color("link", |p| &mut p.link, "links, which also underline"),
     color("code", |p| &mut p.code, "inline code, no box"),
@@ -196,6 +200,7 @@ pub const DARK: Palette = Palette {
     bright: Color::Rgb(0xe1, 0xe1, 0xe1),
     grey: Color::Rgb(0x78, 0x78, 0x78),
     heading: Color::Rgb(0x8f, 0xb4, 0xd9),
+    subheading: Color::Rgb(0xc1, 0x95, 0x95),
     dim: Color::Rgb(0x82, 0x82, 0x82),
     link: Color::Rgb(0xb4, 0xb4, 0xb4),
     code: Color::Rgb(0xd9, 0xa2, 0x7a),
@@ -223,6 +228,7 @@ pub const LIGHT: Palette = Palette {
     bright: Color::Rgb(0x26, 0x26, 0x26),
     grey: Color::Rgb(0x55, 0x55, 0x55),
     heading: Color::Rgb(0x3d, 0x6a, 0x99),
+    subheading: Color::Rgb(0x5f, 0x35, 0x35),
     dim: Color::Rgb(0x8d, 0x8d, 0x8d),
     link: Color::Rgb(0x5a, 0x58, 0x52),
     code: Color::Rgb(0x8a, 0x4a, 0x14),
@@ -356,7 +362,7 @@ pub fn heading(level: usize) -> Style {
     match level {
         1 => Style::new().fg(palette().accent).add_modifier(bold()),
         2 => Style::new().fg(palette().heading).add_modifier(bold()),
-        3 => Style::new().fg(palette().bright).add_modifier(bold()),
+        3 => Style::new().fg(palette().subheading).add_modifier(bold()),
         _ => Style::new().add_modifier(bold()),
     }
 }
@@ -611,10 +617,14 @@ mod tests {
         for p in [DARK, LIGHT] {
             set_palette(p);
             let fg: Vec<_> = (1..=4).map(|l| heading(l).fg).collect();
-            assert_eq!(fg[..3], [Some(p.accent), Some(p.heading), Some(p.bright)]);
+            assert_eq!(
+                fg[..3],
+                [Some(p.accent), Some(p.heading), Some(p.subheading)]
+            );
             assert_eq!(fg[3], None);
             assert_ne!(p.accent, p.heading);
-            assert_ne!(p.heading, p.bright);
+            assert_ne!(p.heading, p.subheading);
+            assert_ne!(p.accent, p.subheading);
         }
         set_palette(DARK);
     }
