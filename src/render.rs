@@ -2403,7 +2403,8 @@ impl Ren {
                 };
                 let text = format!("{}{marker} ", self.indent());
                 self.hang = crate::md::str_width(&text);
-                self.push(&text, theme::marker(), None);
+                // a bullet or a number is the colour of the text it leads
+                self.push(&text, theme::PLAIN, None);
                 // where this item's text begins is where its children hang
                 // from — a task's box is text and does not move it
                 self.list_cols.truncate(self.list_depth.saturating_sub(1));

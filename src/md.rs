@@ -1080,7 +1080,8 @@ fn list_depth(indent: &[char]) -> usize {
 }
 
 /// Recognise `- [ ] `, `- [x] `, `- `, `* `, `+ ` at `i`; a plain bullet's
-/// glyph follows the item's nesting `depth` (see `theme::bullet`).
+/// glyph follows the item's nesting `depth` (see `theme::bullet`) and takes
+/// the colour of the text it leads.
 /// Returns (display marker, style, consumed source width).
 fn list_marker(chars: &[char], i: usize, depth: usize) -> Option<(&'static str, Style, usize)> {
     let at = |k: usize| chars.get(k).copied();
@@ -1091,10 +1092,10 @@ fn list_marker(chars: &[char], i: usize, depth: usize) -> Option<(&'static str, 
     if at(i + 2) == Some('[') && at(i + 4) == Some(']') && at(i + 5) == Some(' ') {
         return match at(i + 3).and_then(task_state) {
             Some((glyph, style)) => Some((glyph, style, 6)),
-            None => Some((theme::bullet(depth), theme::marker(), 2)),
+            None => Some((theme::bullet(depth), theme::PLAIN, 2)),
         };
     }
-    Some((theme::bullet(depth), theme::marker(), 2))
+    Some((theme::bullet(depth), theme::PLAIN, 2))
 }
 
 /// Inline emphasis, code, links and highlights from source column `i` on.
