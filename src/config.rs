@@ -69,6 +69,11 @@ impl Words for TableStyle {
     ];
 }
 
+impl Words for theme::Bullets {
+    const WORDS: &'static [(Self, &'static str)] =
+        &[(theme::Bullets::Dash, "dash"), (theme::Bullets::Dot, "dot")];
+}
+
 /// What a plain click in the preview does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PreviewClick {
@@ -284,6 +289,8 @@ pub struct Config {
     pub code_numbers: bool,
     /// Draw the rule down the left of a nested list.
     pub list_guides: bool,
+    /// What a list item's `-` is drawn as.
+    pub bullets: theme::Bullets,
     /// Whether the reading view lists the notes that link to this one. It
     /// costs a pass over every note body, so it is a setting and not simply
     /// how the app behaves.
@@ -351,6 +358,7 @@ impl Default for Config {
             code_colors: true,
             code_numbers: true,
             list_guides: true,
+            bullets: theme::Bullets::Dash,
             linked_mentions: true,
             autocomplete: true,
             reading_vim_keys: true,
@@ -446,6 +454,7 @@ impl Config {
         crate::highlight::set_enabled(self.code_colors);
         crate::highlight::set_numbers(self.code_numbers);
         crate::lists::set_guides(self.list_guides);
+        theme::set_bullets(self.bullets);
     }
 
     /// The file plus the environment: `CATCHER_DIR` wins over `notes_dir`,
@@ -660,6 +669,7 @@ impl Config {
             c.wheel_rows = v.clamp(1, 10);
         }
         c.table_style = word(text, "table_style").unwrap_or(c.table_style);
+        c.bullets = word(text, "bullets").unwrap_or(c.bullets);
         c.quick_open_dirs = values(text, "quick_open_dirs")
             .iter()
             // one folder per line, or several on one line separated by commas
@@ -799,6 +809,7 @@ impl Config {
             yn(self.list_guides),
             "the rule down a nested list; Toggle list guides flips it",
         );
+        d.row("bullets", self.bullets.name(), "dash · dot");
         d.row("status_bar", yn(self.status_bar), "the bottom line at all");
         d.row("key_hints", yn(self.key_hints), "the shortcuts in it");
         d.row(
@@ -1283,6 +1294,7 @@ mod tests {
             update_links: false,
             status_words: true,
             table_style: TableStyle::Cards,
+            bullets: theme::Bullets::Dot,
             preview_click: PreviewClick::Edit,
             front_matter: FrontMatter::Hide,
             status_bar_items: vec![
@@ -1412,6 +1424,11 @@ mod tests {
         assert!(!Config::from_str("- code_colors: no\n").code_colors);
         assert!(Config::default().list_guides);
         assert!(!Config::from_str("- list_guides: no\n").list_guides);
+        assert_eq!(Config::default().bullets, theme::Bullets::Dash);
+        assert_eq!(
+            Config::from_str("- bullets: dot\n").bullets,
+            theme::Bullets::Dot
+        );
         assert!(Config::default().code_numbers);
         assert!(!Config::from_str("- code_numbers: no\n").code_numbers);
         let c = Config {

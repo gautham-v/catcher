@@ -5389,9 +5389,9 @@ mod tests {
     #[test]
     fn a_bullet_nests_from_its_own_text_column() {
         let note = doc("- a\n  - b\n    - c");
-        assert_eq!(text(&style_line_in(&note, 0)), "• a");
-        assert_eq!(text(&style_line_in(&note, 1)), "  │ ◦ b");
-        assert_eq!(text(&style_line_in(&note, 2)), "  │   │ ▪ c");
+        assert_eq!(text(&style_line_in(&note, 0)), "- a");
+        assert_eq!(text(&style_line_in(&note, 1)), "  │ - b");
+        assert_eq!(text(&style_line_in(&note, 2)), "  │   │ - c");
     }
 
     #[test]
@@ -5415,22 +5415,22 @@ mod tests {
         let todo = style_line("- [ ] later");
         assert_eq!(text(&todo), "☐ later");
         let bullet = style_line("- plain");
-        assert_eq!(text(&bullet), "• plain");
+        assert_eq!(text(&bullet), "- plain");
         assert_eq!(bullet.one_row().display_to_source(2), 2);
     }
 
     #[test]
     fn bullet_glyph_follows_nesting_depth() {
-        assert_eq!(text(&style_line("- one")), "• one");
-        assert_eq!(text(&style_line("  - two")), "  ◦ two");
-        assert_eq!(text(&style_line("    * three")), "    ▪ three");
+        assert_eq!(text(&style_line("- one")), "- one");
+        assert_eq!(text(&style_line("  - two")), "  - two");
+        assert_eq!(text(&style_line("    * three")), "    - three");
         // the cycle starts over at the fourth level
-        assert_eq!(text(&style_line("      + four")), "      • four");
+        assert_eq!(text(&style_line("      + four")), "      - four");
         // a tab is one level, and mixes with spaces
-        assert_eq!(text(&style_line("\t- two")), "\t◦ two");
-        assert_eq!(text(&style_line("\t  - three")), "\t  ▪ three");
+        assert_eq!(text(&style_line("\t- two")), "\t- two");
+        assert_eq!(text(&style_line("\t  - three")), "\t  - three");
         // an odd space does not count
-        assert_eq!(text(&style_line("   - two")), "   ◦ two");
+        assert_eq!(text(&style_line("   - two")), "   - two");
         // the cursor still maps through the substituted glyph
         let deep = style_line("  - two");
         assert_eq!(deep.one_row().display_to_source(4), 4);
@@ -5446,8 +5446,8 @@ mod tests {
     #[test]
     fn nested_bullets_in_a_quote_count_only_their_own_indent() {
         // the quote bar's own space is not list indentation
-        assert_eq!(text(&style_line("> - one")), "▌ • one");
-        assert_eq!(text(&style_line(">   - two")), "▌   ◦ two");
+        assert_eq!(text(&style_line("> - one")), "▌ - one");
+        assert_eq!(text(&style_line(">   - two")), "▌   - two");
     }
 
     #[test]
@@ -5720,7 +5720,7 @@ mod tests {
         // an unknown state is a bullet with literal text
         assert_eq!(
             text(&style_line("- [z] a")),
-            format!("{} [z] a", theme::BULLET)
+            format!("{} [z] a", theme::DASH)
         );
         // numbered items take the same states
         assert_eq!(
@@ -5837,7 +5837,7 @@ mod tests {
         // not a task: the bullet is a bullet, and `- [ ]` is its text
         assert_eq!(
             text(&style_line_editing("- [ ]", (5, 5))),
-            format!("{} [ ]", theme::BULLET)
+            format!("{} [ ]", theme::DASH)
         );
         assert_eq!(text(&style_line_editing("hi", (2, 2))), "hi");
         assert_eq!(task_prefix("  - [ ] a"), Some((2, 8)));
@@ -6414,12 +6414,12 @@ mod tests {
             texts,
             vec![
                 "│ ",
-                "│ • ship it",
-                "│ • test it",
+                "│ - ship it",
+                "│ - test it",
                 "│ ",
-                "│ • doc it",
-                "│ • more",
-                "│ • and more",
+                "│ - doc it",
+                "│ - more",
+                "│ - and more",
             ]
         );
         // a section of one line hangs one row, under the gap
@@ -7663,7 +7663,7 @@ mod tests {
         assert_eq!(text(&style_line("   ")), "   ");
         // a blockquote or list item can end in one too
         assert_eq!(text(&style_line("> q  ")), "\u{258c} q \u{21b5}");
-        assert_eq!(text(&style_line("- item  ")), "\u{2022} item \u{21b5}");
+        assert_eq!(text(&style_line("- item  ")), "- item \u{21b5}");
     }
 
     #[test]

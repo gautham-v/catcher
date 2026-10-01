@@ -3552,8 +3552,8 @@ mod tests {
         let r = render("3. three\n4. four\n   - sub\n5. five\n\n- plain\n");
         let f = flat(&r);
         // the sub-item starts past its parent's text, with a rule in it
-        assert!(f.contains("3. three\n4. four\n   │ ◦ sub\n5. five"), "{f}");
-        assert!(f.contains("• plain"), "{f}");
+        assert!(f.contains("3. three\n4. four\n   │ - sub\n5. five"), "{f}");
+        assert!(f.contains("- plain"), "{f}");
     }
 
     #[test]
@@ -3562,7 +3562,7 @@ mod tests {
         let f = flat(&r);
         assert!(
             f.contains(
-                "• one\n  │ ◦ two\n  │   │ ▪ three\n  │   │   │ • four\n  │ ◦ two again\n• one again"
+                "- one\n  │ - two\n  │   │ - three\n  │   │   │ - four\n  │ - two again\n- one again"
             ),
             "{f}"
         );
@@ -3573,7 +3573,7 @@ mod tests {
         let r = render("- [ ] top\n  - [x] nested\n  - plain\n");
         let f = flat(&r);
         // a task's box is text, so its children hang from the bullet
-        assert!(f.contains("☐ top\n  │ ✓ nested\n  │ ◦ plain"), "{f}");
+        assert!(f.contains("☐ top\n  │ ✓ nested\n  │ - plain"), "{f}");
     }
 
     #[test]
@@ -3588,7 +3588,7 @@ mod tests {
             .collect();
         // the item, then its continuation: both stand in the same rule
         assert!(
-            rows.iter().any(|t| t.starts_with("  │ ◦ alpha")),
+            rows.iter().any(|t| t.starts_with("  │ - alpha")),
             "{rows:?}"
         );
         assert!(
@@ -3660,7 +3660,7 @@ mod tests {
             assert!(crate::md::str_width(t) <= 24, "{t:?}");
         }
         // the wrapped bullet hangs under its text, not under the bullet
-        let bullet = rows.iter().position(|t| t.contains("• alpha")).unwrap();
+        let bullet = rows.iter().position(|t| t.contains("- alpha")).unwrap();
         assert!(
             rows[bullet + 1].starts_with("▌   "),
             "{:?}",
@@ -4163,7 +4163,7 @@ mod tests {
         assert!(x.style.add_modifier.contains(Modifier::BOLD));
         // an unknown state is text, and not a box to click
         let plain = line("plain");
-        assert_eq!(plain.text(), format!("{} [z] plain", theme::BULLET));
+        assert_eq!(plain.text(), format!("{} [z] plain", theme::DASH));
         assert_eq!(plain.checkbox, None);
         // numbered and loose items take the states too
         let first = line("first");
@@ -4172,7 +4172,7 @@ mod tests {
         let loose = line("loose");
         assert_eq!(loose.text(), format!("{} loose", theme::IN_PROGRESS));
         assert_eq!(loose.checkbox, Some(7));
-        let bullet = format!("{} b", theme::BULLET);
+        let bullet = format!("{} b", theme::DASH);
         assert!(r.lines.iter().any(|l| l.text() == bullet));
         assert_eq!(loose.hang, 2);
     }
@@ -4706,10 +4706,10 @@ mod tests {
             &[
                 "│ Plan › Goals",
                 "│",
-                "│ • ship it",
-                "│ • test it",
-                "│ • doc it",
-                "│ • more",
+                "│ - ship it",
+                "│ - test it",
+                "│ - doc it",
+                "│ - more",
             ]
         );
         // the title is a link to the note: a thin grey rail, the note

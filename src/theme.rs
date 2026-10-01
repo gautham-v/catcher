@@ -567,18 +567,47 @@ pub const TASK_GLYPHS: [&str; 6] = [
     QUESTION,
 ];
 pub const BULLET: &str = "\u{2022}";
-/// Second- and third-level bullets; `bullet(depth)` cycles through the three.
+/// Second- and third-level bullets; `Bullets::Dot` cycles through the three.
 pub const BULLET_2: &str = "\u{25e6}";
 pub const BULLET_3: &str = "\u{25aa}";
+/// The bullet of the `dash` style, the same at every depth.
+pub const DASH: &str = "-";
 
-/// The bullet glyph for a list nested `depth` levels deep (1 is top level):
-/// `•`, `◦`, `▪`, then round again. Depth 0 is treated as 1.
-pub fn bullet(depth: usize) -> &'static str {
-    match depth.max(1) % 3 {
-        1 => BULLET,
-        2 => BULLET_2,
-        _ => BULLET_3,
+/// What a list item's `-` is drawn as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Bullets {
+    /// A plain `-`, as typed, at every depth.
+    #[default]
+    Dash,
+    /// `•`, `◦`, `▪` by nesting depth, then round again.
+    Dot,
+}
+
+impl Bullets {
+    /// The glyph for a list nested `depth` levels deep (1 is top level).
+    /// Depth 0 is treated as 1.
+    pub fn glyph(self, depth: usize) -> &'static str {
+        match (self, depth.max(1) % 3) {
+            (Bullets::Dash, _) => DASH,
+            (Bullets::Dot, 1) => BULLET,
+            (Bullets::Dot, 2) => BULLET_2,
+            (Bullets::Dot, _) => BULLET_3,
+        }
     }
+}
+
+static BULLETS: RwLock<Bullets> = RwLock::new(Bullets::Dash);
+
+pub fn set_bullets(style: Bullets) {
+    if let Ok(mut w) = BULLETS.write() {
+        *w = style;
+    }
+}
+
+/// The bullet glyph for a list nested `depth` levels deep, in the style the
+/// settings chose.
+pub fn bullet(depth: usize) -> &'static str {
+    BULLETS.read().map(|b| *b).unwrap_or_default().glyph(depth)
 }
 /// In front of a folded heading.
 pub const FOLDED: &str = "\u{25b8} ";
@@ -603,11 +632,14 @@ mod tests {
 
     #[test]
     fn bullet_glyph_cycles_every_three_levels() {
+        let bullet = |d| Bullets::Dot.glyph(d);
         assert_eq!(bullet(1), BULLET);
         assert_eq!(bullet(2), BULLET_2);
         assert_eq!(bullet(3), BULLET_3);
         assert_eq!(bullet(4), BULLET);
         assert_eq!(bullet(6), BULLET_3);
+        assert_eq!(Bullets::Dash.glyph(1), DASH);
+        assert_eq!(Bullets::Dash.glyph(2), DASH);
         // depth 0 never happens, but reads as top level if it does
         assert_eq!(bullet(0), BULLET);
     }
