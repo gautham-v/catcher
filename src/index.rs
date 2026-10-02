@@ -523,6 +523,11 @@ pub fn push_recent(recent: &mut Vec<PathBuf>, path: &Path) {
     recent.retain(|p| p != &path);
     recent.insert(0, path);
     recent.truncate(MAX_RECENT);
+    // a test that opens a session opens scratch notes; those must not land
+    // in the recents of whoever ran the tests
+    if cfg!(test) {
+        return;
+    }
     if let Some(file) = recent_path() {
         if let Some(dir) = file.parent() {
             let _ = fs::create_dir_all(dir);
