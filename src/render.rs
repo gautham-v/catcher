@@ -1094,7 +1094,7 @@ type Fence = (Option<String>, String, Vec<(usize, usize)>);
 /// One level of quote decoration around a row.
 #[derive(Clone, Copy, Debug)]
 enum Deco {
-    /// A plain blockquote's `▌ `.
+    /// A plain blockquote's `▎ `.
     Rail,
     /// An embed card's thin `│ `.
     Embed,
@@ -1116,7 +1116,7 @@ struct Ren {
     sink: Sink,
     styles: Vec<Style>,
     link: Option<usize>,
-    /// How many `▌ ` rails the line being built sits behind — one per
+    /// How many `▎ ` rails the line being built sits behind — one per
     /// enclosing plain blockquote.
     rails: usize,
     /// Inside a callout box (`> [!type]`). Only the outermost callout gets a
@@ -1493,7 +1493,7 @@ impl Ren {
                 match *deco {
                     Deco::Rail => cells.extend(str_cells(
                         &format!("{} ", theme::QUOTE_BAR),
-                        theme::marker(),
+                        theme::quote_bar(),
                     )),
                     Deco::Embed => {
                         cells.extend(str_cells(&format!("{} ", theme::EMBED_BAR), theme::embed()))
@@ -1524,7 +1524,7 @@ impl Ren {
             for _ in 0..self.rails {
                 cells.extend(str_cells(
                     &format!("{} ", theme::QUOTE_BAR),
-                    theme::marker(),
+                    theme::quote_bar(),
                 ));
             }
             cells.extend(line.cells);
@@ -3474,7 +3474,7 @@ mod tests {
         assert!(text.contains("status"), "{text}");
         assert!(text.contains("applied"), "{text}");
         // the header row is the labels, never a card of its own
-        assert!(!text.contains("▌ date"), "{text}");
+        assert!(!text.contains("▎ date"), "{text}");
         assert!(!text.contains('…'), "{text}");
     }
 
@@ -3488,7 +3488,7 @@ mod tests {
             .map(|l| format!("{}\n", l.text()))
             .collect();
         assert!(grid.contains('┼'), "{grid}");
-        assert!(!grid.contains('▌'), "{grid}");
+        assert!(!grid.contains('▎'), "{grid}");
 
         // one that does not fit keeps its columns and pans instead
         let r = render_page(JOB_LOG, 60, TableStyle::Auto);
@@ -3640,7 +3640,7 @@ mod tests {
             .map(|l| l.text())
             .filter(|t| t.contains("line"))
             .collect();
-        assert_eq!(quoted, vec!["▌ first line", "▌ second line"]);
+        assert_eq!(quoted, vec!["▎ first line", "▎ second line"]);
         // text outside the quote keeps its bar off
         assert!(r.lines.iter().any(|l| l.text() == "after"));
     }
@@ -3650,11 +3650,11 @@ mod tests {
         let md = "> one two three four five six seven eight nine ten\n>\n> - alpha beta gamma delta epsilon zeta eta\n\nafter\n";
         let r = render_wide(md, 24);
         let rows: Vec<String> = r.lines.iter().map(|l| l.text()).collect();
-        let quoted: Vec<&String> = rows.iter().filter(|t| t.starts_with("▌")).collect();
+        let quoted: Vec<&String> = rows.iter().filter(|t| t.starts_with("▎")).collect();
         // one paragraph and one bullet, each wrapped, with a blank row between
         assert!(quoted.len() >= 5, "{rows:?}");
         assert!(
-            quoted.iter().any(|t| t.trim() == "▌"),
+            quoted.iter().any(|t| t.trim() == "▎"),
             "blank row keeps its bar: {rows:?}"
         );
         for t in &quoted {
@@ -3663,7 +3663,7 @@ mod tests {
         // the wrapped bullet hangs under its text, not under the bullet
         let bullet = rows.iter().position(|t| t.contains("- alpha")).unwrap();
         assert!(
-            rows[bullet + 1].starts_with("▌   "),
+            rows[bullet + 1].starts_with("▎   "),
             "{:?}",
             rows[bullet + 1]
         );

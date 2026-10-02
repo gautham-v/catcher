@@ -807,7 +807,7 @@ fn style_line_inner(
 
     let mut base = theme::PLAIN;
 
-    // leading blockquote bars (possibly nested), each "> " → "▌ "
+    // leading blockquote bars (possibly nested), each "> " → "▎ "
     loop {
         let mut j = i;
         while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
@@ -817,7 +817,7 @@ fn style_line_inner(
             for k in i..j {
                 b.keep(k, theme::marker());
             }
-            b.sub(theme::QUOTE_BAR, theme::marker(), j);
+            b.sub(theme::QUOTE_BAR, theme::quote_bar(), j);
             i = j + 1;
             if i < chars.len() && chars[i] == ' ' {
                 b.keep(i, theme::marker());
@@ -2764,7 +2764,7 @@ fn card_page_width(width: usize) -> usize {
 }
 
 /// The decoration to the left of a row inside a callout block, for the
-/// levels before `depth` — a `│ ` for each enclosing card, a `▌ ` for a
+/// levels before `depth` — a `│ ` for each enclosing card, a `▎ ` for a
 /// plain quote between them — with the right edges those cards close on and
 /// how wide the row's own level may be.
 struct Frame {
@@ -2790,7 +2790,11 @@ fn card_frame(cards: &[Card], chars: &[char], row: usize, depth: usize, w: usize
                 avail = avail.saturating_sub(4);
             }
             None => {
-                cells.extend(at(&format!("{} ", theme::QUOTE_BAR), theme::marker(), col));
+                cells.extend(at(
+                    &format!("{} ", theme::QUOTE_BAR),
+                    theme::quote_bar(),
+                    col,
+                ));
                 avail = avail.saturating_sub(2);
             }
         }
@@ -5447,8 +5451,8 @@ mod tests {
     #[test]
     fn nested_bullets_in_a_quote_count_only_their_own_indent() {
         // the quote bar's own space is not list indentation
-        assert_eq!(text(&style_line("> - one")), "▌ - one");
-        assert_eq!(text(&style_line(">   - two")), "▌   - two");
+        assert_eq!(text(&style_line("> - one")), "▎ - one");
+        assert_eq!(text(&style_line(">   - two")), "▎   - two");
     }
 
     #[test]
@@ -5666,7 +5670,7 @@ mod tests {
     #[test]
     fn quotes_get_a_bar() {
         let l = style_line("> hi");
-        assert_eq!(text(&l), "▌ hi");
+        assert_eq!(text(&l), "▎ hi");
         assert_eq!(l.one_row().display_to_source(0), 0);
         assert_eq!(l.one_row().display_to_source(2), 2);
     }
@@ -5974,14 +5978,14 @@ mod tests {
         // a callout's title line: glyph, type, title
         assert_eq!(
             text(&style_line("> [!todo] Warning!")),
-            "▌ i todo · Warning!"
+            "▎ i todo · Warning!"
         );
-        assert_eq!(text(&style_line("> [!danger]- ")), "▌ ✗ danger");
-        assert_eq!(text(&style_line("> [!custom] T")), "▌ custom · T");
+        assert_eq!(text(&style_line("> [!danger]- ")), "▎ ✗ danger");
+        assert_eq!(text(&style_line("> [!custom] T")), "▎ custom · T");
         // a plain quote is untouched
         assert_eq!(
             text(&style_line("> [x] not a callout")),
-            "▌ [x] not a callout"
+            "▎ [x] not a callout"
         );
         // footnotes: the reference and the definition
         assert_eq!(text(&style_line("word[^1] more")), "word¹ more");
@@ -7663,7 +7667,7 @@ mod tests {
         assert_eq!(text(&style_line("end ")), "end ");
         assert_eq!(text(&style_line("   ")), "   ");
         // a blockquote or list item can end in one too
-        assert_eq!(text(&style_line("> q  ")), "\u{258c} q \u{21b5}");
+        assert_eq!(text(&style_line("> q  ")), "\u{258e} q \u{21b5}");
         assert_eq!(text(&style_line("- item  ")), "- item \u{21b5}");
     }
 

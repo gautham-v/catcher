@@ -33,15 +33,16 @@ pub struct Palette {
     pub bright: Color,
     /// Structure that should recede: struck tasks, the status-bar path.
     pub grey: Color,
-    /// `##` headings. The complement of the accent, so the two top
-    /// levels can never be mistaken for one another.
+    /// `##` headings. The accent itself by default: the page keeps to one
+    /// shade of one hue, and a user who wants the levels apart sets this.
     pub heading: Color,
-    /// `###` headings. A greyed tone of the `##` blue: bold alone read as
-    /// bold body text, and a third full hue would crowd the two above it.
+    /// `###` headings. The bright step: no hue, so the accent stays with
+    /// the two levels above it.
     pub subheading: Color,
     /// Markers, rules, quotes: present but never read first.
     pub dim: Color,
-    /// Links, which lean on the underline rather than the colour.
+    /// Links: a grey with a warm lean, so the underline still does most of
+    /// the work.
     pub link: Color,
     /// Inline code: a tint of the accent and no box, so a file name in a
     /// sentence reads as a name rather than a patch on the page.
@@ -97,6 +98,8 @@ pub struct Palette {
     /// table's rules, so the rail beside an embedded table never reads as
     /// the table's own left edge.
     pub embed: Color,
+    /// The bar down the left of a blockquote: a pale tint of the accent, so the bar recedes and the quoted text leads.
+    pub quote: Color,
 }
 
 /// One settable colour: its settings-file name, the field it sets, and the
@@ -110,7 +113,7 @@ pub struct ColorKey {
 /// Every colour the settings file accepts, in the order the settings document
 /// lists them. The single source of truth: a name that isn't here can't be
 /// set and isn't documented.
-pub const COLORS: [ColorKey; 25] = [
+pub const COLORS: [ColorKey; 26] = [
     color(
         "accent",
         |p| &mut p.accent,
@@ -152,6 +155,7 @@ pub const COLORS: [ColorKey; 25] = [
         |p| &mut p.embed,
         "the rail beside an embedded note",
     ),
+    color("quote", |p| &mut p.quote, "the bar beside a quote"),
 ];
 
 const fn color(
@@ -199,10 +203,10 @@ pub const DARK: Palette = Palette {
     accent: Color::Rgb(0xff, 0x9e, 0x64),
     bright: Color::Rgb(0xe1, 0xe1, 0xe1),
     grey: Color::Rgb(0x78, 0x78, 0x78),
-    heading: Color::Rgb(0x8f, 0xb4, 0xd9),
-    subheading: Color::Rgb(0xc4, 0xd4, 0xe3),
+    heading: Color::Rgb(0xff, 0x9e, 0x64),
+    subheading: Color::Rgb(0xe1, 0xe1, 0xe1),
     dim: Color::Rgb(0x82, 0x82, 0x82),
-    link: Color::Rgb(0xb4, 0xb4, 0xb4),
+    link: Color::Rgb(0xb8, 0xab, 0xa2),
     code: Color::Rgb(0xd9, 0xa2, 0x7a),
     code_bg: Color::Rgb(0x1e, 0x1e, 0x22),
     code_fg: Color::Rgb(0xe1, 0xe1, 0xe1),
@@ -221,16 +225,17 @@ pub const DARK: Palette = Palette {
     code_gutter: Color::Rgb(0x4a, 0x4a, 0x4a),
     code_guide: Color::Rgb(0x2c, 0x2c, 0x30),
     embed: Color::Rgb(0x46, 0x46, 0x4c),
+    quote: Color::Rgb(0x6b, 0x4a, 0x36),
 };
 
 pub const LIGHT: Palette = Palette {
     accent: Color::Rgb(0xb8, 0x5c, 0x18),
     bright: Color::Rgb(0x26, 0x26, 0x26),
     grey: Color::Rgb(0x55, 0x55, 0x55),
-    heading: Color::Rgb(0x3d, 0x6a, 0x99),
-    subheading: Color::Rgb(0x50, 0x6f, 0x8b),
+    heading: Color::Rgb(0xb8, 0x5c, 0x18),
+    subheading: Color::Rgb(0x26, 0x26, 0x26),
     dim: Color::Rgb(0x8d, 0x8d, 0x8d),
-    link: Color::Rgb(0x5a, 0x58, 0x52),
+    link: Color::Rgb(0x6b, 0x5d, 0x53),
     code: Color::Rgb(0x8a, 0x4a, 0x14),
     code_bg: Color::Rgb(0xe6, 0xe6, 0xea),
     code_fg: Color::Rgb(0x26, 0x26, 0x26),
@@ -249,6 +254,7 @@ pub const LIGHT: Palette = Palette {
     code_gutter: Color::Rgb(0xb0, 0xb0, 0xb4),
     code_guide: Color::Rgb(0xd8, 0xd8, 0xdc),
     embed: Color::Rgb(0xc4, 0xc4, 0xc9),
+    quote: Color::Rgb(0xe3, 0xc5, 0xad),
 };
 
 /// The palette in force. A lock rather than a `OnceLock`: settings are
@@ -356,7 +362,7 @@ fn bold() -> Modifier {
 pub const PLAIN: Style = Style::new();
 
 /// Every heading level a terminal can tell apart without a change of
-/// size: the accent leads, `##` takes its complement, `###` the bright
+/// size: the accent leads and `##` shares it, `###` takes the bright
 /// step, and anything deeper is weight alone.
 pub fn heading(level: usize) -> Style {
     match level {
@@ -371,6 +377,10 @@ pub fn heading(level: usize) -> Style {
 /// and bold or code inside the quote should look like bold or code.
 pub fn quote() -> Style {
     Style::new()
+}
+/// The bar itself.
+pub fn quote_bar() -> Style {
+    Style::new().fg(palette().quote)
 }
 pub fn marker() -> Style {
     Style::new().fg(palette().dim)
@@ -613,9 +623,10 @@ pub fn bullet(depth: usize) -> &'static str {
 pub const FOLDED: &str = "\u{25b8} ";
 /// In front of an open callout that can fold.
 pub const UNFOLDED: &str = "\u{25be} ";
-pub const QUOTE_BAR: &str = "\u{258c}";
-/// The rail down the left of a `![[note]]` card: thin where a quote's is
-/// thick, so a card frames the other note rather than highlighting it.
+pub const QUOTE_BAR: &str = "\u{258e}";
+/// The rail down the left of a `![[note]]` card: centred in its cell where
+/// a quote's hugs the left edge, so a card frames the other note rather
+/// than highlighting it.
 pub const EMBED_BAR: &str = "\u{2502}";
 /// The indent rule inside a fenced block, standing in for the space it
 /// replaces. Thin, so a column of them reads as ruling and not as text.
@@ -645,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn each_of_the_first_three_heading_levels_takes_its_own_colour() {
+    fn the_top_two_heading_levels_share_the_accent_and_the_third_is_bright() {
         for p in [DARK, LIGHT] {
             set_palette(p);
             let fg: Vec<_> = (1..=4).map(|l| heading(l).fg).collect();
@@ -654,9 +665,8 @@ mod tests {
                 [Some(p.accent), Some(p.heading), Some(p.subheading)]
             );
             assert_eq!(fg[3], None);
-            assert_ne!(p.accent, p.heading);
-            assert_ne!(p.heading, p.subheading);
-            assert_ne!(p.accent, p.subheading);
+            assert_eq!(p.accent, p.heading);
+            assert_eq!(p.subheading, p.bright);
         }
         set_palette(DARK);
     }
