@@ -48,7 +48,7 @@ catcher path             print the notes directory
 | `^N` | New note |
 | `⌥D` | Today's note |
 | `^P` | Reading view |
-| `ctrl+⇧P` | Present: one slide per screen, split on `---` |
+| `ctrl+⇧P` | Present: one slide per screen, split on `---`; click or ⎵ for the next |
 | `⌥⏎` / `⌥P` | Follow / peek at a link |
 | `⌥[` / `⌥]` | Back / forward (or the mouse's side buttons) |
 | `^/` | Help card |

@@ -6134,6 +6134,25 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
+        // presenting, the mouse is a clicker: a click or the forward side
+        // button is the next slide, a right click or the back button the
+        // one before. The wheel still scrolls a slide taller than the screen.
+        if self.slide.is_some() && self.overlay == Overlay::None && self.zoom.is_none() {
+            let step = match (side_button(ev), ev.kind) {
+                (Some(back), MouseEventKind::Down(_)) => Some(if back { -1 } else { 1 }),
+                (Some(_), _) => Some(0),
+                (None, MouseEventKind::Down(MouseButton::Left)) => Some(1),
+                (None, MouseEventKind::Down(MouseButton::Right)) => Some(-1),
+                _ => None,
+            };
+            if let Some(by) = step {
+                self.opener = None;
+                if by != 0 {
+                    self.slide_step(by);
+                }
+                return;
+            }
+        }
         // the mouse's side buttons walk the history, as they do in a browser,
         // from under whatever is open; their release is nothing
         if let Some(back) = side_button(ev) {
