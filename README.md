@@ -32,6 +32,7 @@ catcher                  open the note you last had open
 catcher groceries        open the note whose title best matches
 catcher new groceries    create a note and open it
 catcher today            open today's journal note
+catcher present pitch    open the note that best matches, as slides
 catcher add "buy milk"   write a new note and print its path
 catcher ~/vault          open the TUI rooted at that folder
 catcher path             print the notes directory
@@ -47,6 +48,7 @@ catcher path             print the notes directory
 | `^N` | New note |
 | `⌥D` | Today's note |
 | `^P` | Reading view |
+| `ctrl+⇧P` | Present: one slide per screen, split on `---` |
 | `⌥⏎` / `⌥P` | Follow / peek at a link |
 | `⌥[` / `⌥]` | Back / forward (or the mouse's side buttons) |
 | `^/` | Help card |

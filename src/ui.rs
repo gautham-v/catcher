@@ -804,9 +804,33 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let pan_of =
         |app: &App, block: usize| app.preview_pans.get(block).copied().unwrap_or(0) as usize;
 
+    // presenting: the window is one slide's rows, centred on the screen, and
+    // the scroll runs inside that slide only
+    let mut area = area;
+    let mut first = 0;
+    let mut count = rows.len();
+    if let Some(k) = app.slide {
+        let ranges = app.slide_ranges();
+        let k = k.min(ranges.len().saturating_sub(1));
+        app.slide = Some(k);
+        if let Some(&(s, e)) = ranges.get(k) {
+            let within = |r: &crate::app::PageRow| r.src_line.is_some_and(|l| l >= s && l <= e);
+            let lo = rows.iter().position(within);
+            let hi = rows.iter().rposition(within);
+            if let (Some(lo), Some(hi)) = (lo, hi) {
+                first = lo;
+                count = hi - lo + 1;
+            }
+        }
+        let shown = (count as u16).min(area.height).max(1);
+        let pad = (area.height - shown) / 2;
+        area = Rect::new(area.x, area.y + pad, area.width, shown);
+        app.preview_goto = None;
+        app.preview_top = None;
+    }
     // clamp the scroll so the page can't be scrolled off the bottom
     let height = area.height as usize;
-    let max_scroll = rows.len().saturating_sub(height.max(1)) as u16;
+    let max_scroll = count.saturating_sub(height.max(1)) as u16;
     // a line asked for by the contents tab: the first page row it wrapped to
     // goes at the top, a couple of rows down so it is not flush with the edge
     if let Some(line) = app.preview_goto.take() {
@@ -828,7 +852,7 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     app.preview_scroll = app.preview_scroll.min(max_scroll);
-    let top = app.preview_scroll as usize;
+    let top = first + app.preview_scroll as usize;
 
     app.preview_links.clear();
     app.preview_images.clear();
@@ -1202,9 +1226,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let mode = match app.view {
-        View::Edit => "edit",
-        View::Preview => "preview",
+    let slides = app.slide.map(|k| format!("slide {} / {}", k + 1, app.slide_ranges().len()));
+    let mode = match (app.view, &slides) {
+        (View::Preview, Some(s)) => s.as_str(),
+        (View::Edit, _) => "edit",
+        (View::Preview, None) => "preview",
     };
     // a flash wins; failing one, a cursor on a link to nowhere says so
     let status = app

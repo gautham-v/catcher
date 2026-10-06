@@ -210,7 +210,7 @@ const TABLE_OPS: [crate::table::Op; 13] = {
     ]
 };
 
-const COMMANDS: [Command; 48] = [
+const COMMANDS: [Command; 49] = [
     Command::Act(Action::NewNote),
     Command::NewFromTemplate,
     Command::SetTemplatesDir,
@@ -237,6 +237,7 @@ const COMMANDS: [Command; 48] = [
     Command::OpenVault,
     Command::Act(Action::Find),
     Command::Act(Action::TogglePreview),
+    Command::Act(Action::Present),
     Command::Act(Action::Help),
     Command::Act(Action::Settings),
     Command::Act(Action::FoldSection),
@@ -283,6 +284,7 @@ impl Command {
                 Action::RenameFile => ("Rename file", "change the name on disk"),
                 Action::Find => ("Find in note", "step through matches in this note, or replace them"),
                 Action::TogglePreview => ("Reading view", "the page, rendered"),
+                Action::Present => ("Present", "one slide per screen, split on ---"),
                 Action::Help => ("Help", "every key, on one card"),
                 Action::Settings => ("Settings", "edit them here, as a note"),
                 Action::FoldSection => ("Fold section", "hide what is under this heading"),
@@ -574,6 +576,10 @@ pub struct App {
     pub query: String,
     pub selected: usize,
     pub preview_scroll: u16,
+    /// Which slide is on screen while the note is being presented: the
+    /// reading view, cut at every `---` and shown one piece at a time.
+    /// `None` is the ordinary page.
+    pub slide: Option<usize>,
     /// How far each wide block — a table or diagram too wide for the page —
     /// has panned sideways, in columns, by block. Only that block's rows
     /// move; prose and every other table stay where they are, so the note
@@ -826,7 +832,9 @@ impl App {
         // where this session is rooted, and which note it should open on
         let (dir, want): (PathBuf, Option<Want>) = match &launch {
             Launch::Default => (config.notes_dir.clone(), None),
-            Launch::Name(n) => (config.notes_dir.clone(), Some(Want::Title(n.clone()))),
+            Launch::Name(n) | Launch::Present(n) => {
+                (config.notes_dir.clone(), Some(Want::Title(n.clone())))
+            }
             Launch::New(n) => (config.notes_dir.clone(), Some(Want::New(n.clone()))),
             Launch::Today => {
                 let path = crate::daily::ensure(
@@ -861,7 +869,8 @@ impl App {
             .flatten();
         // a split or tab opened from the reading view starts in it: the mode
         // you were in is the mode you meant
-        let reading = matches!(launch, Launch::In { reading: true, .. });
+        let present = matches!(launch, Launch::Present(_));
+        let reading = present || matches!(launch, Launch::In { reading: true, .. });
 
         let mut all = notes::load_all(&dir)?;
         let mut active = 0;
@@ -933,6 +942,7 @@ impl App {
             active,
             editor: Editor::default(),
             view: if reading { View::Preview } else { View::Edit },
+            slide: None,
             overlay: Overlay::None,
             query: String::new(),
             selected: 0,
@@ -1011,6 +1021,11 @@ impl App {
         };
         app.remember_active();
         app.load_active_into_editor();
+        // `catcher present <note>` opens on its first slide; set after the
+        // load, which puts the page back the way a fresh note is
+        if present {
+            app.slide = Some(0);
+        }
         // after the session exists, so a last note from another folder is
         // pulled in the same way quick-open pulls one
         if let Some(path) = restore {
@@ -1047,6 +1062,7 @@ impl App {
         }
         self.preview_scroll = 0;
         self.preview_pans.clear();
+        self.slide = None;
         self.edit_skip = 0;
         self.preview_goto = None;
         self.preview_top = None;
@@ -4069,6 +4085,16 @@ impl App {
     }
 
     fn toggle_preview(&mut self) {
+        // ^P mid-talk lands the editor on the slide's first line, which is
+        // where the fix you stopped for is
+        if let Some(k) = self.slide.take() {
+            if let Some(&(start, _)) = self.slide_ranges().get(k) {
+                self.editor.move_cursor((start, 0), false);
+            }
+            self.view = View::Edit;
+            self.preview_scroll = 0;
+            return;
+        }
         self.view = match self.view {
             View::Edit => View::Preview,
             View::Preview => View::Edit,
@@ -4292,6 +4318,10 @@ impl App {
             self.hint_key(key);
             return;
         }
+        if self.slide.is_some() {
+            self.on_slide_key(key);
+            return;
+        }
         if self.config.reading_vim_keys {
             // a pending `g` lasts exactly one key: the second `g` of `gg`
             // takes it, and anything else spends it and means itself
@@ -4320,6 +4350,95 @@ impl App {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('e') => self.view = View::Edit,
             _ => {}
         }
+    }
+
+    /// A key while presenting. Space, → and the page keys step between
+    /// slides; ↑ and ↓ scroll a slide taller than the screen; esc puts the
+    /// page back. The letters a clicker sends — `n`, `p` — work too.
+    fn on_slide_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Right
+            | KeyCode::PageDown
+            | KeyCode::Enter
+            | KeyCode::Char(' ')
+            | KeyCode::Char('n')
+            | KeyCode::Char('j')
+            | KeyCode::Char('l') => self.slide_step(1),
+            KeyCode::Left
+            | KeyCode::PageUp
+            | KeyCode::Backspace
+            | KeyCode::Char('p')
+            | KeyCode::Char('k')
+            | KeyCode::Char('h') => self.slide_step(-1),
+            KeyCode::Home | KeyCode::Char('g') => self.slide_go(0),
+            KeyCode::End | KeyCode::Char('G') => self.slide_go(usize::MAX),
+            KeyCode::Up => self.preview_scroll = self.preview_scroll.saturating_sub(1),
+            KeyCode::Down => self.preview_scroll = self.preview_scroll.saturating_add(1),
+            KeyCode::Esc | KeyCode::Char('q') => self.toggle_present(),
+            KeyCode::Char('e') => self.toggle_preview(),
+            _ => {}
+        }
+    }
+
+    /// Start or stop presenting. Started from the editor, the first slide
+    /// is the one the cursor is in; from the page, the one at the top of
+    /// the screen. Stopped, the page opens on the slide you were on.
+    fn toggle_present(&mut self) {
+        if let Some(k) = self.slide.take() {
+            let at = self.slide_ranges().get(k).map(|&(s, _)| s);
+            self.preview_scroll = 0;
+            self.preview_goto = at;
+            return;
+        }
+        let line = match self.view {
+            View::Edit => self.editor.cursor.0,
+            View::Preview => self
+                .preview_page
+                .rows
+                .iter()
+                .skip(self.preview_scroll as usize)
+                .find_map(|r| r.src_line)
+                .unwrap_or(0),
+        };
+        let ranges = self.slide_ranges();
+        if ranges.is_empty() {
+            self.flash("nothing to present".to_string());
+            return;
+        }
+        let k = ranges
+            .iter()
+            .rposition(|&(s, _)| s <= line)
+            .unwrap_or(0);
+        self.view = View::Preview;
+        self.slide = Some(k);
+        self.preview_scroll = 0;
+        self.preview_pans.clear();
+        self.preview_sel = None;
+        self.preview_goto = None;
+        self.preview_top = None;
+    }
+
+    fn slide_step(&mut self, by: isize) {
+        let Some(k) = self.slide else { return };
+        let n = self.slide_ranges().len();
+        let to = (k as isize + by).clamp(0, n.saturating_sub(1) as isize) as usize;
+        self.slide_go(to);
+    }
+
+    fn slide_go(&mut self, to: usize) {
+        let n = self.slide_ranges().len();
+        let to = to.min(n.saturating_sub(1));
+        if self.slide != Some(to) {
+            self.slide = Some(to);
+            self.preview_scroll = 0;
+            self.preview_pans.clear();
+            self.preview_sel = None;
+        }
+    }
+
+    /// The note cut into slides: the source lines of each, in order.
+    pub fn slide_ranges(&self) -> Vec<(usize, usize)> {
+        slide_ranges(self.editor.lines(), &self.blocks())
     }
 
     /// The links on the page a label can go on: the ones that lead somewhere.
@@ -4974,6 +5093,10 @@ impl App {
             Action::TogglePreview => {
                 self.overlay = Overlay::None;
                 self.toggle_preview();
+            }
+            Action::Present => {
+                self.overlay = Overlay::None;
+                self.toggle_present();
             }
             Action::Save => {
                 self.sync_editor_to_note();
@@ -6291,6 +6414,35 @@ impl App {
 /// `---` from being read as a rule and `tags:` from picking up emphasis;
 /// filtering afterwards would not, since a stray ``` inside the block would
 /// still have swallowed the rest of the note.
+/// Where the slides are: every run of lines between rules, the front matter
+/// left out, and a run with nothing in it skipped — two rules in a row make
+/// no blank slide. Ranges are inclusive source lines.
+pub fn slide_ranges(lines: &[String], blocks: &[md::Block]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let cut = |from: usize, to: usize, out: &mut Vec<(usize, usize)>| {
+        // trimmed to its text, so a slide never opens on the blank line
+        // under the rule, and never pads out with the one above the next
+        let first = (from..to).find(|&i| !lines[i].trim().is_empty());
+        let last = (from..to).rev().find(|&i| !lines[i].trim().is_empty());
+        if let (Some(f), Some(l)) = (first, last) {
+            out.push((f, l));
+        }
+    };
+    for b in blocks {
+        match b.kind {
+            md::BlockKind::Rule => {
+                cut(start, b.start, &mut out);
+                start = b.end + 1;
+            }
+            md::BlockKind::FrontMatter => start = b.end + 1,
+            _ => {}
+        }
+    }
+    cut(start, lines.len(), &mut out);
+    out
+}
+
 pub fn blocks_with(lines: &[String], front_matter: FrontMatter) -> Vec<md::Block> {
     if front_matter != FrontMatter::Show {
         if let Some(end) = notes::front_matter_end(lines.iter().map(String::as_str)) {
@@ -6907,6 +7059,29 @@ fn beside_key(m: KeyModifiers) -> Option<crate::terminal::Place> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn slides_are_the_runs_between_rules_with_front_matter_and_blank_runs_left_out() {
+        use super::{blocks_with, slide_ranges};
+        use crate::config::FrontMatter;
+        let lines: Vec<String> = [
+            "---", "tags: [talk]", "---", "", "# Title", "a line", "", "---", "", "---", "",
+            "## Two", "- one", "", "---", "closing",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let blocks = blocks_with(&lines, FrontMatter::Dim);
+        assert_eq!(
+            slide_ranges(&lines, &blocks),
+            vec![(4, 5), (11, 12), (15, 15)]
+        );
+        // a note with no rules is one slide; an empty note is none
+        let one: Vec<String> = vec!["just text".into()];
+        assert_eq!(slide_ranges(&one, &blocks_with(&one, FrontMatter::Dim)), vec![(0, 0)]);
+        let none: Vec<String> = vec!["".into()];
+        assert!(slide_ranges(&none, &blocks_with(&none, FrontMatter::Dim)).is_empty());
+    }
+
+    #[test]
     fn a_wheel_gesture_keeps_the_axis_its_first_tick_picked() {
         use super::wheel_along;
         use std::time::{Duration, Instant};
@@ -7130,6 +7305,7 @@ mod tests {
                 "Open vault…",
                 "Find in note",
                 "Reading view",
+                "Present",
                 "Help",
                 "Settings",
                 "Fold section",

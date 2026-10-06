@@ -19,6 +19,7 @@ pub enum Action {
     NewNote,
     Settings,
     TogglePreview,
+    Present,
     Save,
     Help,
     Quit,
@@ -89,6 +90,12 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
         "key_preview",
         Some("^P"),
         "toggle the reading view",
+    ),
+    (
+        Action::Present,
+        "key_present",
+        Some("ctrl+shift+P"),
+        "present — one slide per screen, split on ---",
     ),
     (
         Action::Save,

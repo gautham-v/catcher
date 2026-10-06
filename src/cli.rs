@@ -10,6 +10,7 @@
 //!                         `--reading` starts in the reading view
 //! catcher new <name>      create a note titled <name> and open it
 //! catcher today           open today's daily note, creating it if missing
+//! catcher present <name>  open the note that best matches <name>, as slides
 //! catcher add "text"      capture a note without the TUI (stdin if no text)
 //! catcher path            print the resolved notes dir
 //! ```
@@ -28,6 +29,7 @@ usage:
   catcher <dir>           open the TUI rooted at that directory
   catcher new <name>      create a note titled <name> and open it
   catcher today           open today's daily note, creating it if missing
+  catcher present <name>  open the note that best matches <name>, as slides
   catcher add [text]      write a new note from text (or stdin) and print its path
   catcher path            print the notes directory
   catcher --version       print the version
@@ -66,6 +68,8 @@ pub enum Launch {
     },
     /// Today's daily note, made if missing.
     Today,
+    /// The note whose title best matches this, opened as slides.
+    Present(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +104,15 @@ pub fn parse(args: &[String], probe: impl Fn(&str) -> PathKind) -> Cli {
                 Cli::Error("new takes a title".to_string())
             } else {
                 Cli::Tui(Launch::New(name.to_string()))
+            };
+        }
+        "present" => {
+            let name = args[1..].join(" ");
+            let name = name.trim();
+            return if name.is_empty() {
+                Cli::Error("present takes a note title".to_string())
+            } else {
+                Cli::Tui(Launch::Present(name.to_string()))
             };
         }
         "path" if args.len() == 1 => return Cli::PrintPath,
@@ -241,6 +254,11 @@ mod tests {
             Cli::Tui(Launch::New("meeting notes".into()))
         );
         assert!(matches!(parse(&args(&["new"]), nothing), Cli::Error(_)));
+        assert_eq!(
+            parse(&args(&["present", "cli", "memory"]), nothing),
+            Cli::Tui(Launch::Present("cli memory".into()))
+        );
+        assert!(matches!(parse(&args(&["present"]), nothing), Cli::Error(_)));
         assert!(matches!(
             parse(&args(&["new", " "]), nothing),
             Cli::Error(_)
