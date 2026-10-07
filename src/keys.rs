@@ -88,13 +88,13 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
     (
         Action::TogglePreview,
         "key_preview",
-        Some("^P"),
+        Some("^E"),
         "toggle the reading view",
     ),
     (
         Action::Present,
         "key_present",
-        Some("ctrl+shift+P"),
+        Some("^P"),
         "present — one slide per screen, split on ---",
     ),
     (
@@ -750,7 +750,8 @@ mod tests {
         assert_eq!(map.label(Action::Palette), "^K");
         assert_eq!(map.label(Action::QuickOpen), "^O");
         assert_eq!(map.label(Action::NewNote), "^N");
-        assert_eq!(map.label(Action::TogglePreview), "^P");
+        assert_eq!(map.label(Action::TogglePreview), "^E");
+        assert_eq!(map.label(Action::Present), "^P");
         assert_eq!(map.label(Action::Settings), "^,");
         // delete and rename ship unbound: they are palette commands
         assert_eq!(map.label(Action::DeleteNote), "");

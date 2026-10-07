@@ -438,7 +438,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("← →", "pan a table too wide for the page"),
             ("drag", "select text  ·  ^C copies the markdown"),
             ("click", "a link opens it, a checkbox toggles it"),
-            ("^P  esc  ⏎", "back to editing"),
+            ("^E  esc  ⏎", "back to editing"),
         ],
     ),
 ];
@@ -4085,7 +4085,7 @@ impl App {
     }
 
     fn toggle_preview(&mut self) {
-        // ^P mid-talk lands the editor on the slide's first line, which is
+        // ^E mid-talk lands the editor on the slide's first line, which is
         // where the fix you stopped for is
         if let Some(k) = self.slide.take() {
             if let Some(&(start, _)) = self.slide_ranges().get(k) {
@@ -5015,7 +5015,7 @@ impl App {
     /// binding leads, so the palette, the help card and the settings all agree
     /// about what a key does.
     fn run_action(&mut self, action: Action) {
-        // a binding that got past the labels — ^K, ^P — is you doing
+        // a binding that got past the labels — ^K, ^E — is you doing
         // something else, and the labels should not still be up on the way
         // back
         self.hinting = false;

@@ -16,7 +16,7 @@ or `cargo install catcher`. Then run `catcher`.
 
 ## What it does
 
-- **Live-preview editor.** Markdown renders as you type; markup shows only where the cursor is. **^P** flips to a reading view.
+- **Live-preview editor.** Markdown renders as you type; markup shows only where the cursor is. **^E** flips to a reading view.
 - **Obsidian-compatible.** `[[wikilinks]]`, embeds, `#tags`, callouts, front matter, aliases, daily notes, templates, bookmarks and `.trash` all work the Obsidian way. Point it at an existing vault.
 - **Links stay intact.** Renaming a note or heading, or merging one note into another, rewrites every link to it.
 - **Fast navigation.** **^O** fuzzy-opens notes, **⇧^F** searches the vault with Obsidian's operators, **⌥P** peeks at a link, **⌥click** opens it in a terminal split (Ghostty, tmux, kitty, WezTerm).
@@ -47,8 +47,8 @@ catcher path             print the notes directory
 | `^F` / `⇧^F` | Find in note / search all files |
 | `^N` | New note |
 | `⌥D` | Today's note |
-| `^P` | Reading view |
-| `ctrl+⇧P` | Present: one slide per screen, split on `---`; click or ⎵ for the next |
+| `^E` | Reading view |
+| `^P` | Present: one slide per screen, split on `---`; click or ⎵ for the next |
 | `⌥⏎` / `⌥P` | Follow / peek at a link |
 | `⌥[` / `⌥]` | Back / forward (or the mouse's side buttons) |
 | `^/` | Help card |

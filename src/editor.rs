@@ -816,7 +816,11 @@ impl Editor {
         let alt = m.contains(KeyModifiers::ALT);
         let (row, col) = self.cursor;
         match key.code {
-            // ⌘← / ⌘→ reach us as Ctrl-A / Ctrl-E
+            // ⌘← / ⌘→ reach us as Ctrl-A / Ctrl-E. ^E is the reading view by
+            // default and the keymap sees a key first, so Ctrl-E only gets
+            // here with `key_preview` moved; a terminal that rewrites ⌘→
+            // into Ctrl-E wants that rewrite undone (catcher's Ghostty
+            // config sends ⌘-arrows as ⌘-arrows instead)
             KeyCode::Char('a') if ctrl => self.move_to((row, 0), select),
             KeyCode::Char('e') if ctrl => self.move_to((row, self.line_len(row)), select),
             // ⌘⌫ as Ctrl-U, ⌥⌫ as Ctrl-W
