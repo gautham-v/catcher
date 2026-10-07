@@ -356,6 +356,10 @@ const SUPERSEDED: &[(&str, &[&str])] = &[
         "key_forward",
         &["⌥→", "alt+right", "ctrl+⌥→", "ctrl+alt+right", "^F"],
     ),
+    // the reading view moved from ^P to ^E and present from ctrl+⇧P to ^P;
+    // present had also shipped unbound once, written down as `none`
+    ("key_preview", &["^P"]),
+    ("key_present", &["ctrl+shift+P", "ctrl+⇧P", "none", "off", ""]),
     // shipped unbound, and the settings note wrote that down as `none`
     ("key_find", &["none", "off", ""]),
     ("key_split_right", &["none", "off", ""]),
@@ -806,8 +810,18 @@ mod tests {
         let map = Keymap::from_settings(|k| match k {
             "key_help" => Some("^G".to_string()),
             "key_back" => Some("ctrl+⌥←".to_string()),
+            "key_preview" => Some("^P".to_string()),
+            "key_present" => Some("none".to_string()),
             _ => None,
         });
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            Some(Action::TogglePreview)
+        );
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            Some(Action::Present)
+        );
         assert_eq!(
             map.action(&ev(KeyCode::F(1), KeyModifiers::NONE)),
             Some(Action::Help)
