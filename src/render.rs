@@ -1,4 +1,4 @@
-//! Markdown → styled cells for the full-page preview (^E).
+//! Markdown → styled cells for the full-page preview (^R).
 //!
 //! Block structure comes from pulldown-cmark here; the live-preview editor is
 //! line-based instead. Both share the palette in [`crate::theme`].

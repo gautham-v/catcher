@@ -726,6 +726,20 @@ impl Editor {
         match key.code {
             // ctrl-chords belong to the app, not the buffer
             KeyCode::Char(_) if key.modifiers.contains(KeyModifiers::CONTROL) => {}
+            // a second space on an item that has no text yet — the `- ` ⏎
+            // just left — is the item being pushed in, the way ⇥ does it:
+            // spaces after the marker would otherwise read as its text and
+            // nest nothing. The marker's own space (`-` then space) is still
+            // typed, and so is the space when there is nowhere to nest
+            KeyCode::Char(' ')
+                if self.anchor.is_none()
+                    && col == self.line_len(row)
+                    && self.lines[row].ends_with(' ')
+                    && crate::lists::is_empty_item(&self.lines[row])
+                    && self.shift_list_rows(false) =>
+            {
+                return true;
+            }
             KeyCode::Char(c) => {
                 self.insert_char(c);
                 return true;
@@ -816,11 +830,9 @@ impl Editor {
         let alt = m.contains(KeyModifiers::ALT);
         let (row, col) = self.cursor;
         match key.code {
-            // ⌘← / ⌘→ reach us as Ctrl-A / Ctrl-E. ^E is the reading view by
-            // default and the keymap sees a key first, so Ctrl-E only gets
-            // here with `key_preview` moved; a terminal that rewrites ⌘→
-            // into Ctrl-E wants that rewrite undone (catcher's Ghostty
-            // config sends ⌘-arrows as ⌘-arrows instead)
+            // ⌘← / ⌘→ reach us as Ctrl-A / Ctrl-E, which is why no default
+            // binding may take ^A or ^E: the keymap sees a key first and
+            // would eat the motion (the reading view sat on ^E once and did)
             KeyCode::Char('a') if ctrl => self.move_to((row, 0), select),
             KeyCode::Char('e') if ctrl => self.move_to((row, self.line_len(row)), select),
             // ⌘⌫ as Ctrl-U, ⌥⌫ as Ctrl-W
@@ -1088,6 +1100,37 @@ mod tests {
         e.on_key(key(KeyCode::BackTab, KeyModifiers::NONE));
         assert_eq!(e.text(), "1. one\n2. two\n3. ");
         assert_eq!(e.cursor, (2, 3));
+    }
+
+    #[test]
+    fn a_space_on_an_empty_item_nests_it_like_tab() {
+        let mut e = Editor::new("- a");
+        e.set_cursor((0, 3));
+        e.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(e.text(), "- a\n- ");
+        e.on_key(key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(e.text(), "- a\n  - ");
+        assert_eq!(e.cursor, (1, 4));
+        e.on_key(key(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert_eq!(e.text(), "- a\n  - b");
+        // a space with text after the marker is just a space
+        e.on_key(key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(e.text(), "- a\n  - b ");
+        // an empty task continues the same way
+        let mut e = Editor::new("- [ ] a\n- [ ] ");
+        e.set_cursor((1, 6));
+        e.on_key(key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(e.text(), "- [ ] a\n  - [ ] ");
+        // the first item of a list has nothing to nest under, so the space
+        // is typed; and the marker's own space is never taken for a nest
+        let mut e = Editor::new("- a\n-");
+        e.set_cursor((1, 1));
+        e.on_key(key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(e.text(), "- a\n- ");
+        let mut e = Editor::new("- ");
+        e.set_cursor((0, 2));
+        e.on_key(key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(e.text(), "-  ");
     }
 
     #[test]

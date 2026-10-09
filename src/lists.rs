@@ -358,6 +358,16 @@ pub fn is_list_item(line: &str) -> bool {
     item(line).is_some()
 }
 
+/// Whether `line` is a list item with nothing typed after its marker yet:
+/// `- `, `3. `, or an unticked `- [ ] ` — what ⏎ leaves behind when it
+/// continues a list, and the one place a typed space means "nest this".
+pub fn is_empty_item(line: &str) -> bool {
+    item(line).is_some_and(|(_, content)| {
+        let rest = line.get(content..).unwrap_or("").trim();
+        rest.is_empty() || rest == "[ ]"
+    })
+}
+
 /// The rows the item on `row` takes with it when it moves: its own, and the
 /// lines nested under it — deeper items and wrapped text alike.
 fn block(lines: &[String], row: usize, indent: usize) -> usize {

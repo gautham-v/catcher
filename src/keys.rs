@@ -88,7 +88,7 @@ const ACTIONS: &[(Action, &str, Option<&str>, &str)] = &[
     (
         Action::TogglePreview,
         "key_preview",
-        Some("^E"),
+        Some("^R"),
         "toggle the reading view",
     ),
     (
@@ -356,10 +356,14 @@ const SUPERSEDED: &[(&str, &[&str])] = &[
         "key_forward",
         &["⌥→", "alt+right", "ctrl+⌥→", "ctrl+alt+right", "^F"],
     ),
-    // the reading view moved from ^P to ^E and present from ctrl+⇧P to ^P;
-    // present had also shipped unbound once, written down as `none`
-    ("key_preview", &["^P"]),
-    ("key_present", &["ctrl+shift+P", "ctrl+⇧P", "none", "off", ""]),
+    // the reading view moved from ^P to ^E and then to ^R (Ghostty sends
+    // ⌘→ as Ctrl-E, so ^E ate the motion); present from ctrl+⇧P to ^P,
+    // and it had also shipped unbound once, written down as `none`
+    ("key_preview", &["^P", "^E", "ctrl+e", "ctrl+E"]),
+    (
+        "key_present",
+        &["ctrl+shift+P", "ctrl+⇧P", "none", "off", ""],
+    ),
     // shipped unbound, and the settings note wrote that down as `none`
     ("key_find", &["none", "off", ""]),
     ("key_split_right", &["none", "off", ""]),
@@ -754,7 +758,7 @@ mod tests {
         assert_eq!(map.label(Action::Palette), "^K");
         assert_eq!(map.label(Action::QuickOpen), "^O");
         assert_eq!(map.label(Action::NewNote), "^N");
-        assert_eq!(map.label(Action::TogglePreview), "^E");
+        assert_eq!(map.label(Action::TogglePreview), "^R");
         assert_eq!(map.label(Action::Present), "^P");
         assert_eq!(map.label(Action::Settings), "^,");
         // delete and rename ship unbound: they are palette commands
@@ -810,13 +814,18 @@ mod tests {
         let map = Keymap::from_settings(|k| match k {
             "key_help" => Some("^G".to_string()),
             "key_back" => Some("ctrl+⌥←".to_string()),
-            "key_preview" => Some("^P".to_string()),
+            "key_preview" => Some("^E".to_string()),
             "key_present" => Some("none".to_string()),
             _ => None,
         });
         assert_eq!(
-            map.action(&ev(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            map.action(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL)),
             Some(Action::TogglePreview)
+        );
+        // ^E is what Ghostty sends for ⌘→, so it must reach the editor
+        assert_eq!(
+            map.action(&ev(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            None
         );
         assert_eq!(
             map.action(&ev(KeyCode::Char('p'), KeyModifiers::CONTROL)),

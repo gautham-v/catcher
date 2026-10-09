@@ -13,7 +13,7 @@
 //! So the cost is paid honestly and off the draw path: the reading view asks,
 //! a worker thread walks, the first frame is drawn without a footer, and the
 //! footer appears a moment later when the scan lands. The answer is then
-//! cached against the note and a generation counter, so flipping ^E back and
+//! cached against the note and a generation counter, so flipping ^R back and
 //! forth is free and a save is what makes it look again.
 
 use crate::index::{self, Entry};

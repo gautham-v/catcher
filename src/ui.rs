@@ -1226,7 +1226,9 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let slides = app.slide.map(|k| format!("slide {} / {}", k + 1, app.slide_ranges().len()));
+    let slides = app
+        .slide
+        .map(|k| format!("slide {} / {}", k + 1, app.slide_ranges().len()));
     let mode = match (app.view, &slides) {
         (View::Preview, Some(s)) => s.as_str(),
         (View::Edit, _) => "edit",

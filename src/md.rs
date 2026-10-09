@@ -4079,7 +4079,7 @@ fn code_line(src: &str, runs: &[crate::highlight::Run]) -> RLine {
 /// and a diagram is nearly always taller than the handful of lines that
 /// describe it. So a diagram is only drawn here when it is short enough to sit
 /// inside its own fence; a taller one stays the code it was, and is read as a
-/// picture in the full page, which is one **^E** away.
+/// picture in the full page, which is one **^R** away.
 fn mermaid_line(rows: &[String], row: usize, width: usize) -> RLine {
     let src = rows.get(row).map(String::as_str).unwrap_or("");
     if rows.len() > 2 {

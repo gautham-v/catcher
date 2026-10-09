@@ -367,6 +367,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
                 "tab / ⇧tab",
                 "in a list: nest the item — or every item the selection touches — under the one above, or bring it back out",
             ),
+            ("space", "on an empty item (the `- ` ⏎ leaves): nest it, like tab"),
             (
                 "tab / ⇧tab",
                 "in a table: next / previous cell; past the last, a new row",
@@ -438,7 +439,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("← →", "pan a table too wide for the page"),
             ("drag", "select text  ·  ^C copies the markdown"),
             ("click", "a link opens it, a checkbox toggles it"),
-            ("^E  esc  ⏎", "back to editing"),
+            ("^R  esc  ⏎", "back to editing"),
         ],
     ),
 ];
@@ -4085,7 +4086,7 @@ impl App {
     }
 
     fn toggle_preview(&mut self) {
-        // ^E mid-talk lands the editor on the slide's first line, which is
+        // ^R mid-talk lands the editor on the slide's first line, which is
         // where the fix you stopped for is
         if let Some(k) = self.slide.take() {
             if let Some(&(start, _)) = self.slide_ranges().get(k) {
@@ -4405,10 +4406,7 @@ impl App {
             self.flash("nothing to present".to_string());
             return;
         }
-        let k = ranges
-            .iter()
-            .rposition(|&(s, _)| s <= line)
-            .unwrap_or(0);
+        let k = ranges.iter().rposition(|&(s, _)| s <= line).unwrap_or(0);
         self.view = View::Preview;
         self.slide = Some(k);
         self.preview_scroll = 0;
@@ -5015,7 +5013,7 @@ impl App {
     /// binding leads, so the palette, the help card and the settings all agree
     /// about what a key does.
     fn run_action(&mut self, action: Action) {
-        // a binding that got past the labels — ^K, ^E — is you doing
+        // a binding that got past the labels — ^K, ^R — is you doing
         // something else, and the labels should not still be up on the way
         // back
         self.hinting = false;
@@ -7082,8 +7080,22 @@ mod tests {
         use super::{blocks_with, slide_ranges};
         use crate::config::FrontMatter;
         let lines: Vec<String> = [
-            "---", "tags: [talk]", "---", "", "# Title", "a line", "", "---", "", "---", "",
-            "## Two", "- one", "", "---", "closing",
+            "---",
+            "tags: [talk]",
+            "---",
+            "",
+            "# Title",
+            "a line",
+            "",
+            "---",
+            "",
+            "---",
+            "",
+            "## Two",
+            "- one",
+            "",
+            "---",
+            "closing",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -7095,7 +7107,10 @@ mod tests {
         );
         // a note with no rules is one slide; an empty note is none
         let one: Vec<String> = vec!["just text".into()];
-        assert_eq!(slide_ranges(&one, &blocks_with(&one, FrontMatter::Dim)), vec![(0, 0)]);
+        assert_eq!(
+            slide_ranges(&one, &blocks_with(&one, FrontMatter::Dim)),
+            vec![(0, 0)]
+        );
         let none: Vec<String> = vec!["".into()];
         assert!(slide_ranges(&none, &blocks_with(&none, FrontMatter::Dim)).is_empty());
     }
