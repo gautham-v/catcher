@@ -642,6 +642,10 @@ fn preview_key(app: &mut App, area: Rect) -> u64 {
     area.width.hash(&mut h);
     area.height.hash(&mut h);
     app.config_gen.hash(&mut h);
+    // a slide is laid out differently from the page it is cut from — fences
+    // bare, marks coloured, bands shrunk — so going in or out of presenting
+    // has to make a page of its own
+    app.slide.is_some().hash(&mut h);
     // flipped from inside the app, so the generation alone would miss it
     app.properties_mode().hash(&mut h);
     app.folded_lines().hash(&mut h);
@@ -780,7 +784,8 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let width = area.width.max(1) as usize;
     let key = preview_key(app, area);
     if app.preview_page.key != Some(key) {
-        let mut page = layout_preview(app, area);
+        let slide = app.slide.is_some();
+        let mut page = crate::render::for_slide(slide, || layout_preview(app, area));
         page.key = Some(key);
         app.preview_page = page;
     }
@@ -824,7 +829,17 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
         }
         let shown = (count as u16).min(area.height).max(1);
         let pad = (area.height - shown) / 2;
-        area = Rect::new(area.x, area.y + pad, area.width, shown);
+        // a picture is placed by cell and fills the column it was measured
+        // for, so a slide with one stays where it was
+        let pictured = bands
+            .iter()
+            .any(|&(at, h, _)| at < first + count && at + h as usize > first);
+        let left = if pictured {
+            0
+        } else {
+            slide_shift(&rows[first..first + count], width)
+        };
+        area = Rect::new(area.x + left, area.y + pad, area.width - left, shown);
         app.preview_goto = None;
         app.preview_top = None;
     }
@@ -965,6 +980,31 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     app.preview_page = page;
+}
+
+/// How far a slide moves right to stand in the middle of a page `width`
+/// columns across: half of what its widest row leaves over. One number for
+/// the whole slide, so the rows keep their places against each other and the
+/// slide does not shift as it scrolls.
+fn slide_shift(rows: &[crate::app::PageRow], width: usize) -> u16 {
+    let widest = rows.iter().map(|r| content_width(&r.cells)).max();
+    (width.saturating_sub(widest.unwrap_or(0)) / 2) as u16
+}
+
+/// Columns a row takes up to its last visible cell. Spaces on the end that
+/// draw nothing — the padding a callout or a wrapped line leaves — are not
+/// the row; a space on a ground of its own is, because it is a coloured cell
+/// the eye sees.
+fn content_width(cells: &[PCell]) -> usize {
+    let seen = |c: &PCell| {
+        c.ch != ' '
+            || c.style.bg.is_some()
+            || c.style
+                .add_modifier
+                .intersects(Modifier::UNDERLINED | Modifier::REVERSED | Modifier::CROSSED_OUT)
+    };
+    let end = cells.iter().rposition(seen).map_or(0, |i| i + 1);
+    crate::render::cells_width(&cells[..end])
 }
 
 /// Draw the part of a picture that is on screen: `rect` is that part, the
@@ -2516,6 +2556,61 @@ mod tests {
                 src: Some((row, col)),
             })
             .collect()
+    }
+
+    fn page_rows(lines: &[&str]) -> Vec<crate::app::PageRow> {
+        lines
+            .iter()
+            .map(|l| crate::app::PageRow {
+                cells: cells(l),
+                checkbox: None,
+                src_line: None,
+                wide: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_slide_narrower_than_the_page_moves_as_one_block_to_the_middle() {
+        // the widest row is 21 of 60 columns: thirty-nine to share
+        let rows = page_rows(&["title", "", "  twenty columns wide", "short"]);
+        assert_eq!(slide_shift(&rows, 60), 19);
+        // an odd leftover gives the spare column to the right
+        assert_eq!(slide_shift(&rows, 61), 20);
+        // a slide that fills the page, or runs past it, stays where it was
+        assert_eq!(slide_shift(&rows, 21), 0);
+        assert_eq!(slide_shift(&rows, 12), 0);
+    }
+
+    #[test]
+    fn a_row_is_measured_by_what_shows_and_not_by_the_blanks_after_it() {
+        assert_eq!(content_width(&cells("abc      ")), 3);
+        // indent is part of the row: its left edge is where the text starts
+        assert_eq!(content_width(&cells("  abc  ")), 5);
+        assert_eq!(content_width(&cells("       ")), 0);
+        // a blank on a ground of its own is a coloured cell, and shows
+        let mut band = cells("ab    ");
+        for c in &mut band {
+            c.style = theme::code();
+        }
+        assert_eq!(content_width(&band), 6);
+        // a wide character counts its two columns
+        assert_eq!(content_width(&cells("漢字  ")), 4);
+    }
+
+    #[test]
+    fn a_slide_is_centred_on_its_widest_row_whatever_pads_the_others() {
+        let mut padded = cells("table row");
+        padded.extend(cells("                    "));
+        let mut rows = page_rows(&["heading", "", "x"]);
+        rows.push(crate::app::PageRow {
+            cells: padded,
+            checkbox: None,
+            src_line: None,
+            wide: Some(0),
+        });
+        // nine columns, not twenty-nine
+        assert_eq!(slide_shift(&rows, 49), 20);
     }
 
     #[test]

@@ -175,6 +175,51 @@ thread_local! {
     static EMBED_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+thread_local! {
+    /// Whether the page being laid out is for a slide. Scoped to the layout
+    /// by [`for_slide`], never left set: the setting that governs the page
+    /// (`code_numbers`) is global and a slide must not change it for anyone
+    /// else, so a slide overrides it here, for the length of one render.
+    static SLIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `lay_out` with the page drawn for a slide when `on`: fences without
+/// line numbers or indent guides, check and cross marks in colour, and a
+/// code band only as wide as its code. Put back as it was on the way out,
+/// whatever the way out is.
+pub fn for_slide<R>(on: bool, lay_out: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SLIDE.with(|s| s.set(self.0));
+        }
+    }
+    let _restore = Restore(SLIDE.with(|s| s.replace(on)));
+    lay_out()
+}
+
+fn slide() -> bool {
+    SLIDE.with(|s| s.get())
+}
+
+/// Whether a fence is ruled with line numbers and indent guides: the
+/// setting, except on a slide, where the numbers are noise from the back of
+/// a room.
+fn numbers() -> bool {
+    !slide() && crate::highlight::numbers()
+}
+
+/// `style` for `ch` on a slide: a check in the green of a success callout, a
+/// cross in the red of a danger one, the foreground alone so a bold or
+/// underlined mark keeps its weight. Anything else comes back as it was.
+fn marked(ch: char, style: Style) -> Style {
+    match ch {
+        '✓' | '✔' => style.fg(theme::tick()),
+        '✗' | '✘' => style.fg(theme::cross()),
+        _ => style,
+    }
+}
+
 /// Step the embed depth by `by`. False when the card is already too deep to
 /// draw — an embed two notes down shows its title row and no more.
 fn embed_depth(by: isize) -> bool {
@@ -1164,6 +1209,9 @@ struct Ren {
     /// advance together: a CRLF note loses its `\r` on the way in, and a
     /// block's offsets would drift a byte a line without the marks.
     code: Option<Fence>,
+    /// A fence the highlighter colours is being drawn: on a slide its text
+    /// is left in the roles it was given.
+    coloured: bool,
     table: Option<Table>,
     /// How a table wider than the page is drawn.
     tables: TableStyle,
@@ -1240,6 +1288,7 @@ impl Ren {
             in_code_block: false,
             mermaid: None,
             code: None,
+            coloured: false,
             table: None,
             tables,
             width,
@@ -1282,10 +1331,13 @@ impl Ren {
     fn push_at(&mut self, text: &str, style: Style, link: Option<usize>, off: Option<usize>) {
         let mut off = off;
         let mut cells: Vec<PCell> = Vec::with_capacity(text.len());
+        // a fence the highlighter coloured keeps its own colours: a ✓ there
+        // is a token in somebody's code, and its role has already said so
+        let marks = slide() && !self.coloured;
         for ch in text.chars() {
             cells.push(PCell {
                 ch,
-                style,
+                style: if marks { marked(ch, style) } else { style },
                 link,
                 src: off.map(|o| self.pos_of(o)),
             });
@@ -2170,6 +2222,9 @@ impl Ren {
         self.push(&label, theme::marker(), None);
         self.flush();
         let mut off = off;
+        // the body is mermaid source and names its language, so on a slide
+        // its marks are left alone as a coloured fence's are
+        self.coloured = true;
         // split_inclusive, not lines(), for the same reason the code-block arm
         // uses it: the line ending is counted as it is in the file
         for raw in src.split_inclusive('\n') {
@@ -2181,6 +2236,7 @@ impl Ren {
             let src_line = self.src_line;
             self.emit_wrapped(cells, None, None, src_line, 2);
         }
+        self.coloured = false;
     }
 
     /// A fenced block as a band: one blank row of code ground above and below
@@ -2199,7 +2255,7 @@ impl Ren {
         let lines = src.split_inclusive('\n').count();
         // the last line's number decides the width, so the column never moves
         // under the reader as the block goes past nine or ninety-nine rows
-        let gutter = if crate::highlight::numbers() {
+        let gutter = if numbers() {
             lines.to_string().len() + 2
         } else {
             0
@@ -2210,7 +2266,10 @@ impl Ren {
         // asks for
         let band = avail != usize::MAX;
         let text_w = avail.saturating_sub(gutter + 4).max(8);
-        self.emit_band_row(avail);
+        self.coloured = lang.is_some();
+        // the rows first, and drawn after: how wide a slide's band is depends
+        // on the widest of them
+        let mut rows: Vec<(usize, bool, Vec<PCell>)> = Vec::new();
         let mut pos = 0;
         for (i, raw) in src.split_inclusive('\n').enumerate() {
             let l = raw.trim_end_matches('\n').trim_end_matches('\r');
@@ -2234,35 +2293,50 @@ impl Ren {
             }
             pos += raw.len();
             let cells = indent_guides(std::mem::take(&mut self.cells));
-            let rows = if band {
+            let wrapped = if band {
                 wrap_pcells(&cells, text_w)
             } else {
                 vec![cells]
             };
-            let src_line = self.src_line;
-            for (j, row) in rows.into_iter().enumerate() {
-                // the two columns of padding are ours, and so is the gutter:
-                // neither carries a source position, so a click on one lands
-                // where a click past the end of a line lands and a selection
-                // over the block never picks the numbers up
-                let mut out = str_cells("  ", theme::code());
-                out.extend(gutter_cells(i + 1, gutter, j == 0));
-                out.extend(row);
-                if band {
-                    let pad = avail.saturating_sub(cells_width(&out));
-                    out.extend(str_cells(&" ".repeat(pad), theme::code()));
-                }
-                self.emit_line(PLine {
-                    cells: out,
-                    checkbox: None,
-                    image: None,
-                    src_line,
-                    wide: false,
-                    hang: 0,
-                });
+            for (j, row) in wrapped.into_iter().enumerate() {
+                rows.push((i, j == 0, row));
             }
         }
-        self.emit_band_row(avail);
+        self.coloured = false;
+        // on a slide the band is the code and its padding and no more, so a
+        // short block can stand in the middle of the screen with the rest of
+        // the slide; on the page it runs the width of the column
+        let ground = match band && slide() {
+            true => {
+                let widest = rows.iter().map(|(_, _, r)| cells_width(r)).max();
+                (widest.unwrap_or(0) + gutter + 4).min(avail)
+            }
+            false => avail,
+        };
+        self.emit_band_row(ground);
+        for (i, first, row) in rows {
+            let src_line = self.src_line;
+            // the two columns of padding are ours, and so is the gutter:
+            // neither carries a source position, so a click on one lands
+            // where a click past the end of a line lands and a selection
+            // over the block never picks the numbers up
+            let mut out = str_cells("  ", theme::code());
+            out.extend(gutter_cells(i + 1, gutter, first));
+            out.extend(row);
+            if band {
+                let pad = ground.saturating_sub(cells_width(&out));
+                out.extend(str_cells(&" ".repeat(pad), theme::code()));
+            }
+            self.emit_line(PLine {
+                cells: out,
+                checkbox: None,
+                image: None,
+                src_line,
+                wide: false,
+                hang: 0,
+            });
+        }
+        self.emit_band_row(ground);
     }
 
     /// One blank row of the block's ground: the padding above and below the
@@ -3097,7 +3171,7 @@ fn gutter_cells(n: usize, width: usize, first: bool) -> Vec<PCell> {
 /// Only the leading run: a rule struck through the middle of a string would
 /// be reading the text, not ruling it.
 fn indent_guides(cells: Vec<PCell>) -> Vec<PCell> {
-    if !crate::highlight::numbers() {
+    if !numbers() {
         return cells;
     }
     let lead = cells
@@ -4404,6 +4478,155 @@ mod tests {
         let line = r.lines.iter().find(|l| l.text().contains("let b")).unwrap();
         assert!(!line.text().contains(theme::CODE_GUIDE));
         crate::highlight::set_numbers(true);
+    }
+
+    /// `md` laid out for a slide, at `width` columns.
+    fn render_slide(md: &str, width: usize) -> Rendered {
+        for_slide(true, || render_wide(md, width))
+    }
+
+    #[test]
+    fn a_fence_on_a_slide_has_no_numbers_and_no_guides_and_the_setting_is_untouched() {
+        let _lock = crate::testutil::serial();
+        crate::highlight::set_enabled(true);
+        crate::highlight::set_numbers(true);
+        theme::set_palette(theme::DARK);
+        let md = "```rust\nfn a() {\n    let b = 2;\n}\n```\n";
+        let slide = render_slide(md, 40);
+        let text: Vec<String> = slide.lines.iter().map(PLine::text).collect();
+        assert!(text.iter().any(|l| l.starts_with("  fn a() {")), "{text:?}");
+        assert!(text.iter().any(|l| l.starts_with("      let b = 2;")));
+        assert!(text.iter().all(|l| !l.contains(theme::CODE_GUIDE)));
+        // the page it is cut from still has both, and so does the next render
+        // after the slide: the slide is a mode of the layout, not of the setting
+        assert!(crate::highlight::numbers());
+        let page = render_wide(md, 40);
+        assert!(page.lines[1].text().starts_with("  1  fn a() {"));
+        assert!(page.lines[2].text().contains(theme::CODE_GUIDE));
+    }
+
+    #[test]
+    fn a_slide_is_only_a_slide_while_it_is_being_laid_out() {
+        assert!(!slide());
+        for_slide(true, || {
+            assert!(slide());
+            // a layout inside a layout puts back what it found, not "off"
+            for_slide(false, || assert!(!slide()));
+            assert!(slide());
+        });
+        assert!(!slide());
+        // and a layout that panics does not leave the flag up behind it
+        let _ = std::panic::catch_unwind(|| for_slide(true, || panic!("mid-layout")));
+        assert!(!slide());
+    }
+
+    #[test]
+    fn a_slide_draws_checks_green_and_crosses_red_wherever_they_appear() {
+        let _lock = crate::testutil::serial();
+        theme::set_palette(theme::DARK);
+        let md = "ok ✓ and ✔, bad ✗ and ✘, **bold ✓**\n\n- ✓ item\n\n| a | b |\n|---|---|\n| ✗ | ✓ |\n\n```\nplain ✘\n```\n";
+        let p = theme::palette();
+        let marks = |r: &Rendered| -> Vec<(char, Option<ratatui::style::Color>)> {
+            r.lines
+                .iter()
+                .flat_map(|l| &l.cells)
+                .filter(|c| "✓✔✗✘".contains(c.ch))
+                .map(|c| (c.ch, c.style.fg))
+                .collect()
+        };
+        let slide = marks(&render_slide(md, 60));
+        let got: String = slide.iter().map(|m| m.0).collect();
+        // every mark in the note, the callout-free way: paragraph, bold, list
+        // item, two table cells and a fence that names no language
+        assert_eq!(got, "✓✔✗✘✓✓✗✓✘");
+        for (ch, fg) in &slide {
+            let want = if "✓✔".contains(*ch) {
+                p.success
+            } else {
+                p.danger
+            };
+            assert_eq!(*fg, Some(want), "{ch}");
+        }
+        // the bold one keeps its weight, and the fence its ground
+        let r = render_slide(md, 60);
+        let bold = r.lines[0].cells.iter().rfind(|c| c.ch == '✓').unwrap();
+        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
+        let fenced = r
+            .lines
+            .iter()
+            .flat_map(|l| &l.cells)
+            .find(|c| c.ch == '✘' && c.style.bg.is_some());
+        assert_eq!(fenced.unwrap().style.bg, theme::code().bg);
+        // off a slide the marks are as they always were: no colour of their own
+        assert!(marks(&render_wide(md, 60))
+            .iter()
+            .all(|m| m.1 != Some(p.success) && m.1 != Some(p.danger)));
+        // nothing else on a slide is recoloured
+        let plain = render_wide("a plain line, ✓ apart\n", 60);
+        let slid = render_slide("a plain line, ✓ apart\n", 60);
+        for (a, b) in plain.lines[0].cells.iter().zip(&slid.lines[0].cells) {
+            if a.ch != '✓' {
+                assert_eq!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn a_mark_in_a_fence_the_highlighter_colours_keeps_its_colour_on_a_slide() {
+        let _lock = crate::testutil::serial();
+        crate::highlight::set_enabled(true);
+        theme::set_palette(theme::DARK);
+        let r = render_slide("```rust\nlet a = \"✓\"; // ✗\n```\n", 60);
+        let cells: Vec<&PCell> = r
+            .lines
+            .iter()
+            .flat_map(|l| &l.cells)
+            .filter(|c| c.ch == '✓' || c.ch == '✗')
+            .collect();
+        assert_eq!(cells.len(), 2);
+        let p = theme::palette();
+        assert!(cells
+            .iter()
+            .all(|c| c.style.fg != Some(p.success) && c.style.fg != Some(p.danger)));
+    }
+
+    #[test]
+    fn a_theme_with_no_colour_for_a_check_draws_it_in_the_terminals_own() {
+        let _lock = crate::testutil::serial();
+        let mut p = theme::DARK;
+        p.success = ratatui::style::Color::Reset;
+        theme::set_palette(p);
+        let r = render_slide("done ✓\n", 20);
+        theme::set_palette(theme::DARK);
+        let tick = r.lines[0].cells.iter().find(|c| c.ch == '✓').unwrap();
+        assert_eq!(tick.style.fg, Some(ratatui::style::Color::Reset));
+    }
+
+    #[test]
+    fn a_slide_fence_is_a_band_only_as_wide_as_its_code_and_its_padding() {
+        let _lock = crate::testutil::serial();
+        crate::highlight::set_enabled(true);
+        theme::set_palette(theme::DARK);
+        let md = "```\nshort\n    a longer line\n```\n";
+        let r = render_slide(md, 60);
+        // two columns of ground either side of the longest line, on every row
+        // of the block, the padding rows included
+        let widths: Vec<usize> = r.lines.iter().map(|l| cells_width(&l.cells)).collect();
+        assert_eq!(widths, vec![21; 4]);
+        assert!(r.lines[0]
+            .cells
+            .iter()
+            .all(|c| c.ch == ' ' && c.style == theme::code()));
+        // the page keeps the full column
+        let page = render_wide(md, 60);
+        assert!(page.lines.iter().all(|l| cells_width(&l.cells) == 60));
+        // and a block wider than the column wraps inside it, every row one width
+        let long = format!("```\n{}\n```\n", "word ".repeat(30));
+        let r = render_slide(&long, 40);
+        assert!(r.lines.len() > 4);
+        let width = cells_width(&r.lines[0].cells);
+        assert!(width <= 40);
+        assert!(r.lines.iter().all(|l| cells_width(&l.cells) == width));
     }
 
     /// Is every cell of a code row that came from the file the plain code

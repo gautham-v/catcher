@@ -425,6 +425,15 @@ pub fn callout(kind: &str) -> Style {
     Style::new().fg(color)
 }
 
+/// A ✓ on a slide: the green a success callout is drawn in.
+pub fn tick() -> Color {
+    palette().success
+}
+/// A ✗ on a slide: the red a danger callout is drawn in.
+pub fn cross() -> Color {
+    palette().danger
+}
+
 /// Maths, inline or displayed: italic, as a typeset formula would be.
 pub fn math() -> Style {
     Style::new().add_modifier(Modifier::ITALIC)
