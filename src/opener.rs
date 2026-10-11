@@ -75,7 +75,10 @@ pub fn apply(buf: &mut Buffer, area: Rect, seed: u64, elapsed: Duration) {
             let Some(cell) = buf.cell_mut((x, y)) else {
                 continue;
             };
-            if cell.symbol().trim().is_empty() {
+            // a picture's cells are not letters to scramble: the first cell
+            // of a kitty band carries the picture's data, sent once, and a
+            // noise glyph in its place would lose the picture for good
+            if cell.symbol().trim().is_empty() || cell.skip || cell.symbol().contains('\u{1b}') {
                 continue;
             }
             match phase(x, y, seed, elapsed) {
@@ -96,6 +99,20 @@ pub fn apply(buf: &mut Buffer, area: Rect, seed: u64, elapsed: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_cell_is_left_alone_while_a_letter_goes_to_noise() {
+        let area = Rect::new(0, 0, 3, 1);
+        let mut buf = Buffer::empty(area);
+        buf[(0, 0)].set_symbol("\u{1b}_Gq=2,a=T;AAAA\u{1b}\\\u{1b}[s\u{10EEEE}");
+        buf[(1, 0)].set_symbol("x").set_skip(true);
+        buf[(2, 0)].set_symbol("a");
+        apply(&mut buf, area, 7, Duration::ZERO);
+        assert!(buf[(0, 0)].symbol().contains("a=T"));
+        assert_eq!(buf[(1, 0)].symbol(), "x");
+        assert!(matches!(phase(2, 0, 7, Duration::ZERO), Phase::Noise(_)));
+        assert_ne!(buf[(2, 0)].symbol(), "a");
+    }
 
     #[test]
     fn a_cell_goes_noise_then_flash_then_done_and_stays_put() {
