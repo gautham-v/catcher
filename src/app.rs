@@ -1485,6 +1485,14 @@ impl App {
         parent == notes_dir
     }
 
+    /// Is `path` anywhere under the configured notes dir, subfolders
+    /// included? Pasted images are written beside the vault, so a note in
+    /// `interviews/github/` may take one as readily as a note at the root.
+    fn in_notes_dir(&self, path: &Path) -> bool {
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        canon(path).starts_with(canon(&self.config.notes_dir))
+    }
+
     /// Is the note on screen the settings note?
     pub fn editing_settings(&self) -> bool {
         crate::config::settings_path()
@@ -6078,7 +6086,7 @@ impl App {
     }
 
     fn paste_image(&mut self, png: &[u8]) {
-        if !self.may_rename(&self.active_note().path.clone()) {
+        if !self.in_notes_dir(&self.active_note().path.clone()) {
             self.flash("image paste disabled outside notes dir".to_string());
             return;
         }
