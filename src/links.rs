@@ -563,9 +563,11 @@ fn merge_pass(old: &Path, into: &Path, heading: &str, roots: &[PathBuf], write: 
 
 /// The line a link's fragment lands on: for `^id`, the line that carries
 /// ` ^id` at its end; for anything else, the first heading whose text (the
-/// `#`s and any block id dropped, trimmed) is the fragment, case-insensitively.
-/// Fenced code is stepped over — a `# comment` in a shell snippet is not a
-/// heading. `None` when the note has no such place.
+/// `#`s and any block id dropped) is the fragment, the way Obsidian matches
+/// one — see [`anchor_key`]. `[[note#Parent#Child]]` names a heading inside
+/// another, and lands on the innermost one. Fenced code is stepped over — a
+/// `# comment` in a shell snippet is not a heading. `None` when the note has
+/// no such place.
 pub fn find_anchor(lines: &[String], fragment: &str) -> Option<usize> {
     let fragment = fragment.trim();
     if let Some(id) = fragment.strip_prefix('^') {
@@ -573,15 +575,28 @@ pub fn find_anchor(lines: &[String], fragment: &str) -> Option<usize> {
             crate::md::block_id_at(l).is_some_and(|(_, got)| got.eq_ignore_ascii_case(id))
         });
     }
-    let want = fragment.to_lowercase();
+    let innermost = fragment.rsplit('#').find(|s| !s.trim().is_empty())?;
+    let want = anchor_key(innermost);
     let mut fenced = false;
     lines.iter().position(|line| {
         if crate::md::is_fence(line) {
             fenced = !fenced;
             return false;
         }
-        !fenced && crate::md::heading_text(line).is_some_and(|t| t.to_lowercase() == want)
+        !fenced && crate::md::heading_text(line).is_some_and(|t| anchor_key(t) == want)
     })
+}
+
+/// A heading's name as a link fragment matches it: without case, and with
+/// the characters a wikilink cannot carry (`|`, `#`, `^`, `:`, `[`, `]`) and
+/// any run of spaces all counted as one space — Obsidian writes the heading
+/// `A | B` as `[[note#A B]]`.
+fn anchor_key(text: &str) -> String {
+    text.to_lowercase()
+        .split(|c: char| c.is_whitespace() || "|#^:[]".contains(c))
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -843,6 +858,31 @@ mod tests {
         assert_eq!(find_anchor(&note, "Missing"), None);
         // a line that merely begins with the words is not the heading
         assert_eq!(find_anchor(&lines("Method\n# Methods"), "Method"), None);
+    }
+
+    #[test]
+    fn a_fragment_finds_its_heading_among_longer_ones_that_start_the_same() {
+        // the x-brief's own contents line: `[[x-brief#AI releases|AI releases 5]]`
+        let note = lines(
+            "# X brief\n\n[[x-brief#AI releases|AI releases 5]]\n\n## AI releases\n\n\
+             ### AI releases this week\n\n## Research\n\n### AI News | TestingCatalog · Drex",
+        );
+        assert_eq!(find_anchor(&note, "AI releases"), Some(4));
+        assert_eq!(find_anchor(&note, "  ai   RELEASES "), Some(4));
+        assert_eq!(find_anchor(&note, "research"), Some(8));
+        // a `|` cannot sit inside a link, so Obsidian writes it as a space
+        assert_eq!(
+            find_anchor(&note, "AI News TestingCatalog · Drex"),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn a_nested_fragment_lands_on_the_innermost_heading() {
+        let note = lines("# Spec\n\n## Method\n\n### Setup\n");
+        assert_eq!(find_anchor(&note, "Method#Setup"), Some(4));
+        assert_eq!(find_anchor(&note, "Spec#"), Some(0));
+        assert_eq!(find_anchor(&note, "#"), None);
     }
 
     #[test]

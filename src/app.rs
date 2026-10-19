@@ -1022,6 +1022,10 @@ impl App {
         };
         app.remember_active();
         app.load_active_into_editor();
+        // a split opened from a link to a heading starts on that heading
+        if let Launch::In { at: Some(f), .. } = &launch {
+            app.goto_fragment(f);
+        }
         // `catcher present <note>` opens on its first slide; set after the
         // load, which puts the page back the way a fresh note is
         if present {
@@ -2376,31 +2380,36 @@ impl App {
             .filter(|rel| !rel.is_empty())
     }
 
-    /// Open `path` and, when the link named a place in it, go there.
+    /// Open `path` and, when the link named a place in it, go there. A link
+    /// to the note already on screen — the contents line at the top of a
+    /// long note — only moves: reopening it would put back the place it was
+    /// left at, over the place the link asked for.
     fn open_path_at(&mut self, path: &Path, fragment: Option<&str>) {
-        self.open_path(path);
-        let Some(fragment) = fragment else {
-            return;
-        };
-        // an open that failed flashed and left the old note up, and a heading
-        // of another note must not be looked for in this one
-        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        if canon(&self.active_note().path) != canon(path) {
-            return;
+        if !self.is_active_path(path) {
+            self.open_path(path);
+            // an open that failed flashed and left the old note up, and a
+            // heading of another note must not be looked for in this one
+            if !self.is_active_path(path) {
+                return;
+            }
         }
-        self.goto_fragment(fragment);
+        if let Some(fragment) = fragment {
+            self.goto_fragment(fragment);
+        }
+    }
+
+    /// Is `path` the note on screen?
+    fn is_active_path(&self, path: &Path) -> bool {
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        canon(&self.active_note().path) == canon(path)
     }
 
     /// Land on the heading or block a link's `#fragment` names, in the note
-    /// on screen: the cursor goes to its line and the reading view scrolls it
-    /// to the top, the way a contents-tab hit does.
+    /// on screen: its line goes to the top of the page, in the editor with
+    /// the cursor on it.
     fn goto_fragment(&mut self, fragment: &str) {
         match crate::links::find_anchor(self.editor.lines(), fragment) {
-            Some(line) => {
-                self.editor.set_cursor((line, 0));
-                self.reveal_cursor();
-                self.preview_goto = Some(line);
-            }
+            Some(line) => self.land_at_top(line),
             None => {
                 let what = if fragment.starts_with('^') {
                     "block"
@@ -2410,6 +2419,21 @@ impl App {
                 self.flash(format!("no {what} \u{201c}{fragment}\u{201d} here"));
             }
         }
+    }
+
+    /// Put line `line` at the very top of the page, with the editor cursor
+    /// at its start. In the reading view the next draw puts it there; in the
+    /// editor a stale reading-view place is dropped, so ^R opens where the
+    /// editor now is rather than where this note was last read.
+    fn land_at_top(&mut self, line: usize) {
+        let line = line.min(self.editor.lines().len().saturating_sub(1));
+        self.editor.set_cursor((line, 0));
+        // a heading under a folded parent is one you asked to see
+        self.reveal_cursor();
+        self.editor.scroll = line;
+        self.edit_skip = 0;
+        self.preview_goto = None;
+        self.preview_top = (self.view == View::Preview).then_some(line);
     }
 
     /// The folder and filename a link target names, relative to the note the
@@ -2493,9 +2517,10 @@ impl App {
             md::LinkTarget::Wiki(t) => t,
             other => return self.follow(other),
         };
+        let fragment = md::split_fragment(&t).1.map(str::to_string);
         // `[[#Heading]]` is a place in this note, so this note goes beside
         if md::split_fragment(&t).0.is_empty() {
-            return self.open_beside(place, None);
+            return self.open_beside_at(place, None, fragment.as_deref());
         }
         let mut path = self.resolve_link(&t);
         if path.is_none() {
@@ -2504,7 +2529,7 @@ impl App {
             path = self.resolve_link(&t);
         }
         if let Some(path) = path.or_else(|| self.create_for_link(&t)) {
-            self.open_beside(place, Some(path));
+            self.open_beside_at(place, Some(path), fragment.as_deref());
         }
     }
 
@@ -5366,11 +5391,22 @@ impl App {
     /// reading. The new surface takes focus, as the terminal's own split
     /// would.
     fn open_beside(&mut self, place: crate::terminal::Place, path: Option<PathBuf>) {
+        self.open_beside_at(place, path, None);
+    }
+
+    /// [`Self::open_beside`], with the new session landing on the heading or
+    /// block `fragment` names.
+    fn open_beside_at(
+        &mut self,
+        place: crate::terminal::Place,
+        path: Option<PathBuf>,
+        fragment: Option<&str>,
+    ) {
         self.overlay = Overlay::None;
         self.save_now();
         let path = path.unwrap_or_else(|| self.active_note().path.clone());
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("catcher"));
-        let argv = Self::beside_argv(&exe, &self.dir, &path, self.view);
+        let argv = Self::beside_argv(&exe, &self.dir, &path, self.view, fragment);
         match crate::terminal::open_beside(place, &argv) {
             Ok(()) => {
                 let what = match place {
@@ -5384,9 +5420,16 @@ impl App {
         }
     }
 
-    /// The command line a split or tab runs: this vault, that note, and
-    /// `--reading` when this session is in the reading view.
-    fn beside_argv(exe: &Path, dir: &Path, path: &Path, view: View) -> Vec<String> {
+    /// The command line a split or tab runs: this vault, that note,
+    /// `--reading` when this session is in the reading view, and `--at` the
+    /// place in the note a link named.
+    fn beside_argv(
+        exe: &Path,
+        dir: &Path,
+        path: &Path,
+        view: View,
+        fragment: Option<&str>,
+    ) -> Vec<String> {
         let mut argv = vec![
             exe.to_string_lossy().into_owned(),
             "--root".to_string(),
@@ -5395,6 +5438,10 @@ impl App {
         ];
         if view == View::Preview {
             argv.push("--reading".to_string());
+        }
+        if let Some(f) = fragment {
+            argv.push("--at".to_string());
+            argv.push(f.to_string());
         }
         argv
     }
@@ -7255,12 +7302,32 @@ mod tests {
         let exe = Path::new("/bin/catcher");
         let dir = Path::new("/v");
         let note = Path::new("/v/a.md");
-        let editing = App::beside_argv(exe, dir, note, View::Edit);
+        let editing = App::beside_argv(exe, dir, note, View::Edit, None);
         assert_eq!(editing, ["/bin/catcher", "--root", "/v", "/v/a.md"]);
-        let reading = App::beside_argv(exe, dir, note, View::Preview);
+        let reading = App::beside_argv(exe, dir, note, View::Preview, None);
         assert_eq!(
             reading,
             ["/bin/catcher", "--root", "/v", "/v/a.md", "--reading"]
+        );
+    }
+
+    #[test]
+    fn a_split_from_a_link_to_a_heading_lands_on_that_heading() {
+        let exe = Path::new("/bin/catcher");
+        let dir = Path::new("/v");
+        let note = Path::new("/v/a.md");
+        let argv = App::beside_argv(exe, dir, note, View::Preview, Some("AI releases"));
+        assert_eq!(
+            argv,
+            [
+                "/bin/catcher",
+                "--root",
+                "/v",
+                "/v/a.md",
+                "--reading",
+                "--at",
+                "AI releases"
+            ]
         );
     }
 

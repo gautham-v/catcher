@@ -5,9 +5,10 @@
 //! catcher <name>          fuzzy-open a note by title; an error if none matches
 //! catcher <file>.md       open the TUI on that file, rooted at its parent
 //! catcher <dir>           open the TUI rooted at that directory
-//! catcher --root <dir> <file> [--reading]
+//! catcher --root <dir> <file> [--reading] [--at <heading>]
 //!                         open <file>, rooted at <dir>: what a split runs;
-//!                         `--reading` starts in the reading view
+//!                         `--reading` starts in the reading view, `--at`
+//!                         on the heading or `^block` a link named
 //! catcher new <name>      create a note titled <name> and open it
 //! catcher today           open today's daily note, creating it if missing
 //! catcher present <name>  open the note that best matches <name>, as slides
@@ -61,10 +62,12 @@ pub enum Launch {
     /// hands another when it opens a note in a new split or tab, so the
     /// second one sees the same vault as the first. `reading` carries the
     /// view over too: a note opened beside a page being read opens read.
+    /// `at` is the `#fragment` of the link that opened it, to land on.
     In {
         root: PathBuf,
         file: PathBuf,
         reading: bool,
+        at: Option<String>,
     },
     /// Today's daily note, made if missing.
     Today,
@@ -119,19 +122,28 @@ pub fn parse(args: &[String], probe: impl Fn(&str) -> PathKind) -> Cli {
         "today" if args.len() == 1 => return Cli::Tui(Launch::Today),
         "--keys" => return Cli::Keys,
         "--root" => {
-            return match args {
-                [_, root, file] => Cli::Tui(Launch::In {
-                    root: PathBuf::from(root),
-                    file: PathBuf::from(file),
-                    reading: false,
-                }),
-                [_, root, file, flag] if flag == "--reading" => Cli::Tui(Launch::In {
-                    root: PathBuf::from(root),
-                    file: PathBuf::from(file),
-                    reading: true,
-                }),
-                _ => Cli::Error("--root takes a directory and a file".to_string()),
+            let [_, root, file, flags @ ..] = args else {
+                return Cli::Error("--root takes a directory and a file".to_string());
             };
+            let mut reading = false;
+            let mut at = None;
+            let mut rest = flags.iter();
+            while let Some(flag) = rest.next() {
+                match flag.as_str() {
+                    "--reading" => reading = true,
+                    "--at" => match rest.next() {
+                        Some(f) => at = Some(f.clone()),
+                        None => return Cli::Error("--at takes a heading".to_string()),
+                    },
+                    other => return Cli::Error(format!("--root does not take {other}")),
+                }
+            }
+            return Cli::Tui(Launch::In {
+                root: PathBuf::from(root),
+                file: PathBuf::from(file),
+                reading,
+                at,
+            });
         }
         "add" => {
             let rest = args[1..].join(" ");
@@ -201,6 +213,7 @@ mod tests {
                 root: "/v".into(),
                 file: "/v/a/b.md".into(),
                 reading: false,
+                at: None,
             })
         );
         assert_eq!(
@@ -209,6 +222,7 @@ mod tests {
                 root: "/v".into(),
                 file: "/v/a/b.md".into(),
                 reading: true,
+                at: None,
             })
         );
         assert!(matches!(
@@ -217,6 +231,33 @@ mod tests {
         ));
         assert!(matches!(
             parse(&args(&["--root", "/v"]), nothing),
+            Cli::Error(_)
+        ));
+    }
+
+    #[test]
+    fn root_takes_the_heading_a_split_should_land_on() {
+        assert_eq!(
+            parse(
+                &args(&[
+                    "--root",
+                    "/v",
+                    "/v/a.md",
+                    "--reading",
+                    "--at",
+                    "AI releases"
+                ]),
+                nothing
+            ),
+            Cli::Tui(Launch::In {
+                root: "/v".into(),
+                file: "/v/a.md".into(),
+                reading: true,
+                at: Some("AI releases".to_string()),
+            })
+        );
+        assert!(matches!(
+            parse(&args(&["--root", "/v", "/v/a.md", "--at"]), nothing),
             Cli::Error(_)
         ));
     }
