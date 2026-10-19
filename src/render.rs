@@ -846,9 +846,19 @@ pub fn apply_folds(
     }
     let lines = std::mem::take(&mut r.lines);
     let mut out: Vec<PLine> = Vec::with_capacity(lines.len());
+    // whether the last row that came from a line came from a hidden one: the
+    // rows the renderer invents answer to no line — the rail-only row a `>`
+    // blank line draws inside a quote, an embed's rows — and until the next
+    // line on screen they belong to the section that went, so they go too.
+    // A blank row is left to the rule below that collapses blanks to one
+    let mut hiding = false;
     for mut line in lines {
+        if let Some(l) = line.src_line {
+            hiding = visible.is_hidden(l);
+        }
         match line.src_line {
             Some(l) if visible.is_hidden(l) => continue,
+            None if hiding && !line.cells.is_empty() => continue,
             Some(l) if folded.contains(&l) && !line.cells.is_empty() => {
                 // the marker only on the heading's first row: a heading that
                 // wrapped carries its line number on every row it took, and
@@ -5425,6 +5435,26 @@ mod tests {
         assert!(r.lines.iter().all(|l| l.image.is_none()));
         // the checkbox under the fold is not there to click
         assert!(r.lines.iter().all(|l| l.checkbox.is_none()));
+    }
+
+    #[test]
+    fn a_folded_quote_leaves_no_rail_rows_behind() {
+        // a `>` blank line between a quote's paragraphs draws a rail-only row
+        // that answers to no line; under a fold it must go with the rest, so
+        // the next heading follows the folded one the way it would with
+        // nothing between them
+        let md = "# T\n## One\n@who\n\n> a\n>\n> b\n>\n> c\n\n**Replies** r\n\n## Two\nx\n";
+        let r = folded(md, &[1], 40);
+        let t = texts(&r);
+        assert!(t.iter().all(|l| !l.contains('▎')), "{t:?}");
+        let one = r.lines.iter().position(|l| l.src_line == Some(1)).unwrap();
+        assert!(r.lines[one + 1].cells.is_empty(), "{t:?}");
+        assert_eq!(r.lines[one + 2].src_line, Some(12), "{t:?}");
+        // folding the whole page takes every quote in it
+        let all = folded(md, &[0], 40);
+        assert_eq!(texts(&all).len(), 1, "{:?}", texts(&all));
+        // the open page still draws the rails
+        assert!(texts(&folded(md, &[], 40)).iter().any(|l| l.trim() == "▎"));
     }
 
     #[test]
